@@ -13,12 +13,11 @@ Notero 不是一个简单的“AI 总结器”。它更关注真实课堂里的�
            <img width="1907" height="939" alt="bf66455947f357b25d10ceae19a51ea7" src="https://github.com/user-attachments/assets/03b3bb01-382b-435e-991d-412e1b6518ea" />
 
 
-- 知识导图截图：`docs/assets/screenshot-mindmap.png`
+- 知识导图截图：<img width="1708" height="897" alt="fdf06888ded9b835ac545f1bd54803e0" src="https://github.com/user-attachments/assets/ba9c5c2a-759a-4503-aece-508641743143" />
+
 - RAG 引用溯源截图：<img width="1766" height="943" alt="image" src="https://github.com/user-attachments/assets/e4b24063-0619-4269-aeb5-c43a2c7b6bf0" />
 
-- 演示视频：`docs/assets/demo.mp4`
-
-建议 README 发布时放一张首屏截图和一个 30-60 秒演示视频，效果会比单纯文字强很多。
+- 演示视频：
 
 ## Features
 
