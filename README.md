@@ -171,7 +171,7 @@ python -m pytest backend/tests/test_rag.py backend/tests/test_vector.py -q
 
 ## Open Source Notes
 
-This repository intentionally does not include:
+This repository does not include:
 
 - `.env` files or API keys
 - PostgreSQL data
