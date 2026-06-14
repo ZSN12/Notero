@@ -8,8 +8,6 @@ Notero 不是一个简单的“AI 总结器”。它更关注真实课堂里的�
 
 ## Demo
 
-你可以在发布前把截图和演示视频放到这里：
-
 - 产品截图：<img width="1888" height="902" alt="581ebbdef44a029d6996c69d3c6cf64a" src="https://github.com/user-attachments/assets/52083036-9c32-425d-81eb-294e9c90b48d" />
            <img width="1502" height="889" alt="4526f2e27ed31eb9410027732a316009" src="https://github.com/user-attachments/assets/0e98b918-4a02-4f91-bcae-fe5321e691f0" />
            <img width="1907" height="939" alt="bf66455947f357b25d10ceae19a51ea7" src="https://github.com/user-attachments/assets/03b3bb01-382b-435e-991d-412e1b6518ea" />
