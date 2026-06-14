@@ -204,6 +204,3 @@ Each developer should configure their own PostgreSQL database, AI API keys, and 
 
 欢迎提交 Issue 和 PR！请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md) 了解开发环境搭建、代码规范和提交流程。
 
-## License
-
-[MIT](./LICENSE)
