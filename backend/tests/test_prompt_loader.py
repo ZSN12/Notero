@@ -27,10 +27,10 @@ def test_load_prompt_parses_system_and_user_template():
 
 def test_load_prompt_rejects_missing_template_variable():
     load_prompt.cache_clear()
-    prompt = load_prompt("summary")
+    prompt = load_prompt("asr_correction")
 
     with pytest.raises(PromptTemplateError, match="missing template variable"):
-        prompt.render(course_title="操作系统")
+        prompt.render()
 
 
 def test_load_prompt_reports_missing_file():
@@ -61,10 +61,4 @@ def test_asr_prompt_does_not_use_summary_role_language():
     assert "不要总结" in combined
 
 
-def test_summary_prompt_is_separate_from_asr_prompt():
-    load_prompt.cache_clear()
-    summary = load_prompt("summary")
-    asr = load_prompt("asr_correction")
 
-    assert "课程内容总结助手" in summary.system
-    assert "课程内容总结助手" not in asr.system

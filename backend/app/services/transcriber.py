@@ -3,7 +3,7 @@ import tempfile
 import logging
 from typing import List, Optional
 import numpy as np
-from app.config import DASHSCOPE_API_KEY
+from app.config import DASHSCOPE_API_KEY, FUNASR_MODEL_DIR, FUNASR_MODEL_NAME, FUNASR_VAD_MODEL, FUNASR_PUNC_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +51,21 @@ class Transcriber:
             return
         if _FUNASR_AVAILABLE:
             try:
+                model_path = os.path.join(FUNASR_MODEL_DIR, FUNASR_MODEL_NAME)
+                vad_model_path = os.path.join(FUNASR_MODEL_DIR, FUNASR_VAD_MODEL)
+                punc_model_path = os.path.join(FUNASR_MODEL_DIR, FUNASR_PUNC_MODEL)
+                
+                model_name = model_path if os.path.exists(model_path) else FUNASR_MODEL_NAME
+                vad_model_name = vad_model_path if os.path.exists(vad_model_path) else FUNASR_VAD_MODEL
+                punc_model_name = punc_model_path if os.path.exists(punc_model_path) else FUNASR_PUNC_MODEL
+                
                 self._model = AutoModel(
-                    model="paraformer-zh",
-                    vad_model="fsmn-vad",
-                    punc_model="ct-punc",
+                    model=model_name,
+                    vad_model=vad_model_name,
+                    punc_model=punc_model_name,
                     disable_update=True,
                 )
-                logger.info("FunASR model loaded successfully")
+                logger.info(f"FunASR model loaded successfully from: {model_name}")
                 self._model_loaded = True
             except Exception as e:
                 logger.error(f"FunASR model load failed: {e}", exc_info=True)
@@ -69,11 +77,15 @@ class Transcriber:
             return
         if _FUNASR_AVAILABLE:
             try:
+                streaming_model_name = "paraformer-zh-streaming"
+                streaming_model_path = os.path.join(FUNASR_MODEL_DIR, streaming_model_name)
+                model_name = streaming_model_path if os.path.exists(streaming_model_path) else streaming_model_name
+                
                 self._streaming_model = AutoModel(
-                    model="paraformer-zh-streaming",
+                    model=model_name,
                     disable_update=True,
                 )
-                logger.info("FunASR streaming model loaded successfully")
+                logger.info(f"FunASR streaming model loaded successfully from: {model_name}")
                 self._streaming_model_loaded = True
             except Exception as e:
                 logger.error(f"FunASR streaming model load failed: {e}", exc_info=True)
@@ -338,6 +350,26 @@ class StreamingASRSession:
             self._accumulated_text += new_text
 
         return new_text, is_final
+
+    def flush(self) -> list[ASRSegment]:
+        """Force-commit accumulated partial text as final segments without ending the session.
+
+        Used when the user manually pauses recording: the streaming model may not
+        have detected enough silence to emit a final segment, so we promote the
+        buffered text and reset the accumulator so the next utterance starts fresh.
+        """
+        flushed: list[ASRSegment] = []
+        if self._accumulated_text:
+            flushed.append(
+                ASRSegment(
+                    text=self._accumulated_text,
+                    start_ms=int(self._session_start_ms),
+                    end_ms=int(self._total_ms),
+                )
+            )
+            self._accumulated_text = ""
+            self._session_start_ms = self._total_ms
+        return flushed
 
     def finalize(self) -> list[ASRSegment]:
         """End of stream: flush remaining buffer and return all final segments."""

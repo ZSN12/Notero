@@ -21,8 +21,7 @@ class QuizAgent(BaseAgent):
     temperature = 0.4
     max_tokens = 12000
 
-    # Number of questions per batch. The bank should be larger than a single
-    # attempt so later quizzes can sample different questions from it.
+    # Number of questions per batch.
     BATCH1_COUNT = 15
     BATCH2_COUNT = 15
     MIN_TOTAL_QUESTIONS = 30
@@ -131,22 +130,22 @@ class QuizAgent(BaseAgent):
 
             prompt_template = self.load_prompt_template()
 
-            # Batch 1: core concepts
+            # Batch 1: easy questions (基础概念)
             batch1 = self._call_batch(
                 prompt_template,
                 ctx,
                 count=self.BATCH1_COUNT,
-                focus="请重点关注课程的核心概念和主要知识点。",
+                focus="请生成基础概念题，侧重课程中最基础、最容易理解的知识点，难度为简单。",
             )
             self._update_progress(ctx, 0.45)
 
-            # Batch 2: details and difficult points (deduplicated)
+            # Batch 2: medium/hard questions (细节与难点)
             batch1_texts = [q["question"] for q in batch1]
             batch2 = self._call_batch(
                 prompt_template,
                 ctx,
                 count=self.BATCH2_COUNT,
-                focus="请重点关注课程的细节、难点和深入理解。",
+                focus="请生成进阶题，侧重课程的细节、难点和深入理解，难度为中等或较难。",
                 existing_questions=batch1_texts,
             )
             self._update_progress(ctx, 0.85)

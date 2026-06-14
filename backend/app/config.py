@@ -13,8 +13,8 @@ load_dotenv(BASE_DIR / ".env", override=True)
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError(
-        "DATABASE_URL is required. Nootbook now expects PostgreSQL, for example "
-        "postgresql://postgres:postgres@localhost:5432/nootbook"
+        "DATABASE_URL is required. Notero now expects PostgreSQL, for example "
+        "postgresql://postgres:postgres@localhost:5432/notero"
     )
 
 # File Storage
@@ -46,6 +46,12 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 # Security
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
+    _env = os.getenv("NOTERO_ENV", "development").lower()
+    if _env in ("production", "prod", "staging", "stg"):
+        raise RuntimeError(
+            "SECRET_KEY is required in production/staging. "
+            "Set a strong random string (e.g. openssl rand -hex 32)."
+        )
     import secrets as secrets_mod
     SECRET_KEY = secrets_mod.token_hex(32)
     print("[WARN] SECRET_KEY not set; using a random dev key. Do not use this in production!")
@@ -60,3 +66,9 @@ ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://local
 # Default Admin Account (for first-run initialization)
 ADMIN_DEFAULT_EMAIL = os.getenv("ADMIN_DEFAULT_EMAIL", "admin")
 ADMIN_DEFAULT_PASSWORD = os.getenv("ADMIN_DEFAULT_PASSWORD")  # Must be set in production
+
+# FunASR Model Configuration
+FUNASR_MODEL_DIR = os.getenv("FUNASR_MODEL_DIR", ROOT_DIR / "models")
+FUNASR_MODEL_NAME = os.getenv("FUNASR_MODEL_NAME", "paraformer-zh")
+FUNASR_VAD_MODEL = os.getenv("FUNASR_VAD_MODEL", "fsmn-vad")
+FUNASR_PUNC_MODEL = os.getenv("FUNASR_PUNC_MODEL", "ct-punc")

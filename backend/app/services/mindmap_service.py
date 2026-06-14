@@ -20,7 +20,8 @@ from app.core.task_runner import run_agent_task, wait_for_agent_threads
 from app.models import Note, Session, Notebook, User, Task
 from sqlalchemy.orm import Session as DBSessionType
 from app.services.vector_service import _compute_session_content_hash
-from app.services.state_service import set_running, set_ready, set_error
+from app.services.state_service import set_running, set_ready, set_error, get_state
+from app.services.note_utils import get_canonical_note_text
 
 
 logger = logging.getLogger(__name__)
@@ -87,60 +88,20 @@ def _clear_mind_map_from_vocabulary(note: Note):
 # ── Content extraction ──
 
 def _extract_content_for_prompt(note: Note) -> str:
-    """Extract all note content into a single text for the AI prompt."""
-    parts = []
+    """Extract all note content into a single text for the AI prompt.
 
-    # Layout blocks (structured)
-    layout_blocks = note.layout_blocks
-    if layout_blocks and isinstance(layout_blocks, list):
-        for block in layout_blocks:
-            if not isinstance(block, dict):
-                continue
-            btype = block.get("type", "")
-            content = block.get("content", "")
-            page = block.get("page")
-            title = block.get("title", "")
+    Uses the canonical note text (transcript + notes + PPT) so that user edits
+    and deletions are respected and the same source is used across agents.
+    """
+    text = get_canonical_note_text(note, include_ppt=True)
+    if text.strip():
+        return text.strip()
 
-            if btype == "transcript" and content:
-                parts.append(f"[转写] {content.strip()}")
-            elif btype == "note" and content:
-                parts.append(f"[笔记] {content.strip()}")
-            elif btype == "ppt":
-                ppt_text = ""
-                if title:
-                    ppt_text += title + " "
-                if content:
-                    ppt_text += content + " "
-                if ppt_text.strip():
-                    parts.append(f"[PPT第{page or '?'}页] {ppt_text.strip()}")
+    # Fallback: raw content if canonical extraction returned nothing.
+    if note.content:
+        return note.content.strip()
 
-    # Fallback: raw content
-    if not parts and note.content:
-        parts.append(note.content.strip())
-
-    # Transcript
-    if note.transcript and isinstance(note.transcript, list):
-        transcript_text = " ".join(
-            chunk.get("text", "")
-            for chunk in sorted(note.transcript, key=lambda x: x.get("chunk_index", 0))
-            if isinstance(chunk, dict)
-        ).strip()
-        if transcript_text and not any("[转写]" in p for p in parts):
-            parts.append(f"[转写] {transcript_text}")
-
-    # PPT images text
-    if note.ppt_images and isinstance(note.ppt_images, list):
-        for ppt_data in note.ppt_images:
-            if not isinstance(ppt_data, dict):
-                continue
-            for slide in ppt_data.get("slides", []):
-                if not isinstance(slide, dict):
-                    continue
-                slide_text = slide.get("text", "")
-                if slide_text:
-                    parts.append(f"[PPT第{slide.get('page', '?')}页] {slide_text.strip()}")
-
-    return "\n\n".join(parts)
+    return ""
 
 
 # ── Generation ──
@@ -346,11 +307,18 @@ def get_mind_map_status(session_id: str, user: User, db: DBSessionType) -> dict:
     mm_entry = _get_mind_map_from_vocabulary(note) if note else None
     active_task = _get_active_task(session_id, db)
 
+    def _build_mind_map(entry):
+        if not entry:
+            return None
+        data = entry.get("data") or {}
+        positions = entry.get("positions") or {}
+        return {**data, "positions": positions}
+
     if active_task:
         return {
             "session_id": session_id,
             "status": "generating",
-            "mind_map": mm_entry.get("data") if mm_entry else None,
+            "mind_map": _build_mind_map(mm_entry) if mm_entry else None,
             **_task_payload(active_task),
         }
 
@@ -371,25 +339,24 @@ def get_mind_map_status(session_id: str, user: User, db: DBSessionType) -> dict:
     is_stale = indexed_hash != current_hash
 
     if is_stale:
-        latest_task = _get_latest_task(session_id, db)
-        if latest_task and latest_task.status == "error":
-            return {
-                "session_id": session_id,
-                "status": "error",
-                "mind_map": mm_entry.get("data"),
-                **_task_payload(latest_task),
-            }
+        # Content changed since the mind map was generated. Keep the existing
+        # map visible and mark as stale so the user can choose to regenerate;
+        # don't treat an older failed attempt as a current error.
         return {
             "session_id": session_id,
             "status": "stale",
-            "mind_map": mm_entry.get("data"),
+            "mind_map": _build_mind_map(mm_entry),
             "error": None,
         }
+
+    current_state = get_state(db, session_id, "mindmap")
+    if current_state and current_state.status != "ready":
+        set_ready(db, session_id, "mindmap")
 
     return {
         "session_id": session_id,
         "status": "ready",
-        "mind_map": mm_entry.get("data"),
+        "mind_map": _build_mind_map(mm_entry),
         "generated_at": mm_entry.get("generated_at"),
         "error": None,
     }
@@ -409,3 +376,36 @@ def delete_mind_map(session_id: str, user: User, db: DBSessionType) -> dict:
         db.commit()
 
     return {"session_id": session_id, "status": "deleted"}
+
+
+# ── Save positions ──
+
+def save_mind_map_positions(
+    session_id: str, positions: dict, user: User, db: DBSessionType
+) -> dict:
+    """Save node positions for a mind map (merged into vocabulary entry)."""
+    session = _get_session_for_user(session_id, user, db)
+    if not session:
+        raise ValueError("Session not found or access denied")
+
+    note = db.query(Note).filter(Note.session_id == session_id).first()
+    if not note:
+        raise ValueError("No note found for session")
+
+    existing = note.vocabulary if isinstance(note.vocabulary, list) else []
+    next_items = []
+    mm_item = None
+    for item in existing:
+        if isinstance(item, dict) and item.get("kind") == "mind_map":
+            mm_item = dict(item)
+            mm_item["positions"] = positions
+            next_items.append(mm_item)
+        else:
+            next_items.append(item)
+
+    if not mm_item:
+        raise ValueError("No mind map found for session")
+
+    note.vocabulary = next_items
+    db.commit()
+    return {"session_id": session_id, "status": "saved"}

@@ -27,7 +27,30 @@ export function normalizeHtmlText(value?: string | null): string {
 
 export function transcriptTextFromRawTranscript(transcript?: unknown[] | null): string {
   if (!Array.isArray(transcript) || transcript.length === 0) return '';
+
+  // Use the latest authoritative entry as the single source of truth so that
+  // user edits and deletions are not mixed with older final/local entries.
+  let latest: Record<string, unknown> | undefined;
+  for (const entry of transcript) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const stage = (entry as Record<string, unknown>).correction_stage;
+    if (stage === 'final' || stage === 'user_edited') {
+      latest = entry as Record<string, unknown>;
+    }
+  }
+  if (latest) {
+    const text =
+      latest.display_text ??
+      latest.corrected_text ??
+      latest.text ??
+      latest.raw_text ??
+      '';
+    return String(text).trim();
+  }
+
+  // Fallback: join non-superseded entries in chunk order.
   return [...transcript]
+    .filter((e) => (e as Record<string, unknown>)?.correction_stage !== 'superseded')
     .sort((a, b) => Number((a as Record<string, unknown>)?.chunk_index || 0) - Number((b as Record<string, unknown>)?.chunk_index || 0))
     .map((chunk) => (chunk as Record<string, unknown>)?.text || '')
     .join(' ')

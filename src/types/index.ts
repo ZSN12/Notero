@@ -13,7 +13,6 @@ export interface Session {
   id: string;
   notebookId: string;
   title: string;
-  summary: string;
   keywords: string[];
   icon: string;
   date: string;
@@ -42,7 +41,6 @@ export interface DialogState {
 
 export interface SessionNoteBundle {
   title: string;
-  summary?: string;
   keywords?: string[];
   content?: string;
   transcript?: unknown[];

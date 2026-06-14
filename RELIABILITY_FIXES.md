@@ -127,7 +127,7 @@ python backend/scripts/health_check_audio_pipeline.py
 **集成到 cron / CI**：
 ```bash
 # 每天抽查一次
-0 9 * * * cd /opt/nootbook && python backend/scripts/health_check_audio_pipeline.py || alert
+0 9 * * * cd /opt/notero && python backend/scripts/health_check_audio_pipeline.py || alert
 ```
 
 后端已在 `audio.py` 关键路径输出结构化日志：

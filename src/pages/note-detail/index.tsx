@@ -9,10 +9,16 @@ import {
 import { useStore } from '@/store/useStore';
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { getProfile, getAvatarUrl } from '@/services/auth';
+import type { UserProfile } from '@/services/auth';
+import ContentBlocksView from '@/pages/note-detail/components/ContentBlocksView';
+import RagSourceCards from '@/pages/note-detail/components/RagSourceCards';
+
 import ThemeToggle from '@/components/ThemeToggle';
 import RichTextEditor from '@/components/RichTextEditor';
-import { API_BASE, deleteAudio, uploadPPT, insertPPTIntoTranscript, uploadAudio, getMediaUrl, fetchNotebookDetail, fetchSessionById, enableShare, disableShare, getShareStatus, rebuildSessionVectorIndex, getSessionMindMap, generateSessionMindMap, deleteSessionMindMap, MindMapStatus, MindMapNode, MindMapData, getSessionQuizzes, generateSessionQuiz, getQuizDetail, submitQuizAnswers, deleteQuiz, getQuizBankStatus, rebuildQuizBank, QuizListItem, QuizDetail, QuizQuestion, QuizBankStatus, runAllAgents, fetchNote } from '@/services/api';
-import { sanitizeHTML } from '@/lib/sanitize';
+import { AuthenticatedImage } from '@/components/AuthenticatedImage';
+import { preloadAuthenticatedImage } from '@/lib/imageCache';
+import { API_BASE, deleteAudio, uploadPPT, insertPPTIntoTranscript, uploadAudio, getMediaUrl, fetchNotebookDetail, fetchSessionById, enableShare, disableShare, getShareStatus, rebuildSessionVectorIndex, getSessionMindMap, generateSessionMindMap, deleteSessionMindMap, MindMapStatus, MindMapNode, MindMapData, getSessionQuizzes, generateSessionQuiz, getQuizDetail, submitQuizAnswers, deleteQuiz, getQuizBankStatus, rebuildQuizBank, QuizListItem, QuizDetail, QuizQuestion, QuizBankStatus, runAllAgents, fetchNote, type Slide } from '@/services/api';
+import { sanitizeHTML, escapeHtml } from '@/lib/sanitize';
 import { layoutFromNoteParts } from '@/lib/noteLayout';
 import type { Notebook, Session } from '@/types';
 
@@ -33,6 +39,149 @@ import { useProcessingStatus } from './hooks/useProcessingStatus';
 import MindMapCanvas, { computeDefaultExpanded } from './MindMapCanvas';
 import type { ContentBlock, RAGSource } from '@/services/api';
 
+interface EditableParagraphCardsProps {
+  transcriptText: string;
+  containerRef?: React.RefObject<HTMLDivElement>;
+  onUpdateDraft: (value: string) => void;
+  onCommitDraft: () => void;
+  onMarkUserEdited: () => void;
+  onSetActiveTextEl: (el: HTMLDivElement | null) => void;
+  onClearSentences: () => void;
+}
+
+function EditableParagraphCards({
+  transcriptText,
+  containerRef: externalContainerRef,
+  onUpdateDraft,
+  onCommitDraft,
+  onMarkUserEdited,
+  onSetActiveTextEl,
+  onClearSentences,
+}: EditableParagraphCardsProps) {
+  const internalContainerRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = externalContainerRef || internalContainerRef;
+  const activeIndexRef = useRef<number | null>(null);
+  const isComposingRef = useRef(false);
+  const blockRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
+  const setBlockRef = (index: number) => (el: HTMLDivElement | null) => {
+    if (el) blockRefs.current.set(index, el);
+    else blockRefs.current.delete(index);
+  };
+
+  // Recompute paragraphs only when the external transcriptText changes (commit/load/AI),
+  // never while the user is typing.
+  const paragraphs = useMemo(() => {
+    const rawParagraphs = transcriptText
+      .split('\n\n')
+      .map(p => p.trim())
+      .filter(p => p);
+    const CARD_MAX_CHARS = 320;
+    const splitLongParagraph = (text: string): string[] => {
+      if (text.length <= CARD_MAX_CHARS) return [text];
+      const sentences = text.split(/(?<=[。！？.!?])/);
+      const chunks: string[] = [];
+      let current = '';
+      for (const s of sentences) {
+        if (current && (current + s).replace(/\s/g, '').length > CARD_MAX_CHARS) {
+          chunks.push(current.trim());
+          current = s;
+        } else {
+          current += s;
+        }
+      }
+      if (current.trim()) chunks.push(current.trim());
+      return chunks.length ? chunks : [text];
+    };
+    const result: string[] = [];
+    for (const p of rawParagraphs) {
+      result.push(...splitLongParagraph(p));
+    }
+    return result;
+  }, [transcriptText]);
+
+  // Sync non-active blocks when paragraphs change from outside.
+  useEffect(() => {
+    paragraphs.forEach((para, index) => {
+      if (index === activeIndexRef.current) return;
+      const el = blockRefs.current.get(index);
+      if (!el) return;
+      const next = sanitizeHTML(para.trim()) as unknown as string;
+      if (el.innerHTML !== next) {
+        el.innerHTML = next;
+      }
+    });
+  }, [paragraphs]);
+
+  const readDraftFromDom = () => {
+    if (!containerRef.current) return transcriptText;
+    const parts: string[] = [];
+    for (const child of containerRef.current.children) {
+      const html = sanitizeHTML((child as HTMLElement).innerHTML) as unknown as string;
+      if (html && html !== '<br>' && html !== '<br />') {
+        parts.push(html);
+      }
+    }
+    return parts.join('\n\n');
+  };
+
+  const handleInput = () => {
+    onMarkUserEdited();
+    if (isComposingRef.current) return;
+    onUpdateDraft(readDraftFromDom());
+    onClearSentences();
+  };
+
+  const handleCompositionStart = () => {
+    isComposingRef.current = true;
+    onMarkUserEdited();
+  };
+
+  const handleCompositionEnd = () => {
+    isComposingRef.current = false;
+    handleInput();
+  };
+
+  const handleBlur = () => {
+    activeIndexRef.current = null;
+    onSetActiveTextEl(null);
+    onUpdateDraft(readDraftFromDom());
+    onCommitDraft();
+  };
+
+  return (
+    <div ref={containerRef} className="space-y-3">
+      {paragraphs.map((para, i) => (
+        <div
+          key={`para-${i}`}
+          ref={setBlockRef(i)}
+          contentEditable
+          suppressContentEditableWarning
+          dangerouslySetInnerHTML={{ __html: sanitizeHTML(para.trim()) as unknown as string }}
+          onPaste={(e) => {
+            e.preventDefault();
+            const text = e.clipboardData?.getData('text/plain') || '';
+            document.execCommand('insertText', false, text);
+          }}
+          onInput={handleInput}
+          onCompositionStart={handleCompositionStart}
+          onCompositionEnd={handleCompositionEnd}
+          onBlur={handleBlur}
+          onFocus={(e) => {
+            activeIndexRef.current = i;
+            onMarkUserEdited();
+            onSetActiveTextEl(e.currentTarget);
+          }}
+          onPointerDown={(e) => { e.currentTarget.focus(); }}
+          className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 text-sm text-slate-600 dark:text-slate-300 leading-7 whitespace-pre-wrap break-words shadow-sm outline-none transition-colors hover:border-slate-300 dark:hover:border-slate-600 focus:border-blue-300 dark:focus:border-blue-600 focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/30 select-text cursor-text"
+        />
+      ))}
+    </div>
+  );
+}
+
+export { EditableParagraphCards };
+
 const TEXT_COLORS = [
   { name: '红色', value: '#ef4444' },
   { name: '黄色', value: '#eab308' },
@@ -44,7 +193,8 @@ export default function NoteDetail() {
   const { id, sessionId } = useParams<{ id: string; sessionId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const { notebooks, sessions } = useStore();
+  const notebooks = useStore((s) => s.notebooks);
+  const sessions = useStore((s) => s.sessions);
 
   const notebook = notebooks.find((n) => n.id === id);
   const session = sessions.find((s) => s.id === sessionId);
@@ -52,7 +202,7 @@ export default function NoteDetail() {
   const [fallbackSession, setFallbackSession] = useState<Session | null>(null);
   const displayNotebook = notebook || fallbackNotebook;
   const displaySession = session || fallbackSession;
-  const [profile, setProfile] = useState<any>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
 
   useEffect(() => { getProfile().then(setProfile).catch(() => {}); }, []);
 
@@ -79,19 +229,19 @@ export default function NoteDetail() {
   }, [sessionId, session]);
 
   // ---- Hooks ----
-  const recording = useRecording(sessionId);
   const ppt = usePPT(sessionId);
   const notesHook = useNotes();
-  const transcript = useTranscript(sessionId, recording.state.isRecording, ppt.state.slides);
   const exportTools = useExport(displaySession, displayNotebook);
   const processing = useProcessingStatus(sessionId);
+  const recording = useRecording(sessionId, { onFinalize: processing.refresh });
+  const transcript = useTranscript(sessionId, recording.state.isRecording, ppt.state.slides);
 
   const share = useShare();
   const vectorIndex = useVectorIndex(sessionId, processing.processingStatus);
   const rag = useRAG();
   const mindMap = useMindMap(sessionId, processing.processingStatus);
   const quiz = useQuiz(sessionId, processing.processingStatus);
-  const audioUpload = useAudioUpload(sessionId);
+  const audioUpload = useAudioUpload(sessionId, { onFinalize: processing.refresh });
   const autoGen = useAutoGenerate(sessionId, processing.processingStatus);
   const restructure = useRestructure();
 
@@ -103,13 +253,23 @@ export default function NoteDetail() {
     if (!message) return false;
     return message.includes('等待统一 AI 整理') || message.includes('正在统一 AI 整理');
   };
-  const [showRawDebug, setShowRawDebug] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptEditRef = useRef<HTMLDivElement>(null);
   const noteEditRef = useRef<HTMLDivElement>(null);
   const activeTextElRef = useRef<HTMLDivElement | null>(null);
   const lastSentenceIdxRef = useRef(0);
   const paragraphContainerRef = useRef<HTMLDivElement>(null);
+
+  // Drag-to-insert PPT state
+  const [dragState, setDragState] = useState<{
+    slide: Slide | null;
+    pointer: { x: number; y: number } | null;
+    targetIndex: number | null;
+    targetPosition: 'before' | 'after' | null;
+  }>({ slide: null, pointer: null, targetIndex: null, targetPosition: null });
+  const longPressTimerRef = useRef<number | null>(null);
+  const dragStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const isDraggingRef = useRef(false);
 
   const getRagSourceTypeLabel = useCallback((source: RAGSource) => {
     const rawType = source.source_type === 'layout'
@@ -160,27 +320,7 @@ export default function NoteDetail() {
     }, 200);
   }, [getRagSourceTypeLabel, highlightTranscriptSnippet, navigate, ppt.actions, sessionId]);
 
-  const renderRagSourceCards = useCallback((closePanel?: () => void) => (
-    <div className="space-y-2">
-      {rag.state.ragSources.map((source, index) => (
-        <button
-          key={source.chunk_id}
-          onClick={() => handleRagSourceClick(source, closePanel)}
-          className="w-full text-left rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/30 px-3 py-2 hover:border-violet-200 hover:bg-violet-50/60 dark:hover:bg-violet-900/20 transition-colors"
-        >
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[10px] font-semibold text-violet-600 dark:text-violet-300 bg-violet-100 dark:bg-violet-900/40 rounded-full px-2 py-0.5">
-              [{index + 1}] {getRagSourceTypeLabel(source)}
-            </span>
-            <span className="text-[10px] text-slate-400 truncate">{source.session_title}</span>
-            {source.page != null && <span className="text-[10px] text-slate-400">第 {source.page} 页</span>}
-            <span className="ml-auto text-[10px] text-slate-400">{Math.round(source.score * 100)}%</span>
-          </div>
-          <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed line-clamp-2">{source.snippet}</p>
-        </button>
-      ))}
-    </div>
-  ), [getRagSourceTypeLabel, handleRagSourceClick, rag.state.ragSources]);
+
 
   useEffect(() => {
     const source = (location.state as { ragSource?: RAGSource } | null)?.ragSource;
@@ -201,6 +341,12 @@ export default function NoteDetail() {
     // We wait for it rather than calling fetchNote ourselves.
   }, [sessionId]);
 
+  // Provide the latest notes draft getter to useTranscript so debounced saves
+  // always use the most recent notes content, not a stale closure.
+  useEffect(() => {
+    transcript.actions.setGetCurrentNotes(() => notesHook.refs.notesDraftRef.current);
+  }, [transcript.actions.setGetCurrentNotes, notesHook.refs.notesDraftRef]);
+
   // React to loadedNote from useTranscript (single source of truth for history load)
   const loadedNote = transcript.state.loadedNote;
   useEffect(() => {
@@ -213,11 +359,14 @@ export default function NoteDetail() {
     if (loadedNote.content) {
       const hasTranscript = loadedNote.transcript && Array.isArray(loadedNote.transcript) && loadedNote.transcript.length > 0;
       const parsed = notesHook.actions.parseNotesFromContent(loadedNote.content, hasTranscript);
-      if (parsed.length > 0) notesHook.actions.setNotes(parsed);
+      if (parsed.length > 0) {
+        notesHook.actions.setNotes(parsed);
+        notesHook.actions.resetDrafts(parsed);
+      }
     }
     // Set AI correction status from loaded note
     if (loadedNote?.transcript && Array.isArray(loadedNote.transcript) && loadedNote.transcript.length > 0) {
-      const sorted = [...loadedNote.transcript].sort((a: any, b: any) => (a.chunk_index || 0) - (b.chunk_index || 0));
+      const sorted = [...loadedNote.transcript].sort((a: {chunk_index?: number}, b: {chunk_index?: number}) => (a.chunk_index || 0) - (b.chunk_index || 0));
       const lastEntry = sorted[sorted.length - 1];
       if (lastEntry?.is_ai_corrected) {
         setAiCorrectionStatus({ type: 'corrected' });
@@ -248,46 +397,124 @@ export default function NoteDetail() {
     setIsLoading(false);
   }, [loadedNote, sessionId, transcript.state.isLoaded]);
 
+  useEffect(() => {
+    const stage = processing.processingStatus?.stages?.transcript_finalize;
+    if (!stage) return;
+    if (stage.status === 'running') {
+      setAiCorrectionStatus({ type: 'processing', message: stage.message || '正在统一 AI 整理...' });
+    } else if (stage.status === 'ready') {
+      setAiCorrectionStatus({ type: 'corrected' });
+    } else if (stage.status === 'fallback') {
+      setAiCorrectionStatus({ type: 'local', message: stage.message || stage.error_message || undefined });
+    } else if (stage.status === 'error') {
+      setAiCorrectionStatus({ type: 'error', message: stage.error_message || 'AI 整理失败' });
+    }
+  }, [
+    processing.processingStatus?.stages?.transcript_finalize?.status,
+    processing.processingStatus?.stages?.transcript_finalize?.message,
+    processing.processingStatus?.stages?.transcript_finalize?.error_message,
+  ]);
+
   // ---- Auto-save ----
+  // Debounced silent save: triggered by any dirty draft, but waits for the user
+  // to stop typing before hitting the database. No prominent "saving" UI.
   useEffect(() => {
     if (!sessionId || !transcript.state.isLoaded || !transcript.state.hasLocalChanges || audioUpload.state.isUploadingAudio) return;
-    const timer = setTimeout(() => {
-      transcript.actions.saveContent(notesHook.state.notes);
-    }, 3000);
-    return () => clearTimeout(timer);
+    transcript.actions.scheduleSave(() => notesHook.refs.notesDraftRef.current, 300);
+    return () => {};
   }, [
     sessionId,
     transcript.state.isLoaded,
     transcript.state.hasLocalChanges,
-    transcript.state.transcriptText,
-    transcript.state.contentBlocks,
-    notesHook.state.notes,
-    transcript.actions.saveContent,
+    notesHook.refs.notesDraftRef,
+    transcript.actions.scheduleSave,
     audioUpload.state.isUploadingAudio,
   ]);
 
   const workflowStatus = useMemo(() => {
     const stages = processing.processingStatus?.stages;
     if (ppt.state.isUploadingPPT) return { tone: 'blue', text: '正在上传并解析 PPT' };
-    if (audioUpload.state.isUploadingAudio) return { tone: 'blue', text: audioUpload.state.audioUploadStatus || '正在上传录音并转写' };
     if (recording.state.isProcessing) return { tone: 'blue', text: '正在初始化录音设备' };
-    if (recording.state.isRecording && recording.state.isPaused) return { tone: 'amber', text: '录音已暂停' };
-    if (recording.state.isRecording) return { tone: 'red', text: `录音中 ${recording.state.currentTime}` };
-    if (stages?.upload_transcribe?.status === 'running') return { tone: 'blue', text: stages.upload_transcribe.message || '正在上传录音并转写' };
-    if (stages?.recording_finalize?.status === 'running') return { tone: 'blue', text: '正在整理录音...' };
-    if (stages?.transcript_finalize?.status === 'running') return { tone: 'violet', text: '正在统一 AI 整理...' };
-    if (stages?.vector_index?.status === 'running') return { tone: 'blue', text: '正在建立知识索引...' };
-    if (stages?.summary?.status === 'running' || stages?.mindmap?.status === 'running' || stages?.quiz_bank?.status === 'running') return { tone: 'blue', text: autoGen.state.autoGenerateToast || '正在生成学习资料...' };
-    if (stages?.transcript_finalize?.status === 'error') return { tone: 'red', text: stages.transcript_finalize.error_message || '整理失败' };
-    if (stages?.transcript_finalize?.status === 'fallback') return { tone: 'amber', text: '已使用本地整理稿' };
+
+    // Real-time recording: keep the timer visible, but overlay PPT matching when active.
+    if (recording.state.isRecording) {
+      if (recording.state.isPaused) return { tone: 'amber', text: '录音已暂停' };
+      if (transcript.state.isPptMatching) {
+        return { tone: 'blue', text: `录音中 ${recording.state.currentTime} · 正在匹配 PPT 页面` };
+      }
+      return { tone: 'red', text: `录音中 ${recording.state.currentTime}` };
+    }
+
+    // Audio file upload + transcribe (upload + recognition shown as one stage).
+    if (audioUpload.state.isUploadingAudio || stages?.upload_transcribe?.status === 'running') {
+      if (audioUpload.state.uploadPhase === 'finalizing') {
+        return { tone: 'violet', text: '正在整理转写稿' };
+      }
+      return { tone: 'blue', text: '正在处理录音文件', progress: audioUpload.state.audioQueueProgress };
+    }
+
+    // Recording wrap-up (concatenating audio chunks).
+    if (stages?.recording_finalize?.status === 'running') return { tone: 'blue', text: '正在保存录音...' };
+    if (stages?.recording_finalize?.status === 'error') return { tone: 'red', text: '录音保存失败' };
+    if (stages?.recording_finalize?.status === 'ready' && stages?.transcript_finalize?.status === 'idle') {
+      return { tone: 'amber', text: '录音已保存，点击 AI 整理生成学习资料' };
+    }
+
+    // Transcript AI finalization.
+    if (stages?.transcript_finalize?.status === 'running') {
+      return { tone: 'violet', text: '正在整理转写稿' };
+    }
+    if (stages?.transcript_finalize?.status === 'error') return { tone: 'red', text: stages.transcript_finalize.error_message || '整理转写稿失败' };
     if (stages?.upload_transcribe?.status === 'error') return { tone: 'red', text: '上传转写失败' };
-    if (stages?.recording_finalize?.status === 'error') return { tone: 'red', text: '录音整理失败' };
+
+    // Vector index (powers RAG Q&A).
+    if (stages?.vector_index?.status === 'running') return { tone: 'violet', text: '正在建立知识索引' };
     if (stages?.vector_index?.status === 'error') return { tone: 'red', text: '知识索引建立失败' };
-    if (stages?.mindmap?.status === 'error' || stages?.quiz_bank?.status === 'error') return { tone: 'red', text: '学习资料生成失败，可手动重试' };
-    if (autoGen.state.autoGenerateToast?.startsWith('正在')) return { tone: 'blue', text: autoGen.state.autoGenerateToast };
+
+    // Learning-material agents (mindmap / quiz). Summary is disabled.
+    const agentStages = [stages?.mindmap, stages?.quiz_bank];
+    const anyAgentRunning = agentStages.some(s => s?.status === 'running');
+    // A processing-status error is only shown as a failure when the drawer
+    // doesn't already have usable generated data (ready or stale).
+    const mindMapHasData = !!mindMap.state.mindMapStatus?.mind_map?.nodes?.length;
+    const quizHasData = (quiz.state.bankStatus?.question_count || 0) > 0;
+    const agentErrors: string[] = [];
+    const retryAgents: string[] = [];
+    if (stages?.mindmap?.status === 'error' && !mindMapHasData) {
+      agentErrors.push('导图');
+      retryAgents.push('mindmap');
+    }
+    if (stages?.quiz_bank?.status === 'error' && !quizHasData) {
+      agentErrors.push('题库');
+      retryAgents.push('quiz');
+    }
+    const allAgentsReady =
+      (!stages?.mindmap || ['ready', 'stale', 'fallback', 'idle'].includes(stages.mindmap.status)) &&
+      (!stages?.quiz_bank || ['ready', 'stale', 'fallback', 'idle'].includes(stages.quiz_bank.status));
+    const transcriptFinalized =
+      stages?.transcript_finalize?.status === 'ready' ||
+      stages?.transcript_finalize?.status === 'fallback';
+    const hasAgents = agentStages.some(s => s?.status !== 'idle');
+
+    if (anyAgentRunning) {
+      return { tone: 'blue', text: '正在生成导图和题库...' };
+    }
+    if (agentErrors.length > 0) {
+      return { tone: 'red', text: `${agentErrors.join('、')}整理失败，可手动重试`, retryAgents };
+    }
+    if (
+      hasAgents &&
+      allAgentsReady &&
+      transcriptFinalized &&
+      stages?.vector_index?.status === 'ready'
+    ) {
+      return { tone: 'green', text: '整理成功' };
+    }
+
+    if (stages?.transcript_finalize?.status === 'fallback') return { tone: 'amber', text: '已使用本地整理稿' };
+
     if (transcript.state.isPptMatching) return { tone: 'blue', text: '正在匹配 PPT 页面' };
-    if (transcript.state.saveStatus === 'saving') return { tone: 'blue', text: '正在自动保存' };
-    if (transcript.state.saveStatus === 'error') return { tone: 'red', text: transcript.state.saveError || '保存失败' };
+    if (transcript.state.saveStatus === 'error') return { tone: 'red', text: transcript.state.saveError || '保存失败', canRetrySave: true };
     if (ppt.state.uploadMessage) return { tone: 'green', text: ppt.state.uploadMessage };
     if (transcript.state.pptMatchMessage) return { tone: 'slate', text: transcript.state.pptMatchMessage };
     if (transcript.state.lastSaveTime) {
@@ -298,19 +525,21 @@ export default function NoteDetail() {
   }, [
     processing.processingStatus?.stages,
     audioUpload.state.isUploadingAudio,
-    audioUpload.state.audioUploadStatus,
+    audioUpload.state.audioQueueProgress,
+    audioUpload.state.uploadPhase,
     ppt.state.isUploadingPPT,
     ppt.state.uploadMessage,
     recording.state.currentTime,
     recording.state.isPaused,
     recording.state.isProcessing,
     recording.state.isRecording,
-    autoGen.state.autoGenerateToast,
     transcript.state.isPptMatching,
     transcript.state.lastSaveTime,
     transcript.state.pptMatchMessage,
     transcript.state.saveError,
     transcript.state.saveStatus,
+    mindMap.state.mindMapStatus?.mind_map?.nodes?.length,
+    quiz.state.bankStatus?.question_count,
   ]);
 
   const statusClass = {
@@ -321,7 +550,19 @@ export default function NoteDetail() {
     violet: 'bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-900/20 dark:text-violet-300 dark:border-violet-800',
     slate: 'bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-800/60 dark:text-slate-300 dark:border-slate-700',
   }[workflowStatus.tone];
+
   const isLiveTranscriptMode = recording.state.isRecording || recording.state.isProcessing || audioUpload.state.isUploadingAudio;
+
+  // Live transcript displayed in the main editor: confirmed finals + current
+  // partial interim result, so the user sees the continuous stream in one place.
+  const liveTranscriptHtml = useMemo(() => {
+    const confirmed = transcript.state.transcriptText || '';
+    const partial = transcript.state.partialText?.trim() || '';
+    if (!partial) return confirmed;
+    const partialHtml = `<p>${escapeHtml(partial)}</p>`;
+    return confirmed ? `${confirmed}${partialHtml}` : partialHtml;
+  }, [transcript.state.transcriptText, transcript.state.partialText]);
+
   // Has PPT blocks with image: show them even during recording
   const hasPptImageBlocks = transcript.state.contentBlocks.some(b => b.type === 'image');
 
@@ -337,15 +578,45 @@ export default function NoteDetail() {
     const selectedText = range.toString();
     if (!selectedText) return;
 
+    // Find the closest ancestor matching tag/predicate, stopping at the editor root.
+    const findAncestor = (node: Node, tag: string, predicate?: (e: HTMLElement) => boolean): HTMLElement | null => {
+      let cur: Node | null = node;
+      while (cur && cur !== el) {
+        if (cur.nodeType === Node.ELEMENT_NODE) {
+          const elem = cur as HTMLElement;
+          if (elem.tagName.toLowerCase() === tag && (!predicate || predicate(elem))) {
+            return elem;
+          }
+        }
+        cur = cur.parentNode;
+      }
+      return null;
+    };
+
+    // Replace a wrapper element with its children.
+    const unwrap = (wrapper: HTMLElement) => {
+      const parent = wrapper.parentNode;
+      if (!parent) return;
+      while (wrapper.firstChild) {
+        parent.insertBefore(wrapper.firstChild, wrapper);
+      }
+      parent.removeChild(wrapper);
+    };
+
     switch (formatType) {
       case 'bold': {
-        const wrapper = document.createElement('strong');
-        try {
-          range.surroundContents(wrapper);
-        } catch {
-          const fragment = range.extractContents();
-          wrapper.appendChild(fragment);
-          range.insertNode(wrapper);
+        const strong = findAncestor(range.startContainer, 'strong');
+        if (strong && strong.contains(range.endContainer)) {
+          unwrap(strong);
+        } else {
+          const wrapper = document.createElement('strong');
+          try {
+            range.surroundContents(wrapper);
+          } catch {
+            const fragment = range.extractContents();
+            wrapper.appendChild(fragment);
+            range.insertNode(wrapper);
+          }
         }
         break;
       }
@@ -357,13 +628,18 @@ export default function NoteDetail() {
       }
       case 'foreColor': {
         if (value) {
-          const span = document.createElement('span'); span.style.color = value;
-          try {
-            range.surroundContents(span);
-          } catch {
-            const fragment = range.extractContents();
-            span.appendChild(fragment);
-            range.insertNode(span);
+          const sameColorSpan = findAncestor(range.startContainer, 'span', (s) => s.style.color === value);
+          if (sameColorSpan && sameColorSpan.contains(range.endContainer)) {
+            unwrap(sameColorSpan);
+          } else {
+            const span = document.createElement('span'); span.style.color = value;
+            try {
+              range.surroundContents(span);
+            } catch {
+              const fragment = range.extractContents();
+              span.appendChild(fragment);
+              range.insertNode(span);
+            }
           }
         }
         break;
@@ -377,7 +653,159 @@ export default function NoteDetail() {
     return (content || '').trim().replace(/^#{1,6}\s*/, '');
   };
 
+  // ---- Drag-to-insert PPT ----
+  const clearDrag = useCallback(() => {
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    dragStartPosRef.current = null;
+    isDraggingRef.current = false;
+    setDragState({ slide: null, pointer: null, targetIndex: null, targetPosition: null });
+  }, []);
+
+  const detectDropTarget = useCallback((clientX: number, clientY: number): { index: number | null; position: 'before' | 'after' | null } => {
+    const el = document.elementFromPoint(clientX, clientY);
+    const blockEl = el?.closest('[data-block-index]') as HTMLElement | null;
+    if (!blockEl) return { index: null, position: null };
+    const index = Number(blockEl.getAttribute('data-block-index'));
+    if (Number.isNaN(index)) return { index: null, position: null };
+    const rect = blockEl.getBoundingClientRect();
+    const position: 'before' | 'after' = clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+    return { index, position };
+  }, []);
+
+  const insertSlideBlock = useCallback((slide: Slide, targetIndex: number, position: 'before' | 'after') => {
+    const blocks = transcript.state.contentBlocks;
+    const imageBlock: ContentBlock = {
+      type: 'image',
+      src: slide.image_path
+        ? `/api/media/slides/${sessionId}/${slide.image_path}`
+        : slide.image_base64 || '',
+      page: slide.page,
+      title: slide.title,
+    };
+
+    let insertIndex = position === 'before' ? targetIndex : targetIndex + 1;
+    if (position === 'after') {
+      // Place the image before the next text block so it groups correctly
+      while (insertIndex < blocks.length && blocks[insertIndex]?.type !== 'text') {
+        insertIndex++;
+      }
+    }
+
+    const newBlocks = [...blocks];
+    newBlocks.splice(insertIndex, 0, imageBlock);
+    transcript.actions.updateContentBlocks(newBlocks, true);
+  }, [sessionId, transcript.actions, transcript.state.contentBlocks]);
+
+  const updateDrag = useCallback((clientX: number, clientY: number) => {
+    const target = detectDropTarget(clientX, clientY);
+    setDragState((prev) => ({
+      ...prev,
+      pointer: { x: clientX, y: clientY },
+      targetIndex: target.index,
+      targetPosition: target.position,
+    }));
+  }, [detectDropTarget]);
+
+  const endDrag = useCallback(() => {
+    setDragState((prev) => {
+      if (prev.slide && prev.targetIndex !== null && prev.targetPosition) {
+        insertSlideBlock(prev.slide, prev.targetIndex, prev.targetPosition);
+      }
+      return prev;
+    });
+    clearDrag();
+  }, [clearDrag, insertSlideBlock]);
+
+  const startDrag = useCallback((slide: Slide, clientX: number, clientY: number) => {
+    isDraggingRef.current = true;
+    setDragState({
+      slide,
+      pointer: { x: clientX, y: clientY },
+      targetIndex: null,
+      targetPosition: null,
+    });
+  }, []);
+
+  const handleSlideMouseDown = useCallback((slide: Slide) => (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    startDrag(slide, e.clientX, e.clientY);
+  }, [startDrag]);
+
+  const handleSlideTouchStart = useCallback((slide: Slide) => (e: React.TouchEvent) => {
+    const touch = e.touches[0];
+    dragStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+    if (longPressTimerRef.current) window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
+      startDrag(slide, touch.clientX, touch.clientY);
+    }, 400);
+  }, [startDrag]);
+
+  const handleSlideTouchMove = useCallback((e: React.TouchEvent) => {
+    if (!longPressTimerRef.current || !dragStartPosRef.current) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - dragStartPosRef.current.x;
+    const dy = touch.clientY - dragStartPosRef.current.y;
+    if (Math.sqrt(dx * dx + dy * dy) > 10) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+      dragStartPosRef.current = null;
+    }
+  }, []);
+
+  const handleSlideTouchEnd = useCallback(() => {
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    dragStartPosRef.current = null;
+  }, []);
+
+  // Global move/up listeners while dragging
+  useEffect(() => {
+    if (!dragState.slide) return;
+    const handleMouseMove = (e: MouseEvent) => updateDrag(e.clientX, e.clientY);
+    const handleTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+      updateDrag(e.touches[0].clientX, e.touches[0].clientY);
+    };
+    const handleEnd = () => endDrag();
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleEnd);
+    window.addEventListener('touchmove', handleTouchMove, { passive: false });
+    window.addEventListener('touchend', handleEnd);
+    window.addEventListener('touchcancel', handleEnd);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleEnd);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleEnd);
+      window.removeEventListener('touchcancel', handleEnd);
+    };
+  }, [dragState.slide, updateDrag, endDrag]);
+
   // ---- Share ----
+
+
+  // Preload adjacent PPT slides so switching slides feels instant.
+  useEffect(() => {
+    if (!sessionId || ppt.state.slides.length === 0) return;
+    const nextIndex = ppt.state.activeSlideIndex + 1;
+    const prevIndex = ppt.state.activeSlideIndex - 1;
+    [nextIndex, prevIndex].forEach((idx) => {
+      if (idx < 0 || idx >= ppt.state.slides.length) return;
+      const slide = ppt.state.slides[idx];
+      const src = slide.image_path
+        ? getMediaUrl(`/api/media/slides/${sessionId}/${slide.image_path}`)
+        : slide.image_base64 || '';
+      if (src) preloadAuthenticatedImage(src);
+    });
+  }, [ppt.state.activeSlideIndex, ppt.state.slides, sessionId]);
 
 
   // ---- Vector Index ----
@@ -400,6 +828,19 @@ export default function NoteDetail() {
 
 
 
+
+
+
+
+
+
+  // ---- Navigation ----
+  const handleBack = useCallback(async () => {
+    if (sessionId && transcript.state.hasLocalChanges) {
+      await transcript.actions.saveContent(notesHook.refs.notesDraftRef.current, false);
+    }
+    navigate(`/subject/${id}`);
+  }, [sessionId, transcript.state.hasLocalChanges, transcript.actions.saveContent, notesHook.refs.notesDraftRef, navigate, id]);
 
   // ---- PPT ----
   const handlePPTClick = () => fileInputRef.current?.click();
@@ -430,7 +871,7 @@ export default function NoteDetail() {
       <nav className="flex-shrink-0 bg-white/70 dark:bg-slate-900/70 backdrop-blur-md border-b border-slate-200/60 dark:border-slate-800/60">
         <div className="px-3 py-2 flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
-            <button onClick={() => navigate(`/subject/${id}`)} className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+            <button onClick={handleBack} className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
               <ArrowLeft className="w-5 h-5" />
             </button>
             <div className="min-w-0">
@@ -542,6 +983,7 @@ export default function NoteDetail() {
                     clearStreamingTranscriptChunks: transcript.actions.clearStreamingTranscriptChunks,
                     updateTranscriptText: transcript.actions.updateTranscriptText,
                     appendTranscriptText: transcript.actions.appendTranscriptText,
+                    receiveAiText: transcript.actions.receiveAiText,
                     clearStreamingTranscriptChunksFinal: transcript.actions.clearStreamingTranscriptChunks,
                     clearContentBlocks: transcript.actions.clearContentBlocks,
                     scrollToBottom: () => {
@@ -556,8 +998,8 @@ export default function NoteDetail() {
               {audioUpload.state.isUploadingAudio ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Mic className="w-3.5 h-3.5" />}
               {audioUpload.state.isUploadingAudio
                 ? (audioUpload.state.audioQueueProgress
-                  ? `上传中 ${audioUpload.state.audioQueueProgress.current}/${audioUpload.state.audioQueueProgress.total}`
-                  : '上传中...')
+                  ? `处理中 ${audioUpload.state.audioQueueProgress.current}/${audioUpload.state.audioQueueProgress.total}`
+                  : '处理中...')
                 : '上传录音'}
             </button>
           </div>
@@ -623,23 +1065,21 @@ export default function NoteDetail() {
 
             {recording.state.isRecording && (
               <button onClick={() => {
-                setAiCorrectionStatus({ type: 'processing', message: '正在统一 AI 整理...' });
                 recording.actions.stopRecording(transcript.actions.receiveAiText).then((result) => {
-                  const note = result?.note;
-                  if (note) {
-                    const sorted = [...note.transcript].sort((a: any, b: any) => (a.chunk_index || 0) - (b.chunk_index || 0));
-                    const lastEntry = sorted[sorted.length - 1];
-                    if (lastEntry?.is_ai_corrected) {
-                      setAiCorrectionStatus({ type: 'corrected' });
-                    } else if (lastEntry?.correction_error) {
-                      setAiCorrectionStatus({ type: 'error', message: lastEntry.correction_error });
-                    } else {
-                      setAiCorrectionStatus({ type: 'local' });
-                    }
-                  } else {
-                    setAiCorrectionStatus({ type: 'local' });
+                  if (result?.status === 'finished') {
+                    processing.refresh();
+                    toast.info('录音已保存。请稍等片刻，然后点击「AI 整理」生成学习材料。');
+                    return;
                   }
-                  // Backend auto-triggers vector index and agents via processing status
+                  if (result?.status === 'no_audio' || result?.status === 'no_chunks') {
+                    toast.warning('未检测到录音内容');
+                    return;
+                  }
+                  if (result?.status === 'error') {
+                    toast.error('录音保存失败，请稍后重试');
+                    return;
+                  }
+                  processing.refresh();
                 });
               }}
                 className="flex items-center gap-1 px-3 py-2 text-sm font-medium rounded-md bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors min-h-[44px]">
@@ -670,31 +1110,49 @@ export default function NoteDetail() {
         </div>
       </div>
 
-      {autoGen.state.autoGenerateToast && (
-        <div className={`flex-shrink-0 mx-4 mt-3 px-3 py-2 border rounded-xl flex items-center gap-2 text-xs ${autoGen.state.autoGenerateToast.startsWith('正在') ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/20 dark:text-blue-300 dark:border-blue-800' : autoGen.state.autoGenerateToast.includes('失败') ? 'bg-red-50 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800' : 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'}`}>
-          {autoGen.state.autoGenerateToast.startsWith('正在') ? <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" /> : autoGen.state.autoGenerateToast.includes('失败') ? <AlertCircle className="w-3.5 h-3.5 text-red-500 flex-shrink-0" /> : <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />}
+      {autoGen.state.autoGenerateToast && !autoGen.state.autoGenerateToast.startsWith('正在') && !autoGen.state.autoGenerateToast.includes('失败') && (
+        <div className="flex-shrink-0 mx-4 mt-3 px-3 py-2 border rounded-xl flex items-center gap-2 text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800">
+          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
           <span className="flex-1">{autoGen.state.autoGenerateToast}</span>
         </div>
       )}
 
       <div className={`flex-shrink-0 mx-4 mt-3 px-3 py-2 border rounded-xl flex items-center gap-2 text-xs ${statusClass}`}>
-        {(ppt.state.isUploadingPPT || audioUpload.state.isUploadingAudio || recording.state.isProcessing || transcript.state.isPptMatching || transcript.state.saveStatus === 'saving' || processing.processingStatus?.overall_status === 'running') && (
+        {(ppt.state.isUploadingPPT || audioUpload.state.isUploadingAudio || recording.state.isProcessing || transcript.state.isPptMatching || processing.processingStatus?.overall_status === 'running') && (
           <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
         )}
         <span className="flex-1">{workflowStatus.text}</span>
-        <div className="flex items-center gap-1.5 ml-2" title="转写完成后自动生成学习资料">
-          <input
-            type="checkbox"
-            id="auto-generate"
-            checked={autoGen.state.autoGenerateStudyMaterials}
-            onChange={(e) => autoGen.actions.setAutoGenerateStudyMaterials(e.target.checked)}
-            className="w-3.5 h-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
-          />
-          <label htmlFor="auto-generate" className="cursor-pointer select-none text-[10px] opacity-80 hover:opacity-100">自动生成</label>
-        </div>
+        {(workflowStatus as any).progress && (workflowStatus as any).progress.total > 1 && (
+          <div className="flex items-center gap-2 w-28 sm:w-36">
+            <div className="flex-1 h-1.5 bg-current opacity-20 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-current rounded-full transition-all duration-300"
+                style={{ width: `${(((workflowStatus as any).progress.current / (workflowStatus as any).progress.total) * 100).toFixed(1)}%` }}
+              />
+            </div>
+            <span className="text-xs tabular-nums opacity-90">{(workflowStatus as any).progress.current}/{(workflowStatus as any).progress.total}</span>
+          </div>
+        )}
+        {(workflowStatus as any).retryAgents && (workflowStatus as any).retryAgents.length > 0 && (
+          <button
+            onClick={() => autoGen.actions.handleTriggerAgents(sessionId, (workflowStatus as any).retryAgents)}
+            className="px-2 py-1 rounded-md bg-white/70 dark:bg-slate-900/60 hover:bg-white text-xs font-medium"
+          >
+            {(workflowStatus as any).retryAgents.length === 1
+              ? ((workflowStatus as any).retryAgents[0] === 'mindmap'
+                  ? '重新生成导图'
+                  : (workflowStatus as any).retryAgents[0] === 'quiz'
+                    ? '重新生成题库'
+                    : `重新生成${(workflowStatus as any).retryAgents[0]}`)
+              : '重新生成'}
+          </button>
+        )}
         {transcript.state.saveStatus === 'error' && (
           <button
-            onClick={() => transcript.actions.saveContent(notesHook.state.notes, true)}
+            onClick={() => {
+              notesHook.actions.commitNotesDraft();
+              transcript.actions.saveContent(notesHook.refs.notesDraftRef.current, true);
+            }}
             className="px-2 py-1 rounded-md bg-white/70 dark:bg-slate-900/60 hover:bg-white text-xs font-medium"
           >
             重试保存
@@ -728,10 +1186,10 @@ export default function NoteDetail() {
         </div>
       )}
 
-      {transcript.state.isAiRestructuring && recording.state.isRecording && (
+      {transcript.state.isAiRestructuring && recording.state.isRecording && ppt.state.slides.length > 0 && (
         <div className="flex-shrink-0 mx-4 mt-2 flex items-center gap-2 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-lg text-xs text-blue-600 dark:text-blue-400">
           <Loader2 className="w-3 h-3 animate-spin" />
-          AI 正在整理文本...
+          正在匹配 PPT 页面...
         </div>
       )}
 
@@ -760,7 +1218,7 @@ export default function NoteDetail() {
 
         {/* ---- Left (1/3): PPT on top, Notes on bottom ---- */}
         {showLeftPanel && <div onClick={() => setShowLeftPanel(false)} className="lg:hidden fixed inset-0 z-40 bg-black/50 backdrop-blur-sm" />}
-        <aside className={`${showLeftPanel ? 'fixed inset-y-0 left-0 z-50 w-80' : 'hidden'} lg:relative lg:flex lg:w-[400px] xl:w-[440px] flex-shrink-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm border-r border-slate-200/60 dark:border-slate-700/60 flex flex-col overflow-hidden`}>
+        <aside className={`${showLeftPanel ? 'fixed inset-y-0 left-0 z-50 w-80' : 'hidden'} lg:relative lg:flex lg:w-1/3 flex-shrink-0 bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm border-r border-slate-200/60 dark:border-slate-700/60 flex flex-col overflow-hidden`}>
           <div className="lg:hidden flex-shrink-0 px-3 py-2 flex items-center justify-between border-b border-slate-200/60 dark:border-slate-700/60">
             <div className="flex items-center gap-1.5">
               <FileText className="w-3.5 h-3.5 text-blue-500" />
@@ -798,20 +1256,31 @@ export default function NoteDetail() {
             {/* PPT slide image */}
             <div className="px-3 pb-3">
               {ppt.state.slides.length > 0 && ppt.state.slides[ppt.state.activeSlideIndex] ? (
-                <div className="rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
-                  {(() => {
-                    const s = ppt.state.slides[ppt.state.activeSlideIndex];
-                    const src = s.image_path
-                      ? getMediaUrl(`/api/media/slides/${sessionId}/${s.image_path}`)
-                      : s.image_base64 || '';
-                    return src ? (
-                      <img src={src} alt={`Slide ${s.page}`}
-                        className="w-full object-cover"
-                        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-                    ) : (
-                      <div className="flex items-center justify-center h-28 text-xs text-slate-400">无预览图</div>
-                    );
-                  })()}
+                <div className="space-y-1.5">
+                  <div
+                    className={`rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 select-none ${dragState.slide ? 'opacity-60' : 'hover:ring-2 hover:ring-blue-200 cursor-grab active:cursor-grabbing'}`}
+                    onMouseDown={handleSlideMouseDown(ppt.state.slides[ppt.state.activeSlideIndex])}
+                    onTouchStart={handleSlideTouchStart(ppt.state.slides[ppt.state.activeSlideIndex])}
+                    onTouchMove={handleSlideTouchMove}
+                    onTouchEnd={handleSlideTouchEnd}
+                  >
+                    {(() => {
+                      const s = ppt.state.slides[ppt.state.activeSlideIndex];
+                      const src = s.image_path
+                        ? getMediaUrl(`/api/media/slides/${sessionId}/${s.image_path}`)
+                        : s.image_base64 || '';
+                      const fallback = <div className="flex items-center justify-center h-28 text-xs text-slate-400">无预览图</div>;
+                      return src ? (
+                        <AuthenticatedImage
+                          src={src}
+                          alt={`Slide ${s.page}`}
+                          className="w-full object-cover pointer-events-none"
+                          fallback={fallback}
+                        />
+                      ) : fallback;
+                    })()}
+                  </div>
+                  <p className="text-[10px] text-slate-400 text-center">长按或拖拽到右侧段落插入</p>
                 </div>
               ) : (
                 <div className="flex items-center justify-center h-28 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-dashed border-slate-300 dark:border-slate-600">
@@ -833,10 +1302,15 @@ export default function NoteDetail() {
                 value={notesHook.state.notes.length > 0 ? notesHook.state.notes[0].content : ''}
                 onChange={(text) => {
                   transcript.actions.markUserEdited();
-                  notesHook.actions.updateNote(0, text);
+                  notesHook.actions.updateNoteDraft(0, text);
+                  transcript.actions.scheduleSave(() => notesHook.refs.notesDraftRef.current, 300);
                 }}
                 onFocus={() => {
                   activeTextElRef.current = noteEditRef.current;
+                }}
+                onBlur={() => {
+                  notesHook.actions.commitNotesDraft();
+                  transcript.actions.saveContent(notesHook.refs.notesDraftRef.current, false);
                 }}
                 placeholder="在此记录随堂思考与重难点..."
                 className="rich-text-editor w-full p-2.5 text-sm text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-200 leading-relaxed"
@@ -880,23 +1354,33 @@ export default function NoteDetail() {
                 )}
               </h2>
               <div className="flex items-center gap-2">
-                {transcript.state.transcriptText && !recording.state.isRecording && (
+                {transcript.state.transcriptText && !recording.state.isRecording && !audioUpload.state.isUploadingAudio && !recording.state.isProcessing && (
                   <button
-                    onClick={() => restructure.actions.handleRestructure(sessionId, transcript.actions.receiveAiText, setAiCorrectionStatus)}
-                    disabled={restructure.state.isRestructuring}
-                    className="px-2 py-1 text-[10px] font-medium rounded bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 dark:hover:bg-blue-900/30 disabled:opacity-50 flex items-center gap-1 transition-colors"
-                    title="重新调用 DeepSeek 整理转写文本"
+                    onClick={async () => {
+                      const ok = await restructure.actions.handleRestructure(sessionId, transcript.actions.receiveAiText, setAiCorrectionStatus, autoGen.state.autoGenerateStudyMaterials);
+                      if (!ok || !sessionId || ppt.state.slides.length === 0) return;
+                      // Re-match PPT slides after AI finalization produces clean text.
+                      try {
+                        const result = await insertPPTIntoTranscript(sessionId);
+                        if (result.blocks?.some((b) => b.type === 'image')) {
+                          transcript.actions.updateContentBlocks(result.blocks, false, true);
+                        }
+                      } catch { /* ignore */ }
+                    }}
+                    disabled={restructure.state.isRestructuring || processing.processingStatus?.overall_status === 'running'}
+                    className={`px-2 py-1 text-[10px] font-medium rounded flex items-center gap-1 transition-colors disabled:opacity-50 ${
+                      processing.processingStatus?.stages?.transcript_finalize?.status === 'ready' ||
+                      processing.processingStatus?.stages?.transcript_finalize?.status === 'fallback'
+                        ? 'bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-400 dark:hover:bg-blue-900/30'
+                        : 'bg-blue-600 text-white hover:bg-blue-700 shadow-sm'
+                    }`}
+                    title="调用 DeepSeek 整理转写文本并生成学习资料"
                   >
                     {restructure.state.isRestructuring ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-                    重新 AI 整理
-                  </button>
-                )}
-                {transcript.state.transcriptText && (
-                  <button
-                    onClick={() => setShowRawDebug(v => !v)}
-                    className="px-2 py-1 text-[10px] font-medium rounded bg-slate-50 text-slate-500 hover:bg-slate-100 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 transition-colors"
-                  >
-                    {showRawDebug ? '隐藏调试' : '调试'}
+                    {processing.processingStatus?.stages?.transcript_finalize?.status === 'ready' ||
+                    processing.processingStatus?.stages?.transcript_finalize?.status === 'fallback'
+                      ? '重新 AI 整理'
+                      : 'AI 整理'}
                   </button>
                 )}
                 {transcript.state.lastSaveTime && <span className="text-xs text-slate-400">已保存 {new Date(transcript.state.lastSaveTime).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>}
@@ -954,296 +1438,38 @@ export default function NoteDetail() {
           {/* 转写内容滚动区域 */}
           <div className="flex-1 overflow-y-auto px-4 md:px-6 pb-4">
 
-            {/* 1) PPT+text layout blocks — show whenever we have image blocks, even while recording */}
-            {hasPptImageBlocks ? (
+            {isLiveTranscriptMode ? (
+              /* 1) Live streaming — always show the editable transcript area first,
+                 even when PPT blocks already exist. Otherwise the user can't see
+                 or edit the incoming text while recording. */
               <div className="space-y-3">
-                {(() => {
-                  const blocks = transcript.state.contentBlocks;
-                  const combined: { type: 'combined' | 'text'; imageBlock?: ContentBlock; textBlock?: ContentBlock }[] = [];
-                  let i = 0;
-                  while (i < blocks.length) {
-                    if (blocks[i].type === 'image' && i + 1 < blocks.length && blocks[i + 1].type === 'text') {
-                      combined.push({ type: 'combined', imageBlock: blocks[i], textBlock: blocks[i + 1] });
-                      i += 2;
-                    } else if (blocks[i].type === 'text') {
-                      combined.push({ type: 'text', textBlock: blocks[i] });
-                      i++;
-                    } else {
-                      i++;
-                    }
-                  }
-                  return combined.map((group, idx) => {
-                    if (group.type === 'combined' && group.imageBlock && group.textBlock) {
-                      const imageBlock = group.imageBlock;
-                      const textBlock = group.textBlock;
-                      return (
-                        <div key={idx} className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow-sm">
-                        <div
-                          className="flex items-center gap-3 p-3 bg-slate-50/50 dark:bg-slate-800/50 border-b border-slate-100 dark:border-slate-700/50 cursor-pointer hover:bg-slate-100/50 dark:hover:bg-slate-700/50 transition-colors"
-                          onClick={() => {
-                            const pageIdx = (imageBlock.page || 1) - 1;
-                            if (pageIdx >= 0 && pageIdx < ppt.state.slides.length) {
-                              ppt.actions.setActiveSlideIndex(pageIdx);
-                              if (window.innerWidth < 1024) {
-                                setShowLeftPanel(true);
-                              }
-                            }
-                          }}
-                        >
-                          <img
-                            src={imageBlock.src?.startsWith('data:') ? imageBlock.src : imageBlock.src ? getMediaUrl(imageBlock.src) : ''}
-                            alt={`PPT 第 ${imageBlock.page} 页`}
-                            className="w-16 h-12 object-cover rounded-md border border-slate-100 dark:border-slate-600 flex-shrink-0 hover:scale-105 transition-transform"
-                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                          />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <FileText className="w-3.5 h-3.5 text-blue-500 flex-shrink-0" />
-                              <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 truncate">
-                                PPT 第 {imageBlock.page} 页 · {imageBlock.title}
-                              </span>
-                            </div>
-                            <p className="text-xs text-slate-400 mt-0.5">点击查看大图</p>
-                          </div>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const blocks = transcript.state.contentBlocks;
-                              const imageBlockIndex = blocks.indexOf(imageBlock);
-                              const nextBlocks = blocks.filter((_, blockIndex) => blockIndex !== imageBlockIndex);
-                              transcript.actions.updateContentBlocks(nextBlocks);
-                            }}
-                            className="min-w-[32px] min-h-[32px] rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center justify-center transition-colors"
-                            title="移除此 PPT 插入"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                          <ChevronUp className="w-4 h-4 text-slate-400 rotate-90 flex-shrink-0" />
-                        </div>
-                          <div
-                            contentEditable
-                            suppressContentEditableWarning
-                            onPointerDown={(e) => { e.currentTarget.focus(); }}
-                            onBlur={(e) => {
-                              const blocks = transcript.state.contentBlocks;
-                              const newBlocks = [...blocks];
-                              const textBlockIndex = blocks.indexOf(textBlock);
-                              if (textBlockIndex !== -1) {
-                                const html = e.currentTarget.innerHTML;
-                                const normalized = (html === '<br>' || html === '<br />') ? '' : html;
-                                newBlocks[textBlockIndex] = { ...newBlocks[textBlockIndex], content: normalized };
-                                transcript.actions.updateContentBlocks(newBlocks);
-                              }
-                            }}
-                            className="p-4 text-sm text-slate-600 dark:text-slate-300 leading-relaxed whitespace-pre-line focus:outline-none min-h-[60px] select-text cursor-text"
-                            dangerouslySetInnerHTML={{ __html: sanitizeHTML(textBlock.content || '') as unknown as string }}
-                          />
-                        </div>
-                      );
-                    } else if (group.type === 'text' && group.textBlock) {
-                      const textBlock = group.textBlock;
-                      return (
-                        <div
-                          key={idx}
-                          contentEditable
-                          suppressContentEditableWarning
-                          onPointerDown={(e) => { e.currentTarget.focus(); }}
-                          onBlur={(e) => {
-                            const blocks = transcript.state.contentBlocks;
-                            const newBlocks = [...blocks];
-                            const textBlockIndex = blocks.indexOf(textBlock);
-                            if (textBlockIndex !== -1) {
-                              const html = e.currentTarget.innerHTML;
-                              const normalized = (html === '<br>' || html === '<br />') ? '' : html;
-                              newBlocks[textBlockIndex] = { ...newBlocks[textBlockIndex], content: normalized };
-                              transcript.actions.updateContentBlocks(newBlocks);
-                            }
-                          }}
-                          className="w-full p-4 text-sm text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-200 leading-relaxed whitespace-pre-line min-h-[60px] select-text cursor-text"
-                          dangerouslySetInnerHTML={{ __html: sanitizeHTML(textBlock.content || '') as unknown as string }}
-                        />
-                      );
-                    }
-                    return null;
-                  });
-                })()}
-              </div>
-            ) : !isLiveTranscriptMode && transcript.state.contentBlocks.length > 0 && transcript.state.contentBlocks.some(b => b.type === 'image') ? (
-              /* 1b) Fallback: post-recording image blocks that weren't caught by hasPptImageBlocks */
-              <div className="space-y-3">
-                {(() => {
-                  const blocks = transcript.state.contentBlocks;
-                  const hasImageBlocks = blocks.some((block) => block.type === 'image');
-                  if (!hasImageBlocks) {
-                    const textBlocks = blocks.filter((block) => block.type === 'text' && (block.content || '').trim());
-                    return (
-                      <div className="max-w-none px-1 py-1 text-sm text-slate-600 dark:text-slate-300 leading-8">
-                        {textBlocks.map((textBlock, idx) => {
-                          const blockIndex = blocks.indexOf(textBlock);
-                          const displayContent = normalizeTranscriptBlockForDisplay(textBlock.content);
-                          const isHeading = /^(课堂笔记|有名管道|无名管道|命名管道|进程|线程|通信|IPC|FIFO|Named Pipe)/i.test(displayContent) && displayContent.length <= 80;
-                          return (
-                            <div
-                              key={idx}
-                              contentEditable
-                              suppressContentEditableWarning
-                              onFocus={(e) => { activeTextElRef.current = e.currentTarget; }}
-                          onPointerDown={(e) => { e.currentTarget.focus(); }}
-                              onBlur={(e) => {
-                                const newBlocks = [...blocks];
-                                const html = e.currentTarget.innerHTML;
-                                const normalized = (html === '<br>' || html === '<br />') ? '' : html;
-                                if (blockIndex !== -1) {
-                                  newBlocks[blockIndex] = { ...newBlocks[blockIndex], content: normalized };
-                                  transcript.actions.updateContentBlocks(newBlocks);
-                                }
-                              }}
-                              className={
-                                isHeading
-                                  ? 'mt-6 first:mt-0 mb-2 text-sm font-semibold text-slate-800 dark:text-slate-100 focus:outline-none select-text cursor-text'
-                                  : 'mb-4 rounded-md border-l-2 border-transparent pl-3 pr-2 py-1 text-slate-600 dark:text-slate-300 whitespace-pre-wrap break-words hover:bg-slate-50/70 dark:hover:bg-slate-800/50 focus:bg-blue-50/50 dark:focus:bg-blue-900/10 focus:border-blue-300 focus:outline-none select-text cursor-text transition-colors'
-                              }
-                              dangerouslySetInnerHTML={{ __html: sanitizeHTML(displayContent) as unknown as string }}
-                            />
-                          );
-                        })}
-                      </div>
-                    );
-                  }
-                  const combined: { type: 'combined' | 'text'; imageBlock?: ContentBlock; textBlock?: ContentBlock }[] = [];
-                  let i = 0;
-                  while (i < blocks.length) {
-                    if (blocks[i].type === 'image' && i + 1 < blocks.length && blocks[i + 1].type === 'text') {
-                      combined.push({ type: 'combined', imageBlock: blocks[i], textBlock: blocks[i + 1] });
-                      i += 2;
-                    } else if (blocks[i].type === 'text') {
-                      combined.push({ type: 'text', textBlock: blocks[i] });
-                      i++;
-                    } else {
-                      i++;
-                    }
-                  }
-                  return combined.map((group, idx) => {
-                    if (group.type === 'combined' && group.imageBlock && group.textBlock) {
-                      const imageBlock = group.imageBlock;
-                      const textBlock = group.textBlock;
-                      return (
-                        <div key={idx} className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow-sm">
-                        <div
-                          className="flex items-center gap-3 p-3 bg-slate-50/50 dark:bg-slate-800/50 border-b border-slate-100 dark:border-slate-700/50 cursor-pointer hover:bg-slate-100/50 dark:hover:bg-slate-700/50 transition-colors"
-                          onClick={() => {
-                            const pageIdx = (imageBlock.page || 1) - 1;
-                            if (pageIdx >= 0 && pageIdx < ppt.state.slides.length) {
-                              ppt.actions.setActiveSlideIndex(pageIdx);
-                              // 只在移动端（平板/手机）才需要点击后显示左侧面板
-                              if (window.innerWidth < 1024) {
-                                setShowLeftPanel(true);
-                              }
-                            }
-                          }}
-                        >
-                          <img
-                            src={imageBlock.src?.startsWith('data:') ? imageBlock.src : imageBlock.src ? getMediaUrl(imageBlock.src) : ''}
-                            alt={`PPT 第 ${imageBlock.page} 页`}
-                            className="w-16 h-12 object-cover rounded-md border border-slate-100 dark:border-slate-600 flex-shrink-0 hover:scale-105 transition-transform"
-                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                          />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <FileText className="w-3.5 h-3.5 text-blue-500 flex-shrink-0" />
-                              <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 truncate">
-                                PPT 第 {imageBlock.page} 页 · {imageBlock.title}
-                              </span>
-                            </div>
-                            <p className="text-xs text-slate-400 mt-0.5">点击查看大图</p>
-                          </div>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const imageBlockIndex = blocks.indexOf(imageBlock);
-                              const nextBlocks = blocks.filter((_, blockIndex) => blockIndex !== imageBlockIndex);
-                              transcript.actions.updateContentBlocks(nextBlocks);
-                            }}
-                            className="min-w-[32px] min-h-[32px] rounded-md text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center justify-center transition-colors"
-                            title="移除此 PPT 插入"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                          <ChevronUp className="w-4 h-4 text-slate-400 rotate-90 flex-shrink-0" />
-                        </div>
-                          <div
-                            contentEditable
-                            suppressContentEditableWarning
-                            onPointerDown={(e) => { e.currentTarget.focus(); }}
-                            onBlur={(e) => {
-                              const newBlocks = [...blocks];
-                              const textBlockIndex = blocks.indexOf(textBlock);
-                              if (textBlockIndex !== -1) {
-                                const html = e.currentTarget.innerHTML;
-                                const normalized = (html === '<br>' || html === '<br />') ? '' : html;
-                                newBlocks[textBlockIndex] = { ...newBlocks[textBlockIndex], content: normalized };
-                                transcript.actions.updateContentBlocks(newBlocks);
-                              }
-                            }}
-                            className="p-4 text-sm text-slate-600 dark:text-slate-300 leading-relaxed whitespace-pre-line focus:outline-none min-h-[60px] select-text cursor-text"
-                            dangerouslySetInnerHTML={{ __html: sanitizeHTML(textBlock.content || '') as unknown as string }}
-                          />
-                        </div>
-                      );
-                    } else if (group.type === 'text' && group.textBlock) {
-                      const textBlock = group.textBlock;
-                      return (
-                        <div
-                          key={idx}
-                          contentEditable
-                          suppressContentEditableWarning
-                          onPointerDown={(e) => { e.currentTarget.focus(); }}
-                          onBlur={(e) => {
-                            const newBlocks = [...blocks];
-                            const textBlockIndex = blocks.indexOf(textBlock);
-                            if (textBlockIndex !== -1) {
-                              const html = e.currentTarget.innerHTML;
-                              const normalized = (html === '<br>' || html === '<br />') ? '' : html;
-                              newBlocks[textBlockIndex] = { ...newBlocks[textBlockIndex], content: normalized };
-                              transcript.actions.updateContentBlocks(newBlocks);
-                            }
-                          }}
-                          className="w-full p-4 text-sm text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-200 leading-relaxed whitespace-pre-line min-h-[60px] select-text cursor-text"
-                          dangerouslySetInnerHTML={{ __html: sanitizeHTML(textBlock.content || '') as unknown as string }}
-                        />
-                      );
-                    }
-                    return null;
-                  });
-                })()}
-              </div>
-            ) : isLiveTranscriptMode ? (
-              /* 2) Live streaming — WebSocket ASR */
-              <div className="space-y-3">
-                {/* Confirmed final transcript (editable) */}
+                {/* Live transcript: confirmed finals + current partial (editable) */}
                 <RichTextEditor
                   ref={transcriptEditRef}
-                  value={transcript.state.transcriptText}
-                  onChange={(text) => { transcript.actions.updateTranscriptText(text); }}
+                  value={liveTranscriptHtml}
+                  onChange={(text) => {
+                    transcript.actions.markUserEdited();
+                    transcript.actions.updateTranscriptDraft(text);
+                    // The user has edited the live stream; clear the interim
+                    // partial so the next partial starts fresh after their edit.
+                    transcript.actions.clearPartialText();
+                  }}
                   onFocus={() => {
+                    transcript.actions.setEditorFocused(true);
                     activeTextElRef.current = transcriptEditRef.current;
+                  }}
+                  onBlur={() => {
+                    transcript.actions.setEditorFocused(false);
+                    transcript.actions.commitTranscriptDraft();
+                    transcript.actions.saveContent(notesHook.refs.notesDraftRef.current, false);
                   }}
                   placeholder={audioUpload.state.isUploadingAudio ? '正在识别上传录音，结果会逐段显示...' : '正在转录中，可直接编辑修改...'}
                   className="rich-text-editor w-full p-4 text-sm text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800 border border-blue-200 dark:border-blue-700 rounded-xl min-h-[200px] focus:outline-none focus:ring-2 focus:ring-blue-200 leading-relaxed whitespace-pre-wrap break-words"
                 />
-                {/* Partial text — temporary, not saved */}
-                {transcript.state.partialText && (
-                  <div className="flex items-center gap-2 px-3 py-2 bg-blue-50/50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800/30 rounded-lg">
-                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse flex-shrink-0" />
-                    <p className="text-sm text-slate-500 dark:text-slate-400 italic leading-relaxed">
-                      {transcript.state.partialText}
-                    </p>
-                  </div>
-                )}
-                {!transcript.state.partialText && recording.state.isRecording && !recording.state.isPaused && (
+                {recording.state.isRecording && !recording.state.isPaused && (
                   <div className="flex items-center gap-2 px-3 py-2 text-slate-400 text-sm">
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                    正在聆听...
+                    {transcript.state.partialText ? '实时识别中…' : '正在聆听…'}
                   </div>
                 )}
                 {(recording.state.isProcessing || audioUpload.state.isUploadingAudio) && (
@@ -1252,7 +1478,64 @@ export default function NoteDetail() {
                     {audioUpload.state.isUploadingAudio ? (audioUpload.state.audioUploadStatus || '正在识别上传录音...') : '正在处理录音...'}
                   </div>
                 )}
+                {/* During recording, show a compact preview of matched slides so
+                    the user can see PPT matching is working without leaving the
+                    live editor. */}
+                {recording.state.isRecording && transcript.state.contentBlocks.some((b) => b.type === 'image') && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-slate-500 dark:text-slate-400">已匹配 PPT：</p>
+                    <div className="flex flex-wrap gap-2">
+                      {transcript.state.contentBlocks
+                        .filter((b): b is ContentBlock & { type: 'image'; src: string; page?: number } => b.type === 'image' && !!b.src)
+                        .map((block, idx) => (
+                          <button
+                            key={`live-slide-${block.page ?? idx}-${idx}`}
+                            onClick={() => {
+                              const slideIndex = ppt.state.slides.findIndex((s) => s.page === block.page);
+                              if (slideIndex >= 0) ppt.actions.setActiveSlideIndex(slideIndex);
+                            }}
+                            className="relative w-20 h-14 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 hover:ring-2 hover:ring-blue-200 transition-all"
+                            title={`PPT 第 ${block.page} 页`}
+                          >
+                            <AuthenticatedImage
+                              src={block.src}
+                              alt={`PPT ${block.page}`}
+                              className="w-full h-full object-cover"
+                              fallback={<div className="w-full h-full bg-slate-100 dark:bg-slate-800" />}
+                            />
+                            {block.page && (
+                              <span className="absolute bottom-0.5 right-0.5 px-1 py-0.5 text-[10px] bg-black/50 text-white rounded">
+                                {block.page}
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+                )}
               </div>
+            ) : (hasPptImageBlocks || (transcript.state.contentBlocks.length > 0 && transcript.state.contentBlocks.some(b => b.type === 'image'))) ? (
+              /* 2) PPT+text layout blocks — only when not currently recording/uploading */
+              <ContentBlocksView
+                blocks={transcript.state.contentBlocks}
+                slides={ppt.state.slides}
+                onSetActiveSlideIndex={(idx) => ppt.actions.setActiveSlideIndex(idx)}
+                onShowLeftPanel={() => setShowLeftPanel(true)}
+                onUpdateContentBlocks={(blocks) => {
+                  transcript.actions.updateContentBlocks(blocks);
+                  // Structural changes (drag insert) also need to be persisted.
+                  transcript.actions.scheduleSave(() => notesHook.refs.notesDraftRef.current, 300);
+                }}
+                onUpdateBlockDraft={transcript.actions.updateContentBlockDraft}
+                onCommitContentBlocks={() => {
+                  transcript.actions.commitContentBlockDraft();
+                  transcript.actions.saveContent(notesHook.refs.notesDraftRef.current, false);
+                }}
+                normalizeTranscriptBlockForDisplay={normalizeTranscriptBlockForDisplay}
+                activeTextElRef={activeTextElRef}
+                dropTargetIndex={dragState.targetIndex}
+                dropPosition={dragState.targetPosition}
+              />
             ) : transcript.state.transcriptText === '' ? (
               /* 3) Empty state */
               <div className="flex flex-col items-center justify-center py-20 text-slate-400 dark:text-slate-500">
@@ -1270,67 +1553,23 @@ export default function NoteDetail() {
               </div>
             ) : transcript.state.transcriptText ? (
               /* 4) Editable paragraph cards — smart split into ~2-4 sentence chunks */
-              (() => {
-                // Split on blank lines first; then sub-split any paragraph that is too long
-                const rawParagraphs = transcript.state.transcriptText
-                  .split('\n\n')
-                  .map(p => p.trim())
-                  .filter(p => p);
-                const CARD_MAX_CHARS = 320;
-                // Split a single long paragraph blob into sentence-aligned chunks
-                const splitLongParagraph = (text: string): string[] => {
-                  if (text.length <= CARD_MAX_CHARS) return [text];
-                  const sentences = text.split(/(?<=[。！？.!?])/);
-                  const chunks: string[] = [];
-                  let current = '';
-                  for (const s of sentences) {
-                    if (current && (current + s).replace(/\s/g, '').length > CARD_MAX_CHARS) {
-                      chunks.push(current.trim());
-                      current = s;
-                    } else {
-                      current += s;
-                    }
-                  }
-                  if (current.trim()) chunks.push(current.trim());
-                  return chunks.length ? chunks : [text];
-                };
-                const paragraphs: string[] = [];
-                for (const p of rawParagraphs) {
-                  paragraphs.push(...splitLongParagraph(p));
-                }
-
-                const syncParagraphs = () => {
-                  if (!paragraphContainerRef.current) return;
-                  const parts: string[] = [];
-                  for (const child of paragraphContainerRef.current.children) {
-                    const html = (child as HTMLElement).innerHTML;
-                    if (html && html !== '<br>' && html !== '<br />') {
-                      parts.push(html);
-                    }
-                  }
-                  transcript.actions.updateTranscriptText(parts.join('\n\n'));
+              <EditableParagraphCards
+                transcriptText={transcript.state.transcriptText}
+                containerRef={paragraphContainerRef}
+                onUpdateDraft={transcript.actions.updateTranscriptDraft}
+                onCommitDraft={() => {
+                  transcript.actions.commitTranscriptDraft();
+                  transcript.actions.saveContent(notesHook.refs.notesDraftRef.current, false);
+                }}
+                onMarkUserEdited={transcript.actions.markUserEdited}
+                onSetActiveTextEl={(el) => { activeTextElRef.current = el; }}
+                onClearSentences={() => {
                   if (transcript.state.sentencesWithTime.length > 0) {
                     transcript.actions.setSentencesWithTime([]);
                     transcript.actions.setActiveSentenceIndex(null);
                   }
-                };
-                return (
-                  <div ref={paragraphContainerRef} className="space-y-3">
-                    {paragraphs.map((para, i) => (
-                      <div
-                        key={i}
-                        contentEditable
-                        suppressContentEditableWarning
-                        dangerouslySetInnerHTML={{ __html: sanitizeHTML(para.trim()) as unknown as string }}
-                        onBlur={syncParagraphs}
-                        onFocus={(e) => { activeTextElRef.current = e.currentTarget; }}
-                          onPointerDown={(e) => { e.currentTarget.focus(); }}
-                        className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3 text-sm text-slate-600 dark:text-slate-300 leading-7 whitespace-pre-wrap break-words shadow-sm outline-none transition-colors hover:border-slate-300 dark:hover:border-slate-600 focus:border-blue-300 dark:focus:border-blue-600 focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/30 select-text cursor-text"
-                      />
-                    ))}
-                  </div>
-                );
-              })()
+                }}
+              />
             ) : transcript.state.sentencesWithTime.length > 0 ? (
               /* 5) Fallback timestamp view when no editable transcript text exists */
               <div className="space-y-1 leading-relaxed whitespace-pre-wrap break-words">
@@ -1368,38 +1607,6 @@ export default function NoteDetail() {
               </div>
             )}
 
-            {/* Raw text debug view */}
-            {showRawDebug && transcript.state.loadedNote?.transcript && (
-              <div className="mx-4 mt-4 mb-4 p-3 bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-lg">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">调试 — raw_text（ASR 原始输出）</span>
-                  <button onClick={() => setShowRawDebug(false)} className="text-slate-400 hover:text-slate-600"><X className="w-3 h-3" /></button>
-                </div>
-                <div className="space-y-2">
-                  {(() => {
-                    const entries = transcript.state.loadedNote.transcript
-                      .filter((e: any) => e && typeof e === 'object')
-                      .sort((a: any, b: any) => (a.chunk_index || 0) - (b.chunk_index || 0));
-                    return entries.map((entry: any, idx: number) => (
-                      <div key={idx} className="space-y-1">
-                        <div className="text-[10px] text-slate-400 flex items-center gap-2">
-                          <span>chunk {entry.chunk_index ?? idx}</span>
-                          {entry.is_ai_corrected && <span className="text-green-500">AI corrected</span>}
-                          {entry.correction_error && <span className="text-red-400">{entry.correction_error}</span>}
-                          {entry.correction_stage && <span className="text-slate-300">{entry.correction_stage}</span>}
-                        </div>
-                        <pre className="text-[11px] text-slate-500 dark:text-slate-400 whitespace-pre-wrap break-words font-mono leading-relaxed bg-white dark:bg-slate-800 p-2 rounded border border-slate-100 dark:border-slate-700">{entry.raw_text || '(无 raw_text)'}</pre>
-                        {entry.corrected_text && (
-                          <div className="text-[11px] text-green-600 dark:text-green-400 font-mono leading-relaxed bg-green-50 dark:bg-green-900/10 p-2 rounded border border-green-100 dark:border-green-800/30">
-                            corrected: {entry.corrected_text}
-                          </div>
-                        )}
-                      </div>
-                    ));
-                  })()}
-                </div>
-              </div>
-            )}
           </div>
         </main>
       </div>
@@ -1424,7 +1631,7 @@ export default function NoteDetail() {
                     {mindMap.state.copyMindMapSuccess ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
                   </button>
                 )}
-                {(mindMap.state.mindMapStatus?.status === 'ready' || mindMap.state.mindMapStatus?.status === 'stale') && (
+                {mindMap.state.mindMapStatus?.status === 'ready' && (
                   <button onClick={() => mindMap.actions.handleGenerateMindMap(mindMap.state.mindMapStatus?.status === 'ready')} disabled={mindMap.state.isGeneratingMindMap} className="px-3 py-1.5 text-xs font-medium text-purple-600 bg-purple-50 dark:bg-purple-900/20 rounded-lg hover:bg-purple-100 dark:hover:bg-purple-900/30 disabled:opacity-50 flex items-center gap-1" title="重新生成">
                     <RefreshCw className={`w-3.5 h-3.5 ${mindMap.state.isGeneratingMindMap ? 'animate-spin' : ''}`} />
                     重新生成
@@ -1448,13 +1655,13 @@ export default function NoteDetail() {
                   <FileText className="w-10 h-10 opacity-30" />
                   <p className="text-sm">当前课次没有可生成的内容</p>
                 </div>
-              ) : mindMap.state.mindMapStatus?.status === 'not_generated' || mindMap.state.mindMapStatus?.status === 'stale' ? (
+              ) : mindMap.state.mindMapStatus?.status === 'not_generated' ? (
                 <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-4">
                   <BrainCircuit className="w-10 h-10 opacity-30" />
-                  <p className="text-sm">{mindMap.state.mindMapStatus.status === 'stale' ? '内容已变化，需要重新生成' : '尚未生成知识导图'}</p>
+                  <p className="text-sm">{'尚未生成知识导图'}</p>
                   <button onClick={() => mindMap.actions.handleGenerateMindMap()} disabled={mindMap.state.isGeneratingMindMap} className="px-4 py-2 text-sm font-medium text-white bg-purple-500 rounded-lg hover:bg-purple-600 disabled:opacity-50 flex items-center gap-2">
                     {mindMap.state.isGeneratingMindMap ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-                    {mindMap.state.mindMapStatus.status === 'stale' ? '重新生成' : '生成导图'}
+                    {'生成导图'}
                   </button>
                 </div>
               ) : mindMap.state.mindMapStatus?.status === 'error' ? (
@@ -1471,42 +1678,73 @@ export default function NoteDetail() {
                     <p className="text-xs text-slate-400">进度 {Math.round(mindMap.state.mindMapStatus.progress * 100)}%</p>
                   )}
                 </div>
-              ) : mindMap.state.mindMapStatus?.mind_map ? (
-                <MindMapCanvas
-                  data={mindMap.state.mindMapStatus.mind_map}
-                  onSelect={mindMap.actions.setSelectedMindMapNode}
-                  selectedNode={mindMap.state.selectedMindMapNode}
-                  onSourceClick={(source) => {
-                  if (source.source_type === 'ppt' && source.page != null) {
-                    ppt.actions.setActiveSlideIndex(source.page - 1);
-                    return;
-                  }
-                  if ((source.source_type === 'transcript' || source.source_type === 'note') && source.snippet) {
-                    mindMap.actions.setShowMindMap(false);
-                    setTimeout(() => {
-                      const container = paragraphContainerRef.current;
-                      if (!container) return;
-                      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-                      const lowerSnippet = source.snippet!.toLowerCase();
-                      let node;
-                      while ((node = walker.nextNode() as Text | null)) {
-                        if (node.textContent?.toLowerCase().includes(lowerSnippet)) {
-                          const el = node.parentElement;
-                          if (el) {
-                            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            el.classList.add('bg-yellow-100', 'dark:bg-yellow-900/30', 'transition-colors');
-                            setTimeout(() => {
-                              el.classList.remove('bg-yellow-100', 'dark:bg-yellow-900/30', 'transition-colors');
-                            }, 3000);
-                          }
-                          break;
-                        }
+              ) : mindMap.state.mindMapStatus?.status === 'stale' || mindMap.state.mindMapStatus?.status === 'ready' && mindMap.state.mindMapStatus?.mind_map?.nodes?.length ? (
+                <div className="flex flex-col h-full">
+                  {mindMap.state.mindMapStatus?.status === 'stale' && (
+                    <div className="flex-shrink-0 mx-5 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400">
+                        <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                        <span>笔记内容已变化，导图可能与当前内容不符</span>
+                      </div>
+                      <button
+                        onClick={() => mindMap.actions.handleGenerateMindMap(true)}
+                        disabled={mindMap.state.isGeneratingMindMap}
+                        className="px-2.5 py-1.5 text-xs font-medium text-white bg-purple-500 rounded-lg hover:bg-purple-600 disabled:opacity-50 flex items-center gap-1"
+                      >
+                        {mindMap.state.isGeneratingMindMap ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                        重新生成
+                      </button>
+                    </div>
+                  )}
+                  <div className="flex-1 overflow-hidden">
+                    <MindMapCanvas
+                      data={mindMap.state.mindMapStatus.mind_map!}
+                      rootTitle={displaySession?.title || displayNotebook?.title || '当前课次'}
+                      sessionId={sessionId || ''}
+                      onSelect={mindMap.actions.setSelectedMindMapNode}
+                      selectedNode={mindMap.state.selectedMindMapNode}
+                      onSourceClick={(source) => {
+                      if (source.source_type === 'ppt' && source.page != null) {
+                        ppt.actions.setActiveSlideIndex(source.page - 1);
+                        return;
                       }
-                    }, 300);
-                  }
-                }}
-                />
-              ) : null}
+                      if ((source.source_type === 'transcript' || source.source_type === 'note') && source.snippet) {
+                        mindMap.actions.setShowMindMap(false);
+                        setTimeout(() => {
+                          const container = paragraphContainerRef.current;
+                          if (!container) return;
+                          const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+                          const lowerSnippet = source.snippet!.toLowerCase();
+                          let node;
+                          while ((node = walker.nextNode() as Text | null)) {
+                            if (node.textContent?.toLowerCase().includes(lowerSnippet)) {
+                              const el = node.parentElement;
+                              if (el) {
+                                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                el.classList.add('bg-yellow-100', 'dark:bg-yellow-900/30', 'transition-colors');
+                                setTimeout(() => {
+                                  el.classList.remove('bg-yellow-100', 'dark:bg-yellow-900/30', 'transition-colors');
+                                }, 3000);
+                              }
+                              break;
+                            }
+                          }
+                        }, 300);
+                      }
+                    }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-4">
+                  <BrainCircuit className="w-10 h-10 opacity-30" />
+                  <p className="text-sm">导图数据为空，请尝试重新生成</p>
+                  <button onClick={() => mindMap.actions.handleGenerateMindMap(true)} disabled={mindMap.state.isGeneratingMindMap} className="px-4 py-2 text-sm font-medium text-white bg-purple-500 rounded-lg hover:bg-purple-600 disabled:opacity-50 flex items-center gap-2">
+                    {mindMap.state.isGeneratingMindMap ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                    重新生成
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1578,7 +1816,12 @@ export default function NoteDetail() {
                     {rag.state.ragSources.length > 0 && (
                       <div className="pt-3 border-t border-slate-100 dark:border-slate-700">
                         <p className="text-[10px] text-slate-400 mb-2">参考来源</p>
-                        {renderRagSourceCards(() => quiz.actions.setShowQuizQA(false))}
+                        <RagSourceCards
+                          sources={rag.state.ragSources}
+                          onSourceClick={handleRagSourceClick}
+                          getSourceTypeLabel={getRagSourceTypeLabel}
+                          onClose={() => quiz.actions.setShowQuizQA(false)}
+                        />
                       </div>
                     )}
                   </div>
@@ -1734,22 +1977,19 @@ export default function NoteDetail() {
                   {quiz.state.bankStatus && quiz.state.bankStatus.status !== 'ready' && (
                     <div className={`mb-4 p-3 rounded-lg text-sm flex items-center gap-2 ${
                       quiz.state.bankStatus.status === 'generating' ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400' :
-                      quiz.state.bankStatus.status === 'stale' ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400' :
                       quiz.state.bankStatus.status === 'error' ? 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400' :
                       quiz.state.bankStatus.status === 'empty' ? 'bg-slate-50 dark:bg-slate-700 text-slate-500' :
                       'bg-slate-50 dark:bg-slate-700 text-slate-500'
                     }`}>
                       {quiz.state.bankStatus.status === 'generating' && <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />}
-                      {quiz.state.bankStatus.status === 'stale' && <AlertCircle className="w-4 h-4 flex-shrink-0" />}
                       {quiz.state.bankStatus.status === 'error' && <AlertCircle className="w-4 h-4 flex-shrink-0" />}
                       <span>
                         {quiz.state.bankStatus.status === 'generating' && '题库生成中，请稍候...'}
-                        {quiz.state.bankStatus.status === 'stale' && '笔记内容已变化，题库需要更新'}
                         {quiz.state.bankStatus.status === 'error' && `题库生成失败: ${quiz.state.bankStatus.error || '未知错误'}`}
                         {quiz.state.bankStatus.status === 'empty' && '当前课次没有可生成的内容'}
                         {quiz.state.bankStatus.status === 'not_generated' && '尚未生成题库'}
                       </span>
-                      {(quiz.state.bankStatus.status === 'stale' || quiz.state.bankStatus.status === 'error' || quiz.state.bankStatus.status === 'not_generated') && (
+                      {(quiz.state.bankStatus.status === 'error' || quiz.state.bankStatus.status === 'not_generated') && (
                         <button
                           onClick={quiz.actions.handleRebuildBank}
                           disabled={quiz.state.isRebuildingBank}
@@ -1887,7 +2127,12 @@ export default function NoteDetail() {
                     {rag.state.ragSources.length > 0 && (
                       <div className="pt-3 border-t border-slate-100 dark:border-slate-700">
                         <p className="text-[10px] text-slate-400 mb-2">参考来源</p>
-                        {renderRagSourceCards(() => rag.actions.setShowSearch(false))}
+                        <RagSourceCards
+                          sources={rag.state.ragSources}
+                          onSourceClick={handleRagSourceClick}
+                          getSourceTypeLabel={getRagSourceTypeLabel}
+                          onClose={() => rag.actions.setShowSearch(false)}
+                        />
                       </div>
                     )}
                   </div>
@@ -1969,6 +2214,32 @@ export default function NoteDetail() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ---- Drag preview overlay ---- */}
+      {dragState.slide && dragState.pointer && (
+        <div
+          className="fixed z-[100] pointer-events-none"
+          style={{
+            left: dragState.pointer.x + 12,
+            top: dragState.pointer.y + 12,
+            width: 160,
+          }}
+        >
+          <div className="rounded-lg overflow-hidden border-2 border-blue-400 shadow-xl bg-white dark:bg-slate-900">
+            <AuthenticatedImage
+              src={dragState.slide.image_path
+                ? getMediaUrl(`/api/media/slides/${sessionId}/${dragState.slide.image_path}`)
+                : dragState.slide.image_base64 || ''}
+              alt={`Slide ${dragState.slide.page}`}
+              className="w-full object-cover"
+              fallback={<div className="flex items-center justify-center h-20 text-xs text-slate-400">无预览图</div>}
+            />
+          </div>
+          <div className="mt-1 px-2 py-1 bg-blue-500 text-white text-[10px] rounded-md shadow-md inline-block">
+            插入到第 {dragState.slide.page} 页
           </div>
         </div>
       )}

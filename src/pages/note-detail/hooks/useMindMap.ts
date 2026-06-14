@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   getSessionMindMap, generateSessionMindMap, deleteSessionMindMap,
 } from '@/services/api';
@@ -15,7 +15,9 @@ function deriveMindMapStatus(
 
   const base: MindMapStatus = {
     session_id: sessionId,
-    status: stage.status === 'fallback' ? 'error' : stage.status as MindMapStatus['status'],
+    // 'fallback' means the transcript used local cleanup; the auxiliary material
+    // is not necessarily broken, just potentially outdated → show as stale.
+    status: stage.status === 'fallback' ? 'stale' : stage.status as MindMapStatus['status'],
     mind_map: null,
     progress: stage.progress,
     error: stage.error_message,
@@ -36,8 +38,9 @@ export function useMindMap(
   const [copyMindMapSuccess, setCopyMindMapSuccess] = useState(false);
 
   const derivedStatus = deriveMindMapStatus(sessionId || '', processingStatus);
+  const fetchedOnErrorRef = useRef(false);
 
-  // When derived status changes, update local status and fetch data if ready
+  // When derived status changes, update local status and fetch data if ready or error
   useEffect(() => {
     if (!sessionId || !derivedStatus) return;
 
@@ -46,13 +49,26 @@ export function useMindMap(
       return { ...prev, status: derivedStatus.status, progress: derivedStatus.progress, error: derivedStatus.error };
     });
 
-    if (derivedStatus.status === 'ready') {
+    if (derivedStatus.status === 'ready' || derivedStatus.status === 'stale') {
+      fetchedOnErrorRef.current = false;
       getSessionMindMap(sessionId).then((data) => {
         setMindMapStatus(data);
         if (data.mind_map?.nodes) {
           setExpandedNodes(computeDefaultExpanded(data.mind_map.nodes));
         }
-      }).catch(() => {});
+      }).catch(() => {
+        setMindMapStatus(prev => prev ? { ...prev, status: 'error', error: '获取导图数据失败' } : { session_id: sessionId, status: 'error', mind_map: null, error: '获取导图数据失败' });
+      });
+    } else if (derivedStatus.status === 'error' && !fetchedOnErrorRef.current) {
+      fetchedOnErrorRef.current = true;
+      getSessionMindMap(sessionId).then((data) => {
+        setMindMapStatus(data);
+        if (data.mind_map?.nodes) {
+          setExpandedNodes(computeDefaultExpanded(data.mind_map.nodes));
+        }
+      }).catch(() => {
+        setMindMapStatus(prev => prev ? { ...prev, status: 'error', error: '获取导图数据失败' } : { session_id: sessionId, status: 'error', mind_map: null, error: '获取导图数据失败' });
+      });
     }
   }, [sessionId, derivedStatus?.status, derivedStatus?.progress, derivedStatus?.error]);
 
@@ -61,7 +77,11 @@ export function useMindMap(
     if (!sessionId || !showMindMap) return;
     const stage = processingStatus?.stages.mindmap;
     if (!stage) return;
-    if (stage.status === 'idle' || stage.status === 'stale' || stage.status === 'error') {
+
+    // Only auto-trigger when no usable output exists. Stale / fallback / error
+    // outputs are kept so the user can still view them and choose to regenerate.
+    const shouldAutoGenerate = ['idle', 'not_generated', 'empty'].includes(stage.status);
+    if (shouldAutoGenerate) {
       handleGenerateMindMap();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -753,12 +753,18 @@ class TermCorrector:
     # LLM call
     # ──────────────────────────────────────────────────────────────────
 
-    def _call_llm(self, prompt: str, system_msg: str, temperature: float = 0.2) -> str:
+    def _call_llm(
+        self,
+        prompt: str,
+        system_msg: str,
+        temperature: float = 0.2,
+        timeout_seconds: float = 60.0,
+    ) -> str:
         import logging
         _logger = logging.getLogger(__name__)
         _logger.info(
-            "termcorrector_llm_call model=%s prompt_len=%s system_len=%s",
-            DEEPSEEK_MODEL, len(prompt), len(system_msg),
+            "termcorrector_llm_call model=%s prompt_len=%s system_len=%s timeout=%s",
+            DEEPSEEK_MODEL, len(prompt), len(system_msg), timeout_seconds,
         )
         t0 = time.time()
         response = self._client.chat.completions.create(
@@ -768,6 +774,7 @@ class TermCorrector:
                 {"role": "user", "content": prompt},
             ],
             temperature=temperature,
+            timeout=timeout_seconds,
         )
         elapsed = time.time() - t0
         content = response.choices[0].message.content.strip()

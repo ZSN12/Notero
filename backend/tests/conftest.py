@@ -25,7 +25,7 @@ os.environ["SKIP_ASR_PRELOAD"] = "1"
 os.environ["AGENTS_SYNC"] = "1"
 os.environ["DATABASE_URL"] = os.getenv(
     "TEST_DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/nootbook_test",
+    "postgresql://postgres:postgres@localhost:5432/notero_test",
 )
 
 
@@ -77,9 +77,8 @@ def _join_agent_threads():
 @pytest.fixture(autouse=True)
 def _clear_rate_limit_state():
     """Reset login rate-limit state before each test to avoid cross-test locking."""
-    from app.api import auth
-    with auth._login_lock:
-        auth._failed_login_attempts.clear()
+    from app.core.login_tracker import reset_login_attempts_for_tests
+    reset_login_attempts_for_tests()
     yield
 
 

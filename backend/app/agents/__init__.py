@@ -1,4 +1,4 @@
-"""Nootbook agents package."""
+"""Notero agents package."""
 
 from app.agents.base import AgentContext, AgentResult, BaseAgent
 from app.agents.registry import get_agent, list_agents, register_agent

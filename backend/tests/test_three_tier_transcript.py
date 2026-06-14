@@ -1,4 +1,4 @@
-"""Tests for the three-tier transcript fallback (raw → local clean → DeepSeek)."""
+"""Tests for the three-tier transcript fallback (raw -> local clean -> DeepSeek)."""
 
 import json
 import os
@@ -15,8 +15,9 @@ os.environ["DEEPSEEK_API_KEY"] = "test-key-for-three-tier"
 from fastapi.testclient import TestClient
 from app.main import app
 from app.core.database import SessionLocal
-from app.models import Note, User
+from app.models import Note, User, SessionProcessingState
 from app.services.term_corrector import corrector
+from app.services.state_service import get_state
 
 
 def auth_headers(client: TestClient) -> dict[str, str]:
@@ -38,18 +39,17 @@ def _create_notebook_session_note(client: TestClient, headers: dict, content: st
 
     sess = client.post(
         f"/api/sessions?notebook_id={notebook_id}",
-        json={"title": "Three Tier Test Session", "summary": "Testing", "keywords": ["test"]},
+        json={"title": "Three Tier Test Session", "keywords": ["test"]},
         headers=headers,
     )
     assert sess.status_code == 201
     session_id = sess.json()["id"]
 
-    if content:
-        client.put(
-            f"/api/notes/session/{session_id}",
-            json={"content": content},
-            headers=headers,
-        )
+    client.put(
+        f"/api/notes/session/{session_id}",
+        json={"content": content},
+        headers=headers,
+    )
     return notebook_id, session_id
 
 
@@ -62,7 +62,7 @@ def _mock_openai_response(data: dict):
     return mock_client
 
 
-# ── Unit: _finalize_display_text_for_stream ──
+# -- Unit: _finalize_display_text_for_stream --
 
 def test_finalize_returns_three_tiers_on_success():
     with patch.object(corrector, "_client", MagicMock()):
@@ -107,7 +107,7 @@ def test_finalize_returns_local_on_deepseek_failure():
         assert result["correction_error"] == "AI 整理失败"
 
 
-# ── Integration: restructure endpoint ──
+# -- Integration: restructure endpoint --
 
 def test_restructure_endpoint_creates_corrected_text():
     with patch("app.api.process.transcript.corrector._client", MagicMock()):
@@ -187,7 +187,7 @@ def test_restructure_endpoint_fallback_on_failure():
             assert note_data["transcript"][0]["correction_error"] == "AI 整理失败，已使用本地整理稿"
 
 
-# ── Integration: streaming ASR finalize saves three tiers ──
+# -- Integration: streaming ASR finalize saves three tiers --
 
 def test_streaming_asr_finalize_saves_local_only():
     """finalize() no longer calls DeepSeek; it returns a local-only entry."""
@@ -227,3 +227,123 @@ def test_streaming_asr_finalize_local_no_failure():
     assert entry["is_ai_corrected"] is False
     assert entry["correction_error"] is None
     assert entry["correction_stage"] == "local"
+
+
+# -- Integration: processing-state tracking --
+
+def test_restructure_sets_ready_state_on_ai_success():
+    """When AI correction succeeds, transcript_finalize state should be 'ready'."""
+    from app.api.process import transcript as transcript_module
+    with patch.object(transcript_module.corrector, "restructure_transcript", return_value="AI corrected text."):
+        with patch.object(transcript_module.corrector, "preserves_source_content", return_value=True):
+            with TestClient(app) as client:
+                headers = auth_headers(client)
+                _, session_id = _create_notebook_session_note(client, headers)
+
+                db = SessionLocal()
+                try:
+                    note = db.query(Note).filter(Note.session_id == session_id).first()
+                    note.transcript = [{
+                        "chunk_index": 0,
+                        "text": "raw text",
+                        "raw_text": "raw text",
+                        "display_text": "raw text",
+                        "correction_stage": "final",
+                    }]
+                    db.commit()
+                finally:
+                    db.close()
+
+                resp = client.post(
+                    f"/api/process/session/{session_id}/restructure",
+                    json={"force": True},
+                    headers=headers,
+                )
+                assert resp.status_code == 200, resp.text
+
+                db = SessionLocal()
+                try:
+                    state = get_state(db, session_id, "transcript_finalize")
+                    assert state is not None
+                    assert state.status == "ready"
+                finally:
+                    db.close()
+
+
+def test_restructure_sets_fallback_state_on_ai_failure():
+    """When AI correction fails, transcript_finalize state should be 'fallback'."""
+    from app.api.process import transcript as transcript_module
+    with patch.object(transcript_module.corrector, "restructure_transcript", side_effect=RuntimeError("API down")):
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            _, session_id = _create_notebook_session_note(client, headers)
+
+            db = SessionLocal()
+            try:
+                note = db.query(Note).filter(Note.session_id == session_id).first()
+                note.transcript = [{
+                    "chunk_index": 0,
+                    "text": "raw text",
+                    "raw_text": "raw text",
+                    "display_text": "raw text",
+                    "correction_stage": "final",
+                }]
+                db.commit()
+            finally:
+                db.close()
+
+            resp = client.post(
+                f"/api/process/session/{session_id}/restructure",
+                json={"force": True},
+                headers=headers,
+            )
+            assert resp.status_code == 200, resp.text
+
+            db = SessionLocal()
+            try:
+                state = get_state(db, session_id, "transcript_finalize")
+                assert state is not None
+                assert state.status == "fallback"
+                assert state.error_message is not None
+            finally:
+                db.close()
+
+
+def test_restructure_auto_triggers_vector_index_state():
+    """After successful finalize, vector_index state should transition to 'ready'."""
+    from app.api.process import transcript as transcript_module
+    with patch.object(transcript_module.corrector, "restructure_transcript", return_value="AI corrected text."):
+        with patch.object(transcript_module.corrector, "preserves_source_content", return_value=True):
+            with patch("app.api.process.transcript.build_session_index", return_value=3):
+                with TestClient(app) as client:
+                    headers = auth_headers(client)
+                    _, session_id = _create_notebook_session_note(client, headers)
+
+                    db = SessionLocal()
+                    try:
+                        note = db.query(Note).filter(Note.session_id == session_id).first()
+                        note.transcript = [{
+                            "chunk_index": 0,
+                            "text": "raw text",
+                            "raw_text": "raw text",
+                            "display_text": "raw text",
+                            "correction_stage": "final",
+                        }]
+                        db.commit()
+                    finally:
+                        db.close()
+
+                    resp = client.post(
+                        f"/api/process/session/{session_id}/restructure",
+                        json={"force": True},
+                        headers=headers,
+                    )
+                    assert resp.status_code == 200, resp.text
+
+                    db = SessionLocal()
+                    try:
+                        vector_state = get_state(db, session_id, "vector_index")
+                        assert vector_state is not None
+                        assert vector_state.status == "ready"
+                    finally:
+                        db.close()

@@ -1,8 +1,8 @@
 # Notero
 
-面向中文课堂的开源 NotebookLM：把课堂录音、PPT、随堂笔记整理成可搜索、可追溯、可复习的 AI 学习工作台。
+面向中文课堂的 AI 学习工作台：把课堂录音、PPT、随堂笔记整理成可搜索、可追溯、可复习的智能学习助手。
 
-Nootbook 不是一个简单的“AI 总结器”。它更关注真实课堂里的完整链路：录音转写、PPT 对齐、AI 语义整理、本地兜底、RAG 引用溯源、知识导图、题库生成和长任务状态恢复。
+Notero 不是一个简单的“AI 总结器”。它更关注真实课堂里的完整链路：录音转写、PPT 对齐、AI 语义整理、本地兜底、RAG 引用溯源、知识导图、题库生成和长任务状态恢复。
 
 > 当前项目优先打磨 Web 端体验，后续可复用同一套后端状态模型迁移到 Pad 端。
 
@@ -100,7 +100,7 @@ cp .env.example .env
 Required:
 
 ```env
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/nootbook
+DATABASE_URL=postgresql://postgres:<password>@localhost:5432/notero
 SECRET_KEY=change-this-to-a-long-random-string
 ```
 
@@ -117,7 +117,7 @@ QWEN_VL_API_KEY=your-qwen-vl-key
 Create the database if it does not exist:
 
 ```sql
-CREATE DATABASE nootbook;
+CREATE DATABASE notero;
 ```
 
 The backend runs Alembic migrations on startup.
@@ -161,14 +161,14 @@ npm run test
 Backend tests require PostgreSQL. Use a separate database whose name contains `test`:
 
 ```bash
-set TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/nootbook_test
+set TEST_DATABASE_URL=postgresql://postgres:<password>@localhost:5432/notero_test
 py -3.10 -m pytest backend/tests/test_rag.py backend/tests/test_vector.py -q
 ```
 
 On macOS/Linux:
 
 ```bash
-export TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/nootbook_test
+export TEST_DATABASE_URL=postgresql://postgres:<password>@localhost:5432/notero_test
 python -m pytest backend/tests/test_rag.py backend/tests/test_vector.py -q
 ```
 
@@ -203,3 +203,10 @@ Each developer should configure their own PostgreSQL database, AI API keys, and 
 - 错题间隔重复复习
 - 更完善的模型 provider 切换
 
+## Contributing
+
+欢迎提交 Issue 和 PR！请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md) 了解开发环境搭建、代码规范和提交流程。
+
+## License
+
+[MIT](./LICENSE)

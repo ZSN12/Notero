@@ -57,6 +57,36 @@ describe('transcriptTextFromRawTranscript', () => {
     ]
     expect(transcriptTextFromRawTranscript(transcript)).toBe('hello  world')
   })
+
+  it('prefers the latest authoritative entry', () => {
+    const transcript = [
+      { chunk_index: 0, text: 'old final', correction_stage: 'final' },
+      { chunk_index: 0, text: 'user edited', display_text: 'user edited', correction_stage: 'user_edited' },
+      { chunk_index: 1, text: 'newer local', correction_stage: 'local' },
+    ]
+    expect(transcriptTextFromRawTranscript(transcript)).toBe('user edited')
+  })
+
+  it('honours an empty user_edited entry and does not fall back to raw_text', () => {
+    const transcript = [
+      {
+        chunk_index: 0,
+        text: '',
+        display_text: '',
+        raw_text: 'raw asr text',
+        correction_stage: 'user_edited',
+      },
+    ]
+    expect(transcriptTextFromRawTranscript(transcript)).toBe('')
+  })
+
+  it('ignores superseded entries in fallback mode', () => {
+    const transcript = [
+      { chunk_index: 0, text: 'old final', correction_stage: 'superseded' },
+      { chunk_index: 1, text: 'current', correction_stage: 'local' },
+    ]
+    expect(transcriptTextFromRawTranscript(transcript)).toBe('current')
+  })
 })
 
 describe('transcriptTextFromContent', () => {

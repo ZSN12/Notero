@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.auth import get_current_user
@@ -6,6 +7,10 @@ from app.models import User
 from app.services import mindmap_service
 
 router = APIRouter(prefix="/api/mindmap", tags=["mindmap"])
+
+
+class PositionsUpdate(BaseModel):
+    positions: dict
 
 
 @router.get("/session/{session_id}")
@@ -58,5 +63,21 @@ def delete_session_mind_map(
     """Delete mind map for a session."""
     try:
         return mindmap_service.delete_mind_map(session_id, current_user, db)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.patch("/session/{session_id}/positions")
+def update_session_mind_map_positions(
+    session_id: str,
+    update: PositionsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save node positions for a session's mind map."""
+    try:
+        return mindmap_service.save_mind_map_positions(
+            session_id, update.positions, current_user, db
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

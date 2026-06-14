@@ -1,6 +1,6 @@
 import { API_BASE } from '@/config';
 
-const TOKEN_KEY = "nootbook_token";
+const TOKEN_KEY = "notero_token";
 
 export interface UserProfile {
   id: string;

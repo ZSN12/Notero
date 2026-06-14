@@ -1,0 +1,119 @@
+# Notero Prometheus Alert Rules
+# Load with: prometheus --config.file=prometheus.yml
+# Or mount into Prometheus container at /etc/prometheus/rules/notero.yml
+
+groups:
+  - name: notero-system
+    interval: 30s
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(notero_http_requests_total{status_code=~"5.."}[5m]))
+            /
+            sum(rate(notero_http_requests_total[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP 5xx error rate"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5m."
+          runbook_url: "https://wiki.notero/runbooks/high-error-rate"
+
+      - alert: SlowAPIRequests
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(notero_http_request_duration_seconds_bucket[5m])) by (le, path)
+          ) > 10
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow API endpoint: {{ $labels.path }}"
+          description: "P99 latency is {{ $value }}s for {{ $labels.path }}."
+
+      - alert: DatabaseDown
+        expr: up{job="notero-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Notero API is down"
+          description: "Instance {{ $labels.instance }} has been down for more than 1 minute."
+
+  - name: notero-business
+    interval: 60s
+    rules:
+      - alert: LLMHighErrorRate
+        expr: |
+          (
+            sum(rate(notero_llm_calls_total{status="error"}[10m]))
+            /
+            sum(rate(notero_llm_calls_total[10m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM API error rate is high"
+          description: "{{ $value | humanizePercentage }} of LLM calls failed in the last 10m."
+          runbook_url: "https://wiki.notero/runbooks/llm-errors"
+
+      - alert: LLMLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(notero_llm_call_duration_seconds_bucket[10m])) by (le, model)
+          ) > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM latency high for {{ $labels.model }}"
+          description: "P95 latency is {{ $value }}s."
+
+      - alert: AgentTaskFailures
+        expr: |
+          sum(increase(notero_agent_tasks_total{status="error"}[1h])) by (role) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent {{ $labels.role }} tasks failing"
+          description: "More than 5 failures in the last hour."
+
+      - alert: ASRProcessingSlow
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(notero_asr_processing_seconds_bucket[10m])) by (le, source)
+          ) > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ASR processing slow ({{ $labels.source }})"
+          description: "P95 ASR time is {{ $value }}s."
+
+      - alert: VectorIndexRebuildFailures
+        expr: |
+          sum(increase(notero_vector_index_rebuilds_total{status="error"}[1h])) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vector index rebuilds failing"
+          description: "More than 3 failed rebuilds in the last hour."
+
+      - alert: DiskSpaceLow
+        expr: |
+          (
+            node_filesystem_avail_bytes{mountpoint="/"}
+            /
+            node_filesystem_size_bytes{mountpoint="/"}
+          ) < 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk space low on {{ $labels.instance }}"
+          description: "Less than 10% disk space remaining."

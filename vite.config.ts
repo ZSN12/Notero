@@ -7,6 +7,22 @@ import { traeBadgePlugin } from 'vite-plugin-trae-solo-badge';
 export default defineConfig(({ command }) => ({
   build: {
     sourcemap: 'hidden',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Core vendor libraries that change infrequently
+          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          // UI / styling
+          'vendor-ui': ['lucide-react'],
+          // State & data
+          'vendor-state': ['zustand'],
+          // Visualization (large)
+          'vendor-viz': ['@xyflow/react', 'elkjs'],
+          // Markdown / PDF rendering (large)
+          'vendor-doc': ['react-markdown', 'rehype-raw', 'rehype-katex', 'remark-gfm', 'remark-math', 'katex', 'html2pdf.js'],
+        },
+      },
+    },
   },
   plugins: [
     react({

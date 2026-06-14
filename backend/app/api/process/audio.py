@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import wave
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, BackgroundTasks, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -18,11 +18,28 @@ from app.services.transcriber import transcriber, _FUNASR_AVAILABLE
 from app.services.term_corrector import corrector
 from app.services.state_service import set_running, set_ready, set_error, set_fallback
 from app.services.vector_service import build_session_index, _compute_session_content_hash
+from app.middleware.metrics import observe_asr_processing
 from app.config import AUDIO_DIR, DASHSCOPE_API_KEY
+from app.api.agents import auto_run_agents
 
 MAX_AUDIO_CHUNK_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_FULL_AUDIO_SIZE = 500 * 1024 * 1024  # 500MB
 MAX_CHUNK_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB per chunk for resumable upload
+
+ALLOWED_AUDIO_TYPES = {
+    "audio/webm",
+    "audio/wav",
+    "audio/wave",
+    "audio/x-wav",
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/ogg",
+    "audio/flac",
+    "audio/x-flac",
+    "application/octet-stream",
+}
 logger = logging.getLogger(__name__)
 
 from app.api.process.transcript import finalize_session_transcript
@@ -317,9 +334,13 @@ async def _generate_audio_sse(
 
     yield f"data: {json.dumps({'type': 'status', 'message': '开始识别语音', 'segment': 0, 'total': 1}, ensure_ascii=False)}\n\n"
 
+    import time
+    asr_start = time.perf_counter()
     try:
         all_segments = await asyncio.to_thread(transcriber.transcribe, process_path)
+        observe_asr_processing("funasr" if _FUNASR_AVAILABLE else "dashscope", time.perf_counter() - asr_start)
     except Exception as e:
+        observe_asr_processing("funasr" if _FUNASR_AVAILABLE else "dashscope", time.perf_counter() - asr_start)
         logger.warning("audio_batch_transcribe_failed session_id=%s error=%s", session_id, e)
         all_segments = []
 
@@ -625,6 +646,13 @@ async def stream_audio_process(
     keywords = session.keywords or []
     logger.info("audio_stream_context session_id=%s course_title=%s keyword_count=%s", session_id, course_title, len(keywords))
 
+    # Validate MIME type before reading full content
+    if file.content_type and file.content_type not in ALLOWED_AUDIO_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported audio format: {file.content_type}. Allowed: audio/webm, audio/wav, audio/mpeg, etc."
+        )
+
     # Save audio chunk temporarily for transcription
     # Pre-check: read size without reading full content
     audio_bytes = await file.read()
@@ -651,9 +679,13 @@ async def stream_audio_process(
     try:
         # Step 1: Transcribe with FunASR
         logger.info("audio_chunk_transcribe_start session_id=%s chunk_index=%s", session_id, chunk_index)
+        import time
+        asr_start = time.perf_counter()
         try:
             segments = transcriber.transcribe(audio_path)
+            observe_asr_processing("funasr" if _FUNASR_AVAILABLE else "dashscope", time.perf_counter() - asr_start)
         except Exception as transcribe_error:
+            observe_asr_processing("funasr" if _FUNASR_AVAILABLE else "dashscope", time.perf_counter() - asr_start)
             logger.exception("audio_chunk_transcribe_failed session_id=%s chunk_index=%s", session_id, chunk_index)
             segments = []
 
@@ -706,17 +738,24 @@ async def stream_audio_process(
         try:
             if os.path.exists(audio_path):
                 os.unlink(audio_path)
-        except:
+        except Exception:
             pass
 
 
 @router.post("/audio-finish")
-def finish_recording(
+async def finish_recording(
     session_id: str = "",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    background_tasks: BackgroundTasks = None,
 ):
-    """Called when recording stops. Concatenates all saved chunks into a single WAV file and does final correction."""
+    """Called when recording stops. Concatenates all saved chunks into a single WAV file.
+
+    This endpoint only handles audio concatenation and cleanup. It does NOT run AI
+    finalization automatically. After it returns "finished", the frontend can prompt
+    the user to click "AI 整理" which calls /api/process/transcript-finalize or
+    /api/process/session/{id}/restructure.
+    """
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
 
@@ -727,11 +766,6 @@ def finish_recording(
     ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-
-    # Get course context for final correction
-    notebook = db.query(Notebook).filter(Notebook.id == session.notebook_id).first()
-    course_title = notebook.title if notebook else ""
-    keywords = session.keywords or []
 
     chunk_dir = AUDIO_DIR / session_id
     if not chunk_dir.exists():
@@ -756,18 +790,10 @@ def finish_recording(
         except Exception:
             pass
 
-        # Run unified finalization synchronously so the note is saved with correction_stage="final"
-        try:
-            final_payload = finalize_session_transcript(session_id, db, current_user)
-        except HTTPException as final_exc:
-            logger.warning("audio_finish_finalization_failed session_id=%s status=%s detail=%s", session_id, final_exc.status_code, final_exc.detail)
-            set_error(db, session_id, "recording_finalize", error_message=final_exc.detail or "录音整理失败", commit=False)
-            db.commit()
-            return {"status": "success", "audio_path": str(output_path), "note": None}
-
         set_ready(db, session_id, "recording_finalize", commit=False)
         db.commit()
-        return {"status": "success", "audio_path": str(output_path), "note": final_payload.get("note")}
+
+        return {"status": "finished", "audio_path": str(output_path), "note": None}
     except Exception as e:
         logger.exception("audio_finish_failed session_id=%s user_id=%s", session_id, current_user.id)
         set_error(db, session_id, "recording_finalize", error_message=str(e), commit=False)
@@ -860,6 +886,13 @@ async def process_audio_batch_stream(
     notebook = db.query(Notebook).filter(Notebook.id == session.notebook_id).first()
     course_title = notebook.title if notebook else ""
     keywords = session.keywords or []
+
+    # Validate MIME type
+    if file.content_type and file.content_type not in ALLOWED_AUDIO_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported audio format: {file.content_type}. Allowed: audio/webm, audio/wav, audio/mpeg, etc."
+        )
 
     # Read file
     audio_bytes = await file.read()
@@ -978,7 +1011,7 @@ async def process_audio_batch_stream(
                     pass
         if segment_paths and segment_paths[0] != process_path:
             seg_dir = os.path.dirname(segment_paths[0])
-            if seg_dir and os.path.exists(seg_dir) and "nootbook_segments_" in seg_dir:
+            if seg_dir and os.path.exists(seg_dir) and "notero_segments_" in seg_dir:
                 try:
                     os.rmdir(seg_dir)
                 except Exception:
@@ -1162,14 +1195,18 @@ async def finish_audio_chunk_upload(
 
 
 @router.post("/transcript-finalize")
-async def finalize_transcript(
+def finalize_transcript(
     session_id: str = "",
+    body: dict | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Run unified DeepSeek restructure on all accumulated transcripts for a session.
 
-    Called after all audio files have been uploaded and transcribed locally.
+    Delegates to the canonical finalize_session_transcript in transcript.py so
+    upload, real-time stop, and manual restructure all share the same logic.
+    Returns `{ note: {...}, agents: {...} | null }` so the frontend can refresh
+    the transcript and show started agent tasks.
     """
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
@@ -1186,164 +1223,13 @@ async def finalize_transcript(
     if not note or not note.transcript:
         raise HTTPException(status_code=404, detail="No transcript found for this session")
 
-    set_running(db, session_id, "transcript_finalize")
+    result = finalize_session_transcript(session_id, db, current_user)
+    note_payload = result.get("note", result)
 
-    # Sort all transcript entries by chunk_index and build full text
-    sorted_entries = sorted(
-        note.transcript,
-        key=lambda e: e.get("chunk_index", 0),
-    )
-    # Preserve original ASR raw_text for audit
-    raw_texts = [
-        (e.get("raw_text") or e.get("text") or "").strip()
-        for e in sorted_entries
-    ]
-    full_raw_text = "\n\n".join(t for t in raw_texts if t)
-    # Build display source: prefer already-corrected, then display, then text, then raw
-    local_texts = [
-        (e.get("display_text") or e.get("corrected_text") or e.get("text") or e.get("raw_text") or "").strip()
-        for e in sorted_entries
-    ]
-    full_local_text = "\n\n".join(t for t in local_texts if t)
-    if not full_local_text:
-        set_error(db, session_id, "transcript_finalize", error_message="Transcript is empty")
-        raise HTTPException(status_code=400, detail="Transcript is empty")
-    notebook = db.query(Notebook).filter(Notebook.id == session.notebook_id).first()
-    course_title = notebook.title if notebook else ""
-    keywords = session.keywords or []
+    agents_result = None
+    auto_generate = bool(body.get("auto_generate", True)) if body else True
+    if auto_generate:
+        force = bool(body.get("force", False)) if body else False
+        agents_result = auto_run_agents(session_id, current_user.id, force=force)
 
-    # Fetch PPT slides if available
-    ppt_slides = None
-    try:
-        if isinstance(note.ppt_images, list) and note.ppt_images:
-            last_ppt = note.ppt_images[-1]
-            if isinstance(last_ppt, dict):
-                ppt_slides = last_ppt.get("slides", [])
-    except Exception:
-        ppt_slides = None
-
-    # Tier 2 — local deterministic cleanup (always runs)
-    try:
-        local_display = corrector.clean_transcript_for_display(full_local_text).strip() or full_local_text
-    except Exception:
-        local_display = full_local_text
-
-    # Tier 3 — DeepSeek restructure (best-effort, never blocks)
-    display_text = local_display
-    corrected_text = None
-    is_ai_corrected = False
-    correction_error = None
-
-    if not getattr(corrector, "has_llm", False):
-        correction_error = "DeepSeek API 未配置，无法统一整理"
-    else:
-        try:
-            logger.info(
-                "transcript_finalize_start session_id=%s chunks=%s chars=%s",
-                session_id, len(sorted_entries), len(full_local_text),
-            )
-            ai_text = await asyncio.to_thread(
-                corrector.restructure_transcript,
-                full_local_text,
-                course_title,
-                keywords,
-                ppt_slides,
-            )
-            ai_text = (ai_text or "").strip()
-            if not ai_text:
-                raise ValueError("DeepSeek returned empty text")
-
-            ai_display = corrector.clean_transcript_for_display(ai_text).strip() or ai_text
-            display_text = ai_display
-            corrected_text = ai_display
-            is_ai_corrected = True
-            logger.info(
-                "transcript_finalize_done session_id=%s input_len=%s output_len=%s",
-                session_id, len(full_local_text), len(ai_display),
-            )
-        except Exception as exc:
-            logger.exception("transcript_finalize_failed session_id=%s", session_id)
-            correction_error = f"统一整理失败: {exc}"
-
-    # Update note with unified result (inline, NOT in thread pool — SQLAlchemy ORM is not thread-safe)
-    existing_content = (note.content or "").strip()
-    notes_content = ""
-    if existing_content.startswith("## 语音转文字"):
-        marker = "\n\n---\n\n"
-        if marker in existing_content:
-            notes_content = existing_content.split(marker, 1)[1].strip()
-
-    # Build new content
-    if notes_content:
-        note.content = f"## 语音转文字\n\n{display_text}\n\n---\n\n{notes_content}".strip()
-    else:
-        note.content = f"## 语音转文字\n\n{display_text}".strip()
-
-    # Build unified transcript entry
-    unified_entry = {
-        "chunk_index": 0,
-        "text": display_text,
-        "raw_text": full_raw_text,
-        "display_text": display_text,
-        "corrected_text": corrected_text,
-        "timestamps": [],
-        "is_corrected": display_text != full_local_text,
-        "is_ai_corrected": is_ai_corrected,
-        "correction_error": correction_error,
-        "is_restructured": False,
-        "correction_stage": "final",
-    }
-    # Merge timestamps from all entries
-    all_timestamps = []
-    for e in sorted_entries:
-        ts = e.get("timestamps", [])
-        if ts:
-            all_timestamps.extend(ts)
-    unified_entry["timestamps"] = all_timestamps
-
-    note.transcript = [unified_entry]
-
-    # Rebuild layout blocks
-    note_blocks = [
-        block for block in (note.layout_blocks or [])
-        if isinstance(block, dict) and block.get("type") == "note"
-    ]
-    transcript_blocks = [
-        {
-            "id": f"transcript-{i + 1}",
-            "type": "transcript",
-            "content": part.strip(),
-        }
-        for i, part in enumerate(display_text.split("\n\n"))
-        if part.strip()
-    ]
-    note.layout_blocks = transcript_blocks + note_blocks
-
-    db.commit()
-    db.refresh(note)
-
-    # Set state based on outcome
-    if is_ai_corrected:
-        set_ready(db, session_id, "transcript_finalize")
-    else:
-        set_fallback(db, session_id, "transcript_finalize", message="已使用本地整理稿", error_message=correction_error)
-
-    # Auto-trigger vector index
-    try:
-        set_running(db, session_id, "vector_index")
-        chunk_count = build_session_index(session_id, current_user, db)
-        current_hash = _compute_session_content_hash(note)
-        set_ready(db, session_id, "vector_index", content_hash=current_hash)
-    except Exception as e:
-        set_error(db, session_id, "vector_index", error_message=str(e))
-
-    return {
-        "id": note.id,
-        "session_id": note.session_id,
-        "content": note.content or "",
-        "transcript": note.transcript,
-        "ppt_images": note.ppt_images or [],
-        "vocabulary": note.vocabulary or [],
-        "layout_blocks": note.layout_blocks or [],
-        "created_at": note.created_at.isoformat() if note.created_at else None,
-    }
+    return {"note": note_payload, "agents": agents_result}

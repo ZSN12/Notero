@@ -10,9 +10,16 @@ from app.models import Note, Session as DBSession, Notebook, User
 from app.services.ppt_service import extract_keywords_from_ppt, parse_ppt_to_slides
 from app.services.slide_aligner import SlideAligner
 from app.services.file_service import save_file
-from app.config import SLIDE_DIR
+from app.config import SLIDE_DIR, MAX_PPT_SIZE
 
-MAX_PPT_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_PPT_FILE_SIZE = MAX_PPT_SIZE  # Use centralized config
+
+ALLOWED_PPT_TYPES = {
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.ms-powerpoint",
+    "application/pdf",
+    "application/octet-stream",
+}
 
 router = APIRouter()
 
@@ -103,21 +110,20 @@ def insert_ppt_into_transcript(
         return {"blocks": [{"type": "text", "content": transcript.strip()}]}
 
     # ── Build result blocks with sliding-window PPT matching ──
-    # Exclude the title/cover slide (page 1) from alignment — it has no
-    # meaningful content and tends to steal matches because its text is broad.
-    content_slides = [s for s in slides if s.get("page", 0) > 1]
-    if content_slides:
-        request_aligner.set_slides(content_slides)
-        # Re-map content-slide index → original slide list index
-        idx_map = {i: slides.index(s) for i, s in enumerate(content_slides)}
-    else:
-        content_slides = slides
-        idx_map = {i: i for i in range(len(slides))}
+    # Keep the title/cover slide (page 1) in alignment but rely on
+    # SlideAligner to weight it only by title, so the first real topic
+    # mention can match the cover slide without it stealing later matches.
+    content_slides = slides
+    request_aligner.set_slides(content_slides)
+    idx_map = {i: i for i in range(len(slides))}
 
     # Use a tight window (max 2 sentences) to avoid *lookahead pollution*:
     # a long window that includes the next slide's keywords pulls the current
     # sentence forward into the wrong slide.
-    WINDOW_MIN = 2
+    # During the opening phase we use a single-sentence window so the cover
+    # slide can be matched from the very first topic mention without being
+    # overwhelmed by the next sentence's section keywords.
+    WINDOW_OPEN = 1
     WINDOW_MAX = 2
     THRESHOLD = 0.15
     STICKY_MARGIN = 0.08
@@ -134,12 +140,20 @@ def insert_ppt_into_transcript(
         return request_aligner.match(text, threshold=th)
 
     while seg_idx < len(sentences):
-        window_end = min(seg_idx + WINDOW_MAX, len(sentences))
-        matched_idx = _match_window(seg_idx, window_end, THRESHOLD)
+        # Keep the aligner's positional state in sync with the slide we have
+        # actually accepted; guards/sticky logic may override a raw match so
+        # the aligner's internal current_page can drift otherwise.
+        if current_slide_idx is None:
+            request_aligner.current_page = None
+        else:
+            request_aligner.current_page = current_slide_idx
 
-        if matched_idx is None and window_end - seg_idx >= WINDOW_MIN:
-            short_end = min(seg_idx + WINDOW_MIN, len(sentences))
-            matched_idx = _match_window(seg_idx, short_end, THRESHOLD)
+        # Opening phase: single-sentence window to protect the cover slide match.
+        if current_slide_idx is None:
+            window_end = min(seg_idx + WINDOW_OPEN, len(sentences))
+        else:
+            window_end = min(seg_idx + WINDOW_MAX, len(sentences))
+        matched_idx = _match_window(seg_idx, window_end, THRESHOLD)
 
         # ── Sequential constraint + opening guard ──
         if matched_idx is not None:
@@ -147,8 +161,9 @@ def insert_ppt_into_transcript(
 
             if current_slide_idx is None:
                 # Opening phase: don't jump to a late slide (summary etc.)
-                # The first real content is usually page 2 or 3.
-                if matched_page > 3:
+                # Allow the cover slide (page 1) or first content slide (page 2)
+                # so the initial topic mention aligns with the title slide.
+                if matched_page > 2:
                     matched_idx = None
             else:
                 current_page = content_slides[current_slide_idx]["page"]
@@ -170,6 +185,29 @@ def insert_ppt_into_transcript(
             if current_score >= THRESHOLD and (
                 current_score + STICKY_MARGIN
             ) >= best_score:
+                matched_idx = current_slide_idx
+
+        # ── Summary guard ──
+        # The last slide is usually a keyword catch-all.  Don't jump to it
+        # from a content slide unless it wins by a clear margin or we have
+        # already covered most of the deck.
+        if (
+            matched_idx is not None
+            and current_slide_idx is not None
+            and matched_idx == len(content_slides) - 1
+            and current_slide_idx != len(content_slides) - 1
+        ):
+            window_text = "".join(sentences[seg_idx:window_end])
+            summary_score = request_aligner.get_slide_score(
+                window_text, matched_idx
+            )
+            current_score = request_aligner.get_slide_score(
+                window_text, current_slide_idx
+            )
+            if (
+                summary_score <= current_score + 0.15
+                and len(matched_pages) < len(content_slides) // 2
+            ):
                 matched_idx = current_slide_idx
 
         if matched_idx is not None:
@@ -235,6 +273,12 @@ async def upload_ppt(
     if file_ext not in ['.ppt', '.pptx', '.pdf']:
         raise HTTPException(status_code=400, detail="Only PPT, PPTX, and PDF files are supported")
 
+    if file.content_type and file.content_type not in ALLOWED_PPT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type: {file.content_type}. Allowed: application/vnd.openxmlformats-officedocument.presentationml.presentation, application/pdf, etc."
+        )
+
     try:
         file_bytes = await file.read()
         file_size = len(file_bytes)
@@ -261,7 +305,7 @@ async def upload_ppt(
                 session.keywords = keywords
                 db.commit()
         except Exception as kw_error:
-            print(f"[WARN] Keyword extraction failed: {kw_error}")
+            logger.warning("Keyword extraction failed: %s", kw_error)
 
         ppt_data = {
             "filename": file.filename,
@@ -299,10 +343,8 @@ async def upload_ppt(
         raise
     except Exception as e:
         db.rollback()
-        print(f"[ERROR] PPT upload error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("PPT upload failed")
+        raise HTTPException(status_code=500, detail="PPT processing failed")
 
 
 @router.post("/ppt-align")

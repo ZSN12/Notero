@@ -25,3 +25,14 @@ htmlcov
 uploads
 outputs
 data
+backend/tests/
+backend/scripts/
+backend/.coverage
+backend/htmlcov/
+backend/coverage_*.txt
+backend/*coverage*.txt
+backend/cov_*.txt
+backend/tests_*output.txt
+backend/tests_cov_summary.txt
+backend/pytest_bisect.log
+backend/bisect_tests.py

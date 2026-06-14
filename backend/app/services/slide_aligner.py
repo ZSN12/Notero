@@ -23,7 +23,7 @@ class SlideAligner:
         self.slides: List[Dict] = []
         self.slide_keywords: List[set] = []   # jieba keyword sets per slide
         self.slide_raw: List[str] = []        # raw text per slide (for substring matching)
-        self.current_page: int = 0
+        self.current_page: Optional[int] = None
         self._cache: Dict[str, set] = {}      # keyword extraction cache
 
     # ----------------------------------------------------------------
@@ -33,7 +33,7 @@ class SlideAligner:
     def set_slides(self, slides: List[Dict]):
         """Load slides and pre-compute keyword sets for fast matching."""
         self.slides = slides
-        self.current_page = 0
+        self.current_page = None
         self.slide_keywords = []
         self.slide_raw = []
         self._cache = {}
@@ -41,8 +41,13 @@ class SlideAligner:
         for slide in slides:
             text = slide.get("text", "") or ""
             title = slide.get("title", "") or ""
-            # Title appears twice for extra weight
-            combined = f"{title} {title} {text}"
+            # Title appears twice for extra weight.
+            # Cover slide (page 1) gets extra title weight so the title
+            # dominates over broad body text and still matches topic mentions.
+            if slide.get("page") == 1:
+                combined = f"{title} {title} {title} {text}"
+            else:
+                combined = f"{title} {title} {text}"
             kw_set = self._extract_keywords(combined)
             self.slide_keywords.append(kw_set)
             self.slide_raw.append(combined)
@@ -84,9 +89,12 @@ class SlideAligner:
         if best_score >= threshold:
             self.current_page = best_idx
             return best_idx
-        if margin >= 0.06 and best_score >= 0.05:
-            self.current_page = best_idx
-            return best_idx
+        # For the very first match, require a stronger signal to avoid
+        # generic opening sentences latching onto a random content slide.
+        if self.current_page is not None:
+            if margin >= 0.06 and best_score >= 0.05:
+                self.current_page = best_idx
+                return best_idx
 
         return None
 
@@ -156,7 +164,10 @@ class SlideAligner:
         base_score = keyword_score * 0.5 + substr_score * 0.5
 
         # 3) Positional bonus — only boosts slides that already have signal
-        distance = abs(slide_idx - self.current_page)
+        if self.current_page is None:
+            distance = slide_idx
+        else:
+            distance = abs(slide_idx - self.current_page)
         positional = 0.0
         if base_score > 0:
             if distance == 0:

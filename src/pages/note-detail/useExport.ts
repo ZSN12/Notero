@@ -167,7 +167,7 @@ export function useExport(session: Session | undefined | null, notebook: Noteboo
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${notebook.title}.nootbook`;
+      a.download = `${notebook.title}.notero`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 2000);
     } catch (err: unknown) {

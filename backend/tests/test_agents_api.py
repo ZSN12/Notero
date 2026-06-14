@@ -48,7 +48,7 @@ def _create_notebook_session_note(client: TestClient, headers: dict, content: st
 
     sess = client.post(
         f"/api/sessions?notebook_id={notebook_id}",
-        json={"title": "Agent Test Session", "summary": "Testing agents", "keywords": ["test"]},
+        json={"title": "Agent Test Session", "keywords": ["test"]},
         headers=headers,
     )
     assert sess.status_code == 201
@@ -89,7 +89,6 @@ def _wait_for_agent_status(
     raise AssertionError(f"Timed out waiting for {expected}, last={last}")
 
 
-MOCK_SUMMARY = {"summary": "这是一节关于测试的课程。"}
 MOCK_MINDMAP = {
     "title": "测试导图",
     "summary": "测试摘要",
@@ -131,9 +130,7 @@ def _mock_response_for_agent(role: str):
     response.choices = [MagicMock()]
     response.choices[0].finish_reason = "stop"
 
-    if role == "summary":
-        response.choices[0].message.content = json.dumps(MOCK_SUMMARY)
-    elif role == "mindmap":
+    if role == "mindmap":
         response.choices[0].message.content = json.dumps(MOCK_MINDMAP)
     elif role == "quiz":
         response.choices[0].message.content = json.dumps(MOCK_QUIZ)
@@ -150,13 +147,13 @@ def test_single_agent_returns_200_and_ready(mock_openai_cls):
     """Single agent run should return 200 with data, not 202."""
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
-    mock_client.chat.completions.create.return_value = _mock_response_for_agent("summary")
+    mock_client.chat.completions.create.return_value = _mock_response_for_agent("mindmap")
 
     with TestClient(app) as client:
         headers = auth_headers(client)
         _, session_id = _create_notebook_session_note(client, headers, content="测试内容")
 
-        resp = client.post(f"/api/agents/session/{session_id}/run/summary", headers=headers)
+        resp = client.post(f"/api/agents/session/{session_id}/run/mindmap", headers=headers)
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
         data = resp.json()
         assert data["status"] == "success"
@@ -168,7 +165,7 @@ def test_single_agent_reuses_active_task(mock_openai_cls):
     """When an active task exists, the endpoint should reuse it."""
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
-    mock_client.chat.completions.create.return_value = _mock_response_for_agent("summary")
+    mock_client.chat.completions.create.return_value = _mock_response_for_agent("mindmap")
 
     with TestClient(app) as client:
         headers = auth_headers(client)
@@ -182,7 +179,7 @@ def test_single_agent_reuses_active_task(mock_openai_cls):
         try:
             active_task = Task(
                 session_id=session_id,
-                task_type="agent_summary",
+                task_type="agent_mindmap",
                 status="running",
                 progress=0.5,
                 error_message=None,
@@ -196,7 +193,7 @@ def test_single_agent_reuses_active_task(mock_openai_cls):
 
         # Call endpoint without force — should reuse the active task.
         resp = client.post(
-            f"/api/agents/session/{session_id}/run/summary", headers=headers
+            f"/api/agents/session/{session_id}/run/mindmap", headers=headers
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()
@@ -211,7 +208,7 @@ def test_single_agent_stale_after_content_change(mock_openai_cls):
     """After content changes, existing agent output should be considered stale."""
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
-    mock_client.chat.completions.create.return_value = _mock_response_for_agent("summary")
+    mock_client.chat.completions.create.return_value = _mock_response_for_agent("mindmap")
 
     with TestClient(app) as client:
         headers = auth_headers(client)
@@ -220,7 +217,7 @@ def test_single_agent_stale_after_content_change(mock_openai_cls):
         )
 
         # First run
-        resp = client.post(f"/api/agents/session/{session_id}/run/summary", headers=headers)
+        resp = client.post(f"/api/agents/session/{session_id}/run/mindmap", headers=headers)
         assert resp.status_code == 200
 
         # Change content
@@ -234,13 +231,13 @@ def test_single_agent_stale_after_content_change(mock_openai_cls):
         )
 
         # Second run (not forced) should regenerate because stale.
-        resp2 = client.post(f"/api/agents/session/{session_id}/run/summary", headers=headers)
+        resp2 = client.post(f"/api/agents/session/{session_id}/run/mindmap", headers=headers)
         assert resp2.status_code == 200
         # Should have triggered a new run, not returned "ready".
         assert resp2.json()["status"] in ("success", "generating")
 
         # Wait for completion
-        task = _wait_for_agent_status(client, session_id, headers, "summary", {"success"})
+        task = _wait_for_agent_status(client, session_id, headers, "mindmap", {"success"})
         # Should have generated twice.
         assert mock_client.chat.completions.create.call_count == 2
 
@@ -253,14 +250,14 @@ def test_truncate_finish_reason_raises_error(mock_openai_cls):
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].finish_reason = "length"
-    mock_response.choices[0].message.content = '{"summary": "truncated...'
+    mock_response.choices[0].message.content = '{"title": "truncated...'
     mock_client.chat.completions.create.return_value = mock_response
 
     with TestClient(app) as client:
         headers = auth_headers(client)
         _, session_id = _create_notebook_session_note(client, headers, content="测试内容")
 
-        resp = client.post(f"/api/agents/session/{session_id}/run/summary", headers=headers)
+        resp = client.post(f"/api/agents/session/{session_id}/run/mindmap", headers=headers)
         assert resp.status_code == 502
         assert "截断" in resp.json()["detail"] or "length" in resp.json()["detail"]
 
@@ -279,7 +276,7 @@ def test_run_all_agents_reuses_active_tasks(mock_openai_cls):
 
     def slow_response(*args, **kwargs):
         time.sleep(0.1)
-        return _mock_response_for_agent("summary")
+        return _mock_response_for_agent("mindmap")
 
     mock_client.chat.completions.create.side_effect = slow_response
 
@@ -290,7 +287,7 @@ def test_run_all_agents_reuses_active_tasks(mock_openai_cls):
         # Start via run_all (async, returns 202 immediately)
         first = client.post(
             f"/api/agents/session/{session_id}/run",
-            json={"roles": ["summary"]},
+            json={"roles": ["mindmap"]},
             headers=headers,
         )
         assert first.status_code == 202
@@ -299,7 +296,7 @@ def test_run_all_agents_reuses_active_tasks(mock_openai_cls):
         # While still running, call run_all again — should reuse.
         second = client.post(
             f"/api/agents/session/{session_id}/run",
-            json={"roles": ["summary"]},
+            json={"roles": ["mindmap"]},
             headers=headers,
         )
         # In sync mode the first request blocks until completion, so the second
@@ -309,7 +306,7 @@ def test_run_all_agents_reuses_active_tasks(mock_openai_cls):
             assert second.json().get("reused") is True
             assert second.json()["agents"][0]["task_id"] == first_task_id
 
-        _wait_for_agent_status(client, session_id, headers, "summary", {"success"})
+        _wait_for_agent_status(client, session_id, headers, "mindmap", {"success"})
         # Sync mode: first call completes before second starts, so second may
         # regenerate (call_count can be 2).  Async mode: reuse prevents duplicate
         # (call_count == 1).  Both are acceptable as long as no duplicate active

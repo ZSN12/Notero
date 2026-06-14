@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getSessionProcessingStatus, SessionProcessingStatus } from '@/services/api';
 
-const POLL_INTERVAL_IDLE = 5000;
-const POLL_INTERVAL_RUNNING = 2500;
+const POLL_INTERVAL_IDLE = 8000;
+const POLL_INTERVAL_RUNNING = 4000;
 
 export function useProcessingStatus(sessionId: string | undefined) {
   const [processingStatus, setProcessingStatus] = useState<SessionProcessingStatus | null>(null);

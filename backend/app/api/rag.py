@@ -11,6 +11,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -19,17 +20,29 @@ from app.models import User, Notebook, Session as DBSession
 from app.services import vector_service
 from app.services.prompt_loader import load_prompt
 from app.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from app.middleware.metrics import observe_llm_call
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/rag", tags=["rag"])
+
+# Reuse OpenAI client across requests to avoid connection overhead
+_llm_client = None
+
+
+def _get_llm_client():
+    global _llm_client
+    if _llm_client is None and DEEPSEEK_API_KEY:
+        from openai import OpenAI
+        _llm_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    return _llm_client
 
 
 class RAGAskRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
     notebook_id: Optional[str] = None
-    top_k: int = 5
+    top_k: int = Field(5, ge=1, le=50)
 
 
 class SourceItem(BaseModel):
@@ -54,14 +67,14 @@ class RAGAskResponse(BaseModel):
 
 def _call_llm_stream(prompt: str, system: str):
     """Stream LLM response via OpenAI-compatible API."""
-    if not DEEPSEEK_API_KEY:
+    import time
+    client = _get_llm_client()
+    if not client:
         yield f"data: {json.dumps({'type': 'error', 'detail': 'AI 问答服务不可用，但索引资料仍可检索'}, ensure_ascii=False)}\n\n"
         return
 
+    start = time.perf_counter()
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-
         response = client.chat.completions.create(
             model=DEEPSEEK_MODEL,
             messages=[
@@ -77,7 +90,9 @@ def _call_llm_stream(prompt: str, system: str):
                 text = chunk.choices[0].delta.content
                 yield f"data: {json.dumps({'type': 'chunk', 'text': text}, ensure_ascii=False)}\n\n"
 
+        observe_llm_call(DEEPSEEK_MODEL, time.perf_counter() - start, success=True)
     except Exception as e:
+        observe_llm_call(DEEPSEEK_MODEL, time.perf_counter() - start, success=False)
         logger.exception("rag_llm_stream_failed")
         yield f"data: {json.dumps({'type': 'error', 'detail': f'AI 问答服务不可用，但索引资料仍可检索：{str(e)}'}, ensure_ascii=False)}\n\n"
 
@@ -126,9 +141,6 @@ def rag_ask(
     """
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
-
-    if req.top_k < 1 or req.top_k > 50:
-        raise HTTPException(status_code=400, detail="top_k must be between 1 and 50")
 
     # Validate ownership (both must be valid if provided)
     if req.notebook_id:

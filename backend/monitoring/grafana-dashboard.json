@@ -1,0 +1,153 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "notero-main",
+    "title": "Notero - System & Business Metrics",
+    "tags": ["notero", "fastapi", "ai"],
+    "timezone": "Asia/Shanghai",
+    "schemaVersion": 36,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "HTTP Request Rate",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum(rate(notero_http_requests_total[5m])) by (method, status_code)",
+            "legendFormat": "{{method}} {{status_code}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "custom": { "drawStyle": "line", "lineWidth": 2 }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "HTTP P99 Latency",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(notero_http_request_duration_seconds_bucket[5m])) by (le, path))",
+            "legendFormat": "{{path}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": { "drawStyle": "line", "lineWidth": 2 }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "LLM Calls (rate)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum(rate(notero_llm_calls_total[5m])) by (model, status)",
+            "legendFormat": "{{model}} - {{status}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "custom": { "drawStyle": "line", "lineWidth": 2 }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "LLM P95 Latency",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(notero_llm_call_duration_seconds_bucket[10m])) by (le, model))",
+            "legendFormat": "{{model}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": { "drawStyle": "line", "lineWidth": 2 }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "ASR Processing Time",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(notero_asr_processing_seconds_bucket[10m])) by (le, source))",
+            "legendFormat": "{{source}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": { "drawStyle": "line", "lineWidth": 2 }
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Agent Tasks",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum(rate(notero_agent_tasks_total[5m])) by (role, status)",
+            "legendFormat": "{{role}} - {{status}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "custom": { "drawStyle": "line", "lineWidth": 2 }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Vector Index Rebuilds",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum(rate(notero_vector_index_rebuilds_total[5m])) by (scope, status)",
+            "legendFormat": "{{scope}} - {{status}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "custom": { "drawStyle": "line", "lineWidth": 2 }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "HTTP Status Distribution",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "sum(rate(notero_http_requests_total[5m])) by (status_code)",
+            "legendFormat": "{{status_code}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+        "options": { "pieType": "donut" }
+      }
+    ]
+  },
+  "overwrite": true
+}

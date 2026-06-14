@@ -111,7 +111,6 @@ class TestRun:
         ctx = MagicMock()
         ctx.get_content_text.return_value = "Some content"
         ctx.session.title = "Test Session"
-        ctx.session.summary = "Summary"
         ctx.get_keywords_text.return_value = "kw1, kw2"
         ctx.note.vocabulary = []
         ctx.note.id = "note-1"
@@ -138,7 +137,6 @@ class TestRun:
         ctx = MagicMock()
         ctx.get_content_text.return_value = "Content"
         ctx.session.title = "Title"
-        ctx.session.summary = "Summary"
         ctx.get_keywords_text.return_value = "kw"
         ctx.note.vocabulary = []
         ctx.note.id = "note-1"

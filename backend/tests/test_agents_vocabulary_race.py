@@ -23,7 +23,7 @@ class AlphaAgent(BaseAgent):
     role = "alpha"
     task_type = "agent_alpha"
     output_kind = "alpha_output"
-    prompt_name = "summary"
+    prompt_name = "mindmap"
 
     def run(self, ctx: AgentContext) -> AgentResult:
         self.save_to_vocabulary(ctx, {"value": "alpha"})
@@ -35,7 +35,7 @@ class BetaAgent(BaseAgent):
     role = "beta"
     task_type = "agent_beta"
     output_kind = "beta_output"
-    prompt_name = "summary"
+    prompt_name = "mindmap"
 
     def run(self, ctx: AgentContext) -> AgentResult:
         self.save_to_vocabulary(ctx, {"value": "beta"})

@@ -65,7 +65,6 @@ def get_shared_session(
             "id": session.id,
             "notebook_id": session.notebook_id,
             "title": session.title,
-            "summary": session.summary,
             "keywords": session.keywords or [],
             "duration": session.duration,
             "status": session.status,
@@ -135,7 +134,5 @@ def _validate_share_token(session: DBSession, token: str) -> None:
 
 def _timing_safe_compare(a: str, b: str) -> bool:
     """Constant-time string comparison to prevent timing attacks."""
-    if len(a) != len(b):
-        return False
     import hmac
     return hmac.compare_digest(a.encode(), b.encode())

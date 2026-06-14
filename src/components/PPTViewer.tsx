@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { ChevronUp, ChevronDown, FileText, X } from 'lucide-react';
 import { getMediaUrl, Slide } from '@/services/api';
+import { AuthenticatedImage } from '@/components/AuthenticatedImage';
 
 interface PPTViewerProps {
   slides: Slide[];
@@ -106,10 +107,16 @@ export default function PPTViewer({
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <div className="flex-1 flex items-center justify-center p-3 min-h-0 bg-slate-50/50 dark:bg-slate-900/50">
           {imgUrl ? (
-            <img
+            <AuthenticatedImage
               src={imgUrl}
               alt={`Slide ${currentSlide.page}`}
               className="w-full h-full object-contain rounded-lg shadow-sm"
+              fallback={
+                <div className="flex flex-col items-center justify-center text-slate-400 dark:text-slate-500">
+                  <FileText className="w-8 h-8 mb-2 opacity-40" />
+                  <p className="text-xs">图片加载失败</p>
+                </div>
+              }
             />
           ) : (
             <div className="flex flex-col items-center justify-center text-slate-400 dark:text-slate-500">

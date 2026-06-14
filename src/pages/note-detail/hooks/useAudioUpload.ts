@@ -7,6 +7,7 @@ export interface AudioUploadCallbacks {
   clearStreamingTranscriptChunks: () => void;
   updateTranscriptText: (text: string, append: boolean) => void;
   appendTranscriptText: (text: string, skipDedup?: boolean) => void;
+  receiveAiText: (text: string, options?: { force?: boolean }) => void;
   clearStreamingTranscriptChunksFinal: () => void;
   clearContentBlocks: () => void;
   scrollToBottom: () => void;
@@ -19,11 +20,15 @@ const isPendingCorrectionMessage = (message?: string | null) => {
   return message.includes('等待统一 AI 整理') || message.includes('正在统一 AI 整理');
 };
 
-export function useAudioUpload(sessionId: string | undefined) {
+export function useAudioUpload(
+  sessionId: string | undefined,
+  options?: { onFinalize?: () => void },
+) {
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [audioUploadStatus, setAudioUploadStatus] = useState<string | null>(null);
   const [audioUploadError, setAudioUploadError] = useState<string | null>(null);
   const [audioQueueProgress, setAudioQueueProgress] = useState<{ current: number; total: number } | null>(null);
+  const [uploadPhase, setUploadPhase] = useState<'uploading' | 'transcribing' | 'finalizing'>('uploading');
   const audioInputRef = useRef<HTMLInputElement>(null);
   const audioUploadAbortRef = useRef<(() => void) | null>(null);
   const lastSseAtRef = useRef<number>(0);
@@ -75,11 +80,11 @@ export function useAudioUpload(sessionId: string | undefined) {
 
       const file = fileArray[i];
       const isFirstFile = i === 0;
+      setUploadPhase('uploading');
       setAudioQueueProgress({ current: i + 1, total: fileArray.length });
       setAudioUploadStatus(`正在上传录音文件 (${i + 1}/${fileArray.length})`);
-      onCorrectionStatus({ type: 'idle' });
-
       if (isFirstFile) {
+        onCorrectionStatus({ type: 'idle' });
         callbacks.clearDerivedTranscriptViews();
         callbacks.clearStreamingTranscriptChunks();
         callbacks.clearContentBlocks();
@@ -92,6 +97,9 @@ export function useAudioUpload(sessionId: string | undefined) {
       try {
         await new Promise<void>((resolve, reject) => {
           const { abort } = uploadAudio(file, sessionId, {
+            onStart: () => {
+              setUploadPhase('transcribing');
+            },
             onStatus: (message, segment, total) => {
               lastSseAtRef.current = Date.now();
               if (message) setAudioUploadStatus(`${message} (${i + 1}/${fileArray.length})`);
@@ -149,6 +157,7 @@ export function useAudioUpload(sessionId: string | undefined) {
         setIsUploadingAudio(false);
         setAudioUploadStatus(null);
         setAudioQueueProgress(null);
+        setUploadPhase('uploading');
         audioUploadAbortRef.current = null;
         if (audioInputRef.current) audioInputRef.current.value = '';
         return;
@@ -158,9 +167,11 @@ export function useAudioUpload(sessionId: string | undefined) {
     // All files uploaded. Run unified DeepSeek restructure.
     if (!queueAbortRef.current && sessionId) {
       try {
+        setUploadPhase('finalizing');
         setAudioUploadStatus('正在统一 AI 整理全部转写...');
         onCorrectionStatus({ type: 'processing', message: '正在统一 AI 整理全部转写...' });
-        const finalNote = await finalizeTranscript(sessionId);
+        const finalResult = await finalizeTranscript(sessionId);
+        const finalNote = finalResult?.note;
         if (finalNote?.transcript && Array.isArray(finalNote.transcript)) {
           const dbText = finalNote.transcript
             .map((c: any) => c.display_text || c.corrected_text || c.text || c.raw_text || '')
@@ -168,7 +179,9 @@ export function useAudioUpload(sessionId: string | undefined) {
             .join('\n\n')
             .trim();
           if (dbText) {
-            callbacks.updateTranscriptText(dbText, false);
+            // Respect user edits made during upload: receiveAiText will queue the
+            // AI-restructured version as pending instead of overwriting local changes.
+            callbacks.receiveAiText(dbText);
           }
           const lastEntry = finalNote.transcript[finalNote.transcript.length - 1] as any;
           if (lastEntry?.is_ai_corrected) {
@@ -180,22 +193,28 @@ export function useAudioUpload(sessionId: string | undefined) {
           }
         }
         await onTranscriptReady?.(finalNote);
+        options?.onFinalize?.();
       } catch (err: any) {
-        setAudioUploadError(err?.message || '统一整理失败');
+        const message = err?.message || '统一整理失败';
+        setAudioUploadError(message);
+        onCorrectionStatus({ type: 'error', message });
+      } finally {
+        options?.onFinalize?.();
       }
     }
 
     setIsUploadingAudio(false);
     setAudioUploadStatus(null);
     setAudioQueueProgress(null);
+    setUploadPhase('uploading');
     callbacks.clearStreamingTranscriptChunksFinal();
     if (audioInputRef.current) audioInputRef.current.value = '';
     audioUploadAbortRef.current = null;
   };
 
   return {
-    state: { isUploadingAudio, audioUploadStatus, audioUploadError, audioQueueProgress },
+    state: { isUploadingAudio, audioUploadStatus, audioUploadError, audioQueueProgress, uploadPhase },
     refs: { audioInputRef, audioUploadAbortRef },
-    actions: { handleAudioUpload, setAudioUploadStatus, setAudioUploadError, setIsUploadingAudio },
+    actions: { handleAudioUpload, setAudioUploadStatus, setAudioUploadError, setIsUploadingAudio, setUploadPhase },
   };
 }

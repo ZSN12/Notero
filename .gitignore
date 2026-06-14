@@ -61,7 +61,19 @@ backend/uploads/
 backend/outputs/
 data/
 
+# ML Models (downloaded on first run, do not commit)
+models/
+
 # IDE
 .idea/
 .claude/
 .trae/
+
+# Temporary / test artifacts
+audio_upload_response.txt
+ppt_insert_result.json
+resume_content.txt
+test_audio.wav
+test_slide_*.png
+fix-stale-frontend.py
+ppt-portfolio/

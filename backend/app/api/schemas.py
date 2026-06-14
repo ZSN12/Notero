@@ -98,7 +98,6 @@ class NotebookResponse(BaseModel):
 # Session Schemas
 class SessionCreate(BaseModel):
     title: str
-    summary: Optional[str] = None
     keywords: Optional[list[str]] = None
 
     @field_validator("title")
@@ -110,7 +109,6 @@ class SessionCreate(BaseModel):
 
 class SessionUpdate(BaseModel):
     title: Optional[str] = None
-    summary: Optional[str] = None
     keywords: Optional[list[str]] = None
     duration: Optional[str] = None
 
@@ -119,7 +117,6 @@ class SessionResponse(BaseModel):
     id: str
     notebook_id: str
     title: str
-    summary: Optional[str] = None
     keywords: list[str] = []
     duration: Optional[str] = None
     status: str = "pending"
@@ -134,8 +131,44 @@ class SessionResponse(BaseModel):
     def ensure_keywords_list(cls, v):
         return v if v is not None else []
 
-# Layout Block Schema
+# ── JSON Field Validation Models ──
+# These provide runtime validation for JSON/JSONB columns that would
+# otherwise accept any shape silently.
+
+class TranscriptTimestamp(BaseModel):
+    model_config = {"extra": "allow"}
+    text: str
+    start_ms: int
+    end_ms: int
+
+class TranscriptChunk(BaseModel):
+    model_config = {"extra": "allow"}
+    chunk_index: Optional[int] = None
+    raw_text: Optional[str] = None
+    text: Optional[str] = None
+    display_text: Optional[str] = None
+    corrected_text: Optional[str] = None
+    correction_stage: Optional[str] = None
+    timestamps: Optional[list[TranscriptTimestamp]] = None
+
+class PPTSlide(BaseModel):
+    model_config = {"extra": "allow"}
+    page: int
+    title: str
+    text: str
+    image_path: Optional[str] = None
+    image_base64: Optional[str] = None
+
+class PPTImageData(BaseModel):
+    model_config = {"extra": "allow"}
+    slides: list[PPTSlide] = []
+
+class VocabularyItem(BaseModel):
+    model_config = {"extra": "allow"}
+    kind: Optional[str] = None
+
 class LayoutBlock(BaseModel):
+    model_config = {"extra": "allow"}
     id: str
     type: str
     content: Optional[str] = None
@@ -161,9 +194,9 @@ class LayoutBlock(BaseModel):
 # Note Schemas
 class NoteCreate(BaseModel):
     content: Optional[str] = None
-    transcript: Optional[list] = None
-    ppt_images: Optional[list] = None
-    vocabulary: Optional[list[dict]] = None
+    transcript: Optional[list[TranscriptChunk]] = None
+    ppt_images: Optional[list[PPTImageData]] = None
+    vocabulary: Optional[list[VocabularyItem]] = None
     layout_blocks: Optional[list[LayoutBlock]] = None
 
 class NoteUpdate(BaseModel):
@@ -178,13 +211,13 @@ class NoteUpdate(BaseModel):
         return v
 
 class NoteResponse(BaseModel):
-    model_config = {"from_attributes": True}
+    model_config = {"from_attributes": True, "extra": "ignore"}
     id: str
     session_id: str
     content: Optional[str] = None
-    transcript: Optional[list] = None
-    ppt_images: Optional[list] = None
-    vocabulary: Optional[list[dict]] = None
+    transcript: Optional[list[TranscriptChunk]] = None
+    ppt_images: Optional[list[PPTImageData]] = None
+    vocabulary: Optional[list[VocabularyItem]] = None
     layout_blocks: Optional[list[LayoutBlock]] = None
     created_at: datetime
 
@@ -288,7 +321,6 @@ class PasswordChange(BaseModel):
 
 class SessionNoteBundle(BaseModel):
     title: str
-    summary: Optional[str] = None
     keywords: Optional[list[str]] = None
     content: Optional[str] = None
     transcript: Optional[list] = None

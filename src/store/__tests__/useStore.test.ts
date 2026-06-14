@@ -7,7 +7,7 @@ const mockNotebooks = [
 ]
 
 const mockSessions = [
-  { id: 's-1', notebookId: 'nb-1', title: 'Session 1', summary: '', keywords: [], icon: 'BookOpen', date: '2026-06-01', duration: '30min', content: '', status: 'active', createdAt: '2026-06-01' },
+  { id: 's-1', notebookId: 'nb-1', title: 'Session 1', keywords: [], icon: 'BookOpen', date: '2026-06-01', duration: '30min', content: '', status: 'active', createdAt: '2026-06-01' },
 ]
 
 describe('useStore', () => {
@@ -86,11 +86,26 @@ describe('useStore', () => {
 
   it('createSession adds session and updates notebook sessionCount', async () => {
     useStore.setState({ notebooks: mockNotebooks })
-    const newSession = { id: 's-2', notebookId: 'nb-1', title: 'New Session', summary: '', keywords: [], icon: 'BookOpen', date: '2026-06-02', duration: '30min', content: '', status: 'active', createdAt: '2026-06-02' }
+    const newSession = { id: 's-2', notebookId: 'nb-1', title: 'New Session', keywords: [], icon: 'BookOpen', date: '2026-06-02', duration: '30min', content: '', status: 'active', createdAt: '2026-06-02' }
     vi.spyOn(api, 'createSession').mockResolvedValue(newSession)
     await useStore.getState().createSession('nb-1', 'New Session')
     expect(useStore.getState().sessions).toContainEqual(newSession)
     expect(useStore.getState().notebooks[0].sessionCount).toBe(3)
+  })
+
+  it('updateSession updates existing session', async () => {
+    useStore.setState({ sessions: mockSessions })
+    const updated = { ...mockSessions[0], title: 'Updated Session' }
+    vi.spyOn(api, 'updateSession').mockResolvedValue(updated)
+    await useStore.getState().updateSession('s-1', 'Updated Session')
+    expect(useStore.getState().sessions[0].title).toBe('Updated Session')
+  })
+
+  it('updateSession handles errors', async () => {
+    useStore.setState({ sessions: mockSessions })
+    vi.spyOn(api, 'updateSession').mockRejectedValue(new Error('Update failed'))
+    await expect(useStore.getState().updateSession('s-1', 'Updated')).rejects.toThrow('Update failed')
+    expect(useStore.getState().error).toBe('Update failed')
   })
 
   it('removeNotebook filters out deleted notebook and its sessions', async () => {
@@ -107,5 +122,46 @@ describe('useStore', () => {
     vi.spyOn(api, 'fetchSessions').mockResolvedValue([])
     await useStore.getState().removeSession('nb-1', 's-1')
     expect(useStore.getState().sessions).toHaveLength(0)
+  })
+
+  it('createNotebook handles errors', async () => {
+    vi.spyOn(api, 'createNotebook').mockRejectedValue(new Error('Server error'))
+    await expect(useStore.getState().createNotebook('New')).rejects.toThrow('Server error')
+    expect(useStore.getState().error).toBe('Server error')
+  })
+
+  it('updateNotebook handles errors', async () => {
+    useStore.setState({ notebooks: mockNotebooks })
+    vi.spyOn(api, 'updateNotebook').mockRejectedValue(new Error('Update failed'))
+    await expect(useStore.getState().updateNotebook('nb-1', 'Updated')).rejects.toThrow('Update failed')
+    expect(useStore.getState().error).toBe('Update failed')
+  })
+
+  it('createSession handles errors', async () => {
+    vi.spyOn(api, 'createSession').mockRejectedValue(new Error('Create failed'))
+    await expect(useStore.getState().createSession('nb-1', 'New')).rejects.toThrow('Create failed')
+    expect(useStore.getState().error).toBe('Create failed')
+  })
+
+  it('removeNotebook handles errors', async () => {
+    useStore.setState({ notebooks: mockNotebooks })
+    vi.spyOn(api, 'deleteNotebook').mockRejectedValue(new Error('Delete failed'))
+    await expect(useStore.getState().removeNotebook('nb-1')).rejects.toThrow('Delete failed')
+    expect(useStore.getState().error).toBe('Delete failed')
+  })
+
+  it('removeSession handles errors', async () => {
+    useStore.setState({ notebooks: mockNotebooks, sessions: mockSessions })
+    vi.spyOn(api, 'deleteSession').mockRejectedValue(new Error('Delete failed'))
+    await expect(useStore.getState().removeSession('nb-1', 's-1')).rejects.toThrow('Delete failed')
+    expect(useStore.getState().error).toBe('Delete failed')
+  })
+
+  it('loadSessions handles errors', async () => {
+    vi.spyOn(api, 'fetchSessions').mockRejectedValue(new Error('Network error'))
+    await useStore.getState().loadSessions('nb-1')
+    expect(useStore.getState().sessions).toEqual([])
+    expect(useStore.getState().error).toBe('Network error')
+    expect(useStore.getState().loading).toBe(false)
   })
 })

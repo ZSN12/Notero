@@ -3,7 +3,7 @@ import shutil
 import uuid
 import os
 from pathlib import Path
-from app.config import AUDIO_DIR, PPT_DIR, IMAGE_DIR, MAX_AUDIO_SIZE, MAX_PPT_SIZE
+from app.config import AUDIO_DIR, PPT_DIR, IMAGE_DIR, SLIDE_DIR, MAX_AUDIO_SIZE, MAX_PPT_SIZE
 
 # Allowed UUID pattern for session_id validation
 _RE_SAFE_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -67,7 +67,7 @@ def delete_file(file_path: Path) -> None:
     if not file_path:
         return
     resolved = file_path.resolve()
-    allowed_bases = [AUDIO_DIR.resolve(), PPT_DIR.resolve(), IMAGE_DIR.resolve()]
+    allowed_bases = [AUDIO_DIR.resolve(), PPT_DIR.resolve(), IMAGE_DIR.resolve(), SLIDE_DIR.resolve()]
     if not any(resolved.is_relative_to(base) for base in allowed_bases):
         raise ValueError("Attempted to delete file outside allowed directories")
     if resolved.exists():
@@ -96,11 +96,73 @@ def delete_session_files(session_id: str, delete_audio: bool = False) -> None:
     if image_dir.exists():
         shutil.rmtree(image_dir)
 
+    # Delete rendered PPT slide images
+    slide_dir = SLIDE_DIR / sid
+    if slide_dir.exists():
+        shutil.rmtree(slide_dir)
 
-def delete_notebook_files(notebook_id: str, db) -> None:
-    """Delete all files for all sessions in a notebook."""
+
+def _delete_files_for_session_ids(session_ids: set[str]) -> None:
+    """Delete on-disk files for the given session ids.
+
+    Scans the shared audio/ppt directories once for the whole set instead of
+    once per session to avoid O(sessions * total_files) behaviour.
+    """
+    if not session_ids:
+        return
+
+    prefixes = {f"{sid}_" for sid in session_ids}
+
+    # Scan audio dir once
+    if AUDIO_DIR.exists():
+        for f in AUDIO_DIR.iterdir():
+            if f.is_file() and any(f.name.startswith(p) for p in prefixes):
+                f.unlink(missing_ok=True)
+
+    # Scan ppt dir once
+    if PPT_DIR.exists():
+        for f in PPT_DIR.iterdir():
+            if f.is_file() and any(f.name.startswith(p) for p in prefixes):
+                f.unlink(missing_ok=True)
+
+    # Delete image/slide dirs directly by session id
+    for sid in session_ids:
+        image_dir = IMAGE_DIR / sid
+        if image_dir.exists():
+            shutil.rmtree(image_dir)
+        slide_dir = SLIDE_DIR / sid
+        if slide_dir.exists():
+            shutil.rmtree(slide_dir)
+
+
+def delete_notebook_files(notebook_id: str, db=None) -> None:
+    """Delete all files for all sessions in a notebook.
+
+    Note: when called after the notebook has already been deleted from the DB,
+    no session ids will be found and files will NOT be cleaned up. Prefer
+    collecting session ids before deleting the notebook and passing them to
+    ``delete_notebook_files_by_session_ids``.
+    """
     from app.models import Session
+    from app.core.database import SessionLocal
 
-    sessions = db.query(Session).filter(Session.notebook_id == notebook_id).yield_per(50)
-    for session in sessions:
-        delete_session_files(session.id, delete_audio=True)
+    if db is None:
+        db = SessionLocal()
+        own_session = True
+    else:
+        own_session = False
+
+    try:
+        session_ids = {
+            sid for (sid,) in db.query(Session.id).filter(Session.notebook_id == notebook_id).all()
+        }
+    finally:
+        if own_session:
+            db.close()
+
+    _delete_files_for_session_ids(session_ids)
+
+
+def delete_notebook_files_by_session_ids(session_ids: list[str]) -> None:
+    """Delete all on-disk files for the given session ids."""
+    _delete_files_for_session_ids(set(session_ids))

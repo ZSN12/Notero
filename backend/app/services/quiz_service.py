@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session as DBSessionType
 from app.core.database import SessionLocal
 from app.core.task_runner import run_agent_task
 from app.services.vector_service import _compute_session_content_hash
-from app.services.state_service import set_running, set_ready, set_error
+from app.services.state_service import set_running, set_ready, set_error, get_state
+from app.services.note_utils import get_canonical_note_text
 
 
 logger = logging.getLogger(__name__)
@@ -191,56 +192,20 @@ def _sample_questions_for_attempt(all_questions: list[dict], quizzes: list[dict]
 # ── Content extraction ──
 
 def _extract_content_for_prompt(note: Note) -> str:
-    """Extract all note content into a single text for the AI prompt."""
-    parts = []
+    """Extract all note content into a single text for the AI prompt.
 
-    layout_blocks = note.layout_blocks
-    if layout_blocks and isinstance(layout_blocks, list):
-        for block in layout_blocks:
-            if not isinstance(block, dict):
-                continue
-            btype = block.get("type", "")
-            content = block.get("content", "")
-            page = block.get("page")
-            title = block.get("title", "")
+    Uses the canonical note text (transcript + notes + PPT) so that user edits
+    and deletions are respected and the same source is used across agents.
+    """
+    text = get_canonical_note_text(note, include_ppt=True)
+    if text.strip():
+        return text.strip()
 
-            if btype == "transcript" and content:
-                parts.append(f"[转写] {content.strip()}")
-            elif btype == "note" and content:
-                parts.append(f"[笔记] {content.strip()}")
-            elif btype == "ppt":
-                ppt_text = ""
-                if title:
-                    ppt_text += title + " "
-                if content:
-                    ppt_text += content + " "
-                if ppt_text.strip():
-                    parts.append(f"[PPT第{page or '?'}页] {ppt_text.strip()}")
+    # Fallback: raw content if canonical extraction returned nothing.
+    if note.content:
+        return note.content.strip()
 
-    if not parts and note.content:
-        parts.append(note.content.strip())
-
-    if note.transcript and isinstance(note.transcript, list):
-        transcript_text = " ".join(
-            chunk.get("text", "")
-            for chunk in sorted(note.transcript, key=lambda x: x.get("chunk_index", 0))
-            if isinstance(chunk, dict)
-        ).strip()
-        if transcript_text and not any("[转写]" in p for p in parts):
-            parts.append(f"[转写] {transcript_text}")
-
-    if note.ppt_images and isinstance(note.ppt_images, list):
-        for ppt_data in note.ppt_images:
-            if not isinstance(ppt_data, dict):
-                continue
-            for slide in ppt_data.get("slides", []):
-                if not isinstance(slide, dict):
-                    continue
-                slide_text = slide.get("text", "")
-                if slide_text:
-                    parts.append(f"[PPT第{slide.get('page', '?')}页] {slide_text.strip()}")
-
-    return "\n\n".join(parts)
+    return ""
 
 
 # ── Session ownership ──
@@ -420,6 +385,10 @@ def get_bank_status(session_id: str, user: User, db: DBSessionType) -> dict:
             "progress": 0,
             "error": None,
         }
+
+    current_state = get_state(db, session_id, "quiz_bank")
+    if current_state and current_state.status != "ready":
+        set_ready(db, session_id, "quiz_bank")
 
     return {
         "session_id": session_id,

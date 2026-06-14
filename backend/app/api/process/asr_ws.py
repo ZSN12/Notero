@@ -15,6 +15,7 @@ Backend sends:
 import asyncio
 import json
 import logging
+import re
 
 import jwt
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
@@ -24,6 +25,7 @@ from app.config import SECRET_KEY, ALGORITHM
 from app.core.database import SessionLocal
 from app.models import User, Session as DBSession, Notebook, Note
 from app.services.streaming_asr import StreamingASRManager
+from app.services.note_utils import _dedupe_append
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -47,6 +49,136 @@ def _decode_ws_token(token: str) -> User | None:
     try:
         user = db.query(User).filter(User.id == user_id).first()
         return user
+    finally:
+        db.close()
+
+
+def _save_note_from_payload(session_id: str, payload: dict) -> None:
+    """Best-effort save transcript data to note (used on 'end' and on disconnect)."""
+    db = SessionLocal()
+    try:
+        note = db.query(Note).filter(Note.session_id == session_id).first()
+        transcript_data = payload.get("transcript", [])
+
+        def _extract_notes_content(content: str | None) -> str:
+            existing = (content or "").strip()
+            if not existing:
+                return ""
+            marker = "\n\n---\n\n"
+            if existing.startswith("## 语音转文字"):
+                return existing.split(marker, 1)[1].strip() if marker in existing else ""
+            return ""
+
+        def _extract_transcript_text(content: str | None) -> str:
+            existing = (content or "").strip()
+            if not existing:
+                return ""
+            if existing.startswith("## 语音转文字"):
+                marker = "\n\n---\n\n"
+                if marker in existing:
+                    transcript_part = existing.split(marker, 1)[0].strip()
+                else:
+                    transcript_part = existing.strip()
+                if transcript_part.startswith("## 语音转文字"):
+                    transcript_part = transcript_part[len("## 语音转文字"):].strip()
+                return transcript_part
+            return ""
+
+        if note:
+            notes_content = _extract_notes_content(note.content)
+            existing_transcript_text = _extract_transcript_text(note.content)
+
+            new_display_text = ""
+            if transcript_data:
+                new_display_text = (
+                    transcript_data[0].get("display_text")
+                    or transcript_data[0].get("text")
+                    or ""
+                ).strip()
+
+            # If the user has already edited the transcript (indicated by a
+            # user_edited entry), keep the user-edited baseline and append the
+            # new ASR text after it, deduping any repeated prefix/overlap. The
+            # new ASR entries are still appended to note.transcript for audit.
+            has_user_edited = any(
+                isinstance(e, dict) and e.get("correction_stage") == "user_edited"
+                for e in (note.transcript or [])
+            )
+            if has_user_edited:
+                combined_transcript_text = _dedupe_append(existing_transcript_text, new_display_text)
+            elif existing_transcript_text and new_display_text:
+                combined_transcript_text = f"{existing_transcript_text}\n\n{new_display_text}".strip()
+            elif new_display_text:
+                combined_transcript_text = new_display_text
+            else:
+                combined_transcript_text = existing_transcript_text
+
+            if notes_content and combined_transcript_text:
+                note.content = f"## 语音转文字\n\n{combined_transcript_text}\n\n---\n\n{notes_content}".strip()
+            elif combined_transcript_text:
+                note.content = f"## 语音转文字\n\n{combined_transcript_text}".strip()
+            else:
+                note.content = notes_content
+
+            existing_transcript = list(note.transcript or [])
+            base_index = len(existing_transcript)
+            for i, entry in enumerate(transcript_data):
+                entry["chunk_index"] = base_index + i
+            existing_transcript.extend(transcript_data)
+            note.transcript = existing_transcript
+
+            existing_layout = list(note.layout_blocks or [])
+            note_blocks = [
+                block for block in existing_layout
+                if isinstance(block, dict) and block.get("type") == "note"
+            ]
+            all_transcript_blocks = [
+                {
+                    "id": f"transcript-{i + 1}",
+                    "type": "transcript",
+                    "content": part.strip(),
+                }
+                for i, part in enumerate(combined_transcript_text.split("\n\n"))
+                if part.strip()
+            ]
+            note.layout_blocks = all_transcript_blocks + note_blocks
+
+            db.commit()
+            db.refresh(note)
+        else:
+            display_text = ""
+            if transcript_data:
+                display_text = (
+                    transcript_data[0].get("display_text")
+                    or transcript_data[0].get("text")
+                    or ""
+                ).strip()
+            note = Note(
+                session_id=session_id,
+                transcript=transcript_data,
+                content=f"## 语音转文字\n\n{display_text}".strip() if display_text else "",
+                ppt_images=[],
+                vocabulary=[],
+            )
+            if display_text:
+                note.layout_blocks = [
+                    {
+                        "id": f"transcript-{i + 1}",
+                        "type": "transcript",
+                        "content": part.strip(),
+                    }
+                    for i, part in enumerate(display_text.split("\n\n"))
+                    if part.strip()
+                ]
+            db.add(note)
+            db.commit()
+            db.refresh(note)
+            logger.info(
+                "asr_ws_note_saved session_id=%s note_id=%s transcript_entries=%s",
+                session_id, note.id, len(transcript_data) if transcript_data else 0,
+            )
+    except Exception:
+        logger.exception("asr_ws_save_note_failed session_id=%s", session_id)
     finally:
         db.close()
 
@@ -121,18 +253,36 @@ async def asr_websocket(
         keywords=db_session.keywords or [],
     )
 
+    MAX_BINARY_SIZE = 1024 * 1024  # 1 MB per audio frame
+    MAX_TEXT_SIZE = 64 * 1024      # 64 KB per control message
+
     try:
         while True:
             message = await websocket.receive()
 
             if "bytes" in message:
                 pcm = message["bytes"]
+                if len(pcm) > MAX_BINARY_SIZE:
+                    logger.warning("asr_ws_oversized_binary session_id=%s size=%s", session_id, len(pcm))
+                    await websocket.send_json({
+                        "type": "error",
+                        "detail": f"Audio frame too large: {len(pcm)} bytes (max {MAX_BINARY_SIZE})",
+                    })
+                    continue
                 events = recognizer.feed_pcm(pcm)
                 for ev in events:
                     await websocket.send_json(ev)
 
             elif "text" in message:
-                data = json.loads(message["text"])
+                text = message["text"]
+                if len(text) > MAX_TEXT_SIZE:
+                    logger.warning("asr_ws_oversized_text session_id=%s size=%s", session_id, len(text))
+                    await websocket.send_json({
+                        "type": "error",
+                        "detail": f"Control message too large: {len(text)} bytes (max {MAX_TEXT_SIZE})",
+                    })
+                    continue
+                data = json.loads(text)
                 msg_type = data.get("type")
 
                 if msg_type == "start":
@@ -143,6 +293,10 @@ async def asr_websocket(
 
                 elif msg_type == "pause":
                     recognizer.pause()
+                    # Force-commit any buffered partial text so the user sees the
+                    # words spoken right before pausing instead of losing them.
+                    for ev in recognizer.flush_partial():
+                        await websocket.send_json(ev)
                     await websocket.send_json({
                         "type": "status",
                         "message": "已暂停",
@@ -157,134 +311,7 @@ async def asr_websocket(
 
                 elif msg_type == "end":
                     payload = recognizer.finalize()
-                    # Also save note to DB (append mode)
-                    db = SessionLocal()
-                    try:
-                        note = db.query(Note).filter(Note.session_id == session_id).first()
-                        transcript_data = payload.get("transcript", [])
-
-                        # Helper: extract notes content from existing note.content
-                        def _extract_notes_content(content: str | None) -> str:
-                            existing = (content or "").strip()
-                            if not existing:
-                                return ""
-                            marker = "\n\n---\n\n"
-                            if existing.startswith("## 语音转文字"):
-                                return existing.split(marker, 1)[1].strip() if marker in existing else ""
-                            return existing
-
-                        # Helper: extract transcript text from existing note.content
-                        def _extract_transcript_text(content: str | None) -> str:
-                            existing = (content or "").strip()
-                            if not existing:
-                                return ""
-                            if existing.startswith("## 语音转文字"):
-                                marker = "\n\n---\n\n"
-                                if marker in existing:
-                                    transcript_part = existing.split(marker, 1)[0].strip()
-                                else:
-                                    transcript_part = existing.strip()
-                                if transcript_part.startswith("## 语音转文字"):
-                                    transcript_part = transcript_part[len("## 语音转文字"):].strip()
-                                return transcript_part
-                            return ""
-
-                        if note:
-                            notes_content = _extract_notes_content(note.content)
-                            existing_transcript_text = _extract_transcript_text(note.content)
-
-                            # Get new display text from payload
-                            new_display_text = ""
-                            if transcript_data:
-                                new_display_text = (
-                                    transcript_data[0].get("display_text")
-                                    or transcript_data[0].get("text")
-                                    or ""
-                                ).strip()
-
-                            # Combine transcript text
-                            if existing_transcript_text and new_display_text:
-                                combined_transcript_text = f"{existing_transcript_text}\n\n{new_display_text}".strip()
-                            elif new_display_text:
-                                combined_transcript_text = new_display_text
-                            else:
-                                combined_transcript_text = existing_transcript_text
-
-                            # Update content
-                            if notes_content and combined_transcript_text:
-                                note.content = f"## 语音转文字\n\n{combined_transcript_text}\n\n---\n\n{notes_content}".strip()
-                            elif combined_transcript_text:
-                                note.content = f"## 语音转文字\n\n{combined_transcript_text}".strip()
-                            else:
-                                note.content = notes_content
-
-                            # Append transcript entries
-                            # Use list() copy so SQLAlchemy detects the mutation
-                            existing_transcript = list(note.transcript or [])
-                            base_index = len(existing_transcript)
-                            for i, entry in enumerate(transcript_data):
-                                entry["chunk_index"] = base_index + i
-                            existing_transcript.extend(transcript_data)
-                            note.transcript = existing_transcript
-
-                            # Rebuild layout blocks
-                            existing_layout = list(note.layout_blocks or [])
-                            note_blocks = [
-                                block for block in existing_layout
-                                if isinstance(block, dict) and block.get("type") == "note"
-                            ]
-                            all_transcript_blocks = [
-                                {
-                                    "id": f"transcript-{i + 1}",
-                                    "type": "transcript",
-                                    "content": part.strip(),
-                                }
-                                for i, part in enumerate(combined_transcript_text.split("\n\n"))
-                                if part.strip()
-                            ]
-                            note.layout_blocks = all_transcript_blocks + note_blocks
-
-                            db.commit()
-                            db.refresh(note)
-                        else:
-                            display_text = ""
-                            if transcript_data:
-                                display_text = (
-                                    transcript_data[0].get("display_text")
-                                    or transcript_data[0].get("text")
-                                    or ""
-                                ).strip()
-                            note = Note(
-                                session_id=session_id,
-                                transcript=transcript_data,
-                                content=f"## 语音转文字\n\n{display_text}".strip() if display_text else "",
-                                ppt_images=[],
-                                vocabulary=[],
-                            )
-                            if display_text:
-                                note.layout_blocks = [
-                                    {
-                                        "id": f"transcript-{i + 1}",
-                                        "type": "transcript",
-                                        "content": part.strip(),
-                                    }
-                                    for i, part in enumerate(display_text.split("\n\n"))
-                                    if part.strip()
-                                ]
-                            db.add(note)
-                            db.commit()
-                            db.refresh(note)
-                        # Inject note id into payload for done response
-                        payload["note_id"] = note.id
-                    except Exception as exc:
-                        logger.exception("asr_ws_save_note_failed session_id=%s", session_id)
-                        await websocket.send_json({
-                            "type": "error",
-                            "detail": f"保存笔记失败: {exc}",
-                        })
-                    finally:
-                        db.close()
-
+                    _save_note_from_payload(session_id, payload)
                     await _send_note_payload(websocket, payload)
                     break
 
@@ -294,6 +321,12 @@ async def asr_websocket(
 
     except WebSocketDisconnect:
         logger.info("asr_ws_disconnect session_id=%s", session_id)
+        # Best-effort save on abrupt disconnect (user closed tab/navigated away)
+        try:
+            payload = recognizer.finalize()
+            _save_note_from_payload(session_id, payload)
+        except Exception:
+            pass
     except Exception as exc:
         logger.exception("asr_ws_error session_id=%s", session_id)
         try:

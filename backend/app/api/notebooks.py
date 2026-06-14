@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.api.schemas import NotebookCreate, NotebookUpdate, NotebookResponse, NotebookPackage, NoteCreate
 from app.models import Notebook, User, Session as DBSession, Note, VectorChunk
-from app.services.file_service import delete_notebook_files
+from app.services.file_service import delete_notebook_files_by_session_ids
 from sqlalchemy import func as sql_func
 
 router = APIRouter(prefix="/api/notebooks", tags=["notebooks"])
@@ -71,25 +71,33 @@ def update_notebook(
 @router.delete("/{notebook_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_notebook(
     notebook_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    notebook = db.query(Notebook).filter(
+    # Collect session ids before deleting the notebook so we can clean up files
+    # afterwards (the DB cascade will remove the session rows).
+    session_ids = [
+        sid for (sid,) in db.query(DBSession.id).filter(DBSession.notebook_id == notebook_id).all()
+    ]
+
+    # Use a single bulk DELETE. All foreign keys referencing notebooks/sessions
+    # are defined with ON DELETE CASCADE, so the database removes child rows
+    # without SQLAlchemy having to load them.
+    deleted_count = db.query(Notebook).filter(
         Notebook.id == notebook_id,
         Notebook.user_id == current_user.id,
-    ).first()
-    if not notebook:
+    ).delete(synchronize_session=False)
+
+    if deleted_count == 0:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
-    # Remove vector_chunks for all sessions under this notebook to avoid
-    # FK constraint violations (SQLite does not support ON DELETE CASCADE).
-    db.query(VectorChunk).filter(VectorChunk.notebook_id == notebook_id).delete(
-        synchronize_session=False
-    )
-
-    delete_notebook_files(notebook_id, db)
-    db.delete(notebook)
     db.commit()
+
+    # File cleanup can be slow for notebooks with many sessions; run it in the
+    # background so the HTTP response returns immediately and the UI doesn't hang.
+    if session_ids:
+        background_tasks.add_task(delete_notebook_files_by_session_ids, session_ids)
     return None
 
 
@@ -121,7 +129,6 @@ def export_notebook(
 
         bundle = {
             "title": sess.title,
-            "summary": sess.summary,
             "keywords": sess.keywords or [],
         }
 
@@ -166,7 +173,7 @@ def import_notebook(
     db.flush()
 
     for sess_data in data.sessions:
-        session = DBSession(notebook_id=notebook.id, title=sess_data.title, summary=sess_data.summary, keywords=sess_data.keywords or [])
+        session = DBSession(notebook_id=notebook.id, title=sess_data.title, keywords=sess_data.keywords or [])
         db.add(session)
         db.flush()
 

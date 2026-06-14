@@ -128,7 +128,7 @@ class ReviewPlannerAgent(BaseAgent):
             prompt = prompt_template.render(
                 title=ctx.session.title or "未命名课次",
                 keywords=ctx.get_keywords_text(),
-                summary=ctx.session.summary or "暂无摘要",
+                summary="暂无摘要",
                 content=content_text,
                 mistakes=mistakes_text,
             )

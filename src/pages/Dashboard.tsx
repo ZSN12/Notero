@@ -30,8 +30,8 @@ export default function Dashboard() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.name.endsWith('.nootbook')) {
-      toast.error('请选择 .nootbook 文件');
+    if (!file.name.endsWith('.notero')) {
+      toast.error('请选择 .notero 文件');
       return;
     }
 
@@ -153,7 +153,7 @@ export default function Dashboard() {
             <input
               ref={importFileRef}
               type="file"
-              accept=".nootbook"
+              accept=".notero"
               onChange={handleImportFile}
               className="hidden"
             />

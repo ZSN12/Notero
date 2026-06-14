@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { sanitizeHTML } from '@/lib/sanitize'
+import { sanitizeHTML, escapeHtml } from '@/lib/sanitize'
 
 describe('sanitizeHTML', () => {
   it('removes script tags', () => {
@@ -25,5 +25,19 @@ describe('sanitizeHTML', () => {
   it('returns empty string for empty input', () => {
     const result = sanitizeHTML('') as unknown as string
     expect(result).toBe('')
+  })
+})
+
+describe('escapeHtml', () => {
+  it('escapes special HTML characters', () => {
+    expect(escapeHtml('<p>hello & "world"</p>')).toBe('&lt;p&gt;hello &amp; &quot;world&quot;&lt;/p&gt;')
+  })
+
+  it('escapes single quotes', () => {
+    expect(escapeHtml("it's")).toBe('it&#039;s')
+  })
+
+  it('returns plain text unchanged', () => {
+    expect(escapeHtml('plain text 123')).toBe('plain text 123')
   })
 })

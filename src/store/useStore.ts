@@ -7,6 +7,7 @@ import {
   deleteNotebook as apiDeleteNotebook,
   fetchSessions,
   createSession as apiCreateSession,
+  updateSession as apiUpdateSession,
   deleteSession as apiDeleteSession,
 } from '@/services/api';
 
@@ -16,13 +17,14 @@ interface StoreState {
   dialog: DialogState;
   loading: boolean;
   error: string | null;
-  openDialog: (type: DialogType, notebookId?: string, editingNotebook?: Notebook) => void;
+  openDialog: (type: DialogType, notebookId?: string, editingNotebook?: Notebook, editingSession?: Session) => void;
   closeDialog: () => void;
   loadNotebooks: () => Promise<void>;
   loadSessions: (notebookId: string) => Promise<void>;
   createNotebook: (title: string) => Promise<void>;
   updateNotebook: (notebookId: string, title: string) => Promise<void>;
   createSession: (notebookId: string, title: string) => Promise<void>;
+  updateSession: (sessionId: string, title: string) => Promise<void>;
   removeNotebook: (notebookId: string) => Promise<void>;
   removeSession: (notebookId: string, sessionId: string) => Promise<void>;
 }
@@ -34,8 +36,8 @@ export const useStore = create<StoreState>((set, get) => ({
   loading: false,
   error: null,
 
-  openDialog: (type, notebookId, editingNotebook) =>
-    set({ dialog: { isOpen: true, type, notebookId, editingNotebook } }),
+  openDialog: (type, notebookId, editingNotebook, editingSession) =>
+    set({ dialog: { isOpen: true, type, notebookId, editingNotebook, editingSession } }),
   closeDialog: () => set({ dialog: { isOpen: false, type: null } }),
 
   loadNotebooks: async () => {
@@ -113,6 +115,22 @@ export const useStore = create<StoreState>((set, get) => ({
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : '创建失败',
+      });
+      throw error;
+    }
+  },
+
+  updateSession: async (sessionId, title) => {
+    try {
+      const updated = await apiUpdateSession(sessionId, title);
+      set((state) => ({
+        sessions: state.sessions.map((s) =>
+          s.id === sessionId ? updated : s
+        ),
+      }));
+    } catch (error) {
+      set({
+        error: error instanceof Error ? error.message : '更新失败',
       });
       throw error;
     }

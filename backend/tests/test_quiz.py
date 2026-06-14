@@ -51,7 +51,7 @@ def _create_notebook_session_note(client: TestClient, headers: dict):
 
     sess = client.post(
         f"/api/sessions?notebook_id={notebook_id}",
-        json={"title": "Quiz V2 Session", "summary": "Testing quiz v2", "keywords": ["design", "patterns"]},
+        json={"title": "Quiz V2 Session", "keywords": ["design", "patterns"]},
         headers=headers,
     )
     assert sess.status_code == 201

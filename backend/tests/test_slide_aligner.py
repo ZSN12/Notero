@@ -71,7 +71,8 @@ class TestSlideAligner:
         assert aligner.current_page == 0
 
         aligner.set_slides([{"title": "B", "text": "bbb"}])
-        assert aligner.current_page == 0
+        # State should be reset to "no match yet"
+        assert aligner.current_page is None
         assert len(aligner.slides) == 1
         assert aligner.slides[0]["title"] == "B"
 
@@ -109,7 +110,11 @@ class TestSlideAligner:
         assert idx == 0
 
     def test_margin_winner_when_below_threshold(self):
-        """If no slide exceeds threshold but one clearly wins by margin, accept it."""
+        """If no slide exceeds threshold but one clearly wins by margin, accept it.
+
+        Margin fallback is only enabled after the first match has been made,
+        otherwise generic early chatter could lock onto an irrelevant slide.
+        """
         aligner = SlideAligner()
         aligner.set_slides([
             {"title": "A", "text": "xxx yyy zzz"},
@@ -117,5 +122,33 @@ class TestSlideAligner:
         ])
         # Input has a tiny overlap with A but almost none with B
         idx = aligner.match("xxx")
-        # Should still match A because margin > 0.06 (B has 0 score)
+        # "xxx" is a strong enough signal to exceed the threshold
+        assert idx == 0
+
+        # After the first match, a weak signal can still win by margin
+        aligner.current_page = 0
+        idx = aligner.match("zzz")
+        assert idx == 0
+
+    def test_first_match_below_threshold_returns_none(self):
+        """A weak first match should not lock onto a slide prematurely."""
+        aligner = SlideAligner()
+        aligner.set_slides([
+            {"title": "Introduction", "text": "welcome to the talk"},
+            {"title": "Methods", "text": "we used python"},
+        ])
+        # Generic filler below threshold should not match anything
+        idx = aligner.match("okay um so")
+        assert idx is None
+        assert aligner.current_page is None
+
+    def test_cover_slide_title_gets_extra_weight(self):
+        """The first slide title is boosted so the opening topic maps to it."""
+        aligner = SlideAligner()
+        aligner.set_slides([
+            {"title": "Design Patterns", "text": "Analysis of design patterns in library systems"},
+            {"title": "Service Layer", "text": "Business logic and data access separation"},
+            {"title": "Factory Pattern", "text": "Object creation details"},
+        ])
+        idx = aligner.match("design patterns in library systems")
         assert idx == 0

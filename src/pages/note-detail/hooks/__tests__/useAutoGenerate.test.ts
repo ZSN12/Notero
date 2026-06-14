@@ -1,196 +1,161 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { useAutoGenerate } from '@/pages/note-detail/hooks/useAutoGenerate'
-import * as api from '@/services/api'
+import { useAutoGenerate } from '../useAutoGenerate'
+import type { SessionProcessingStatus } from '@/services/api'
 
-function makeStage(status: api.ProcessingStatusValue): api.ProcessingStageState {
-  return {
-    status,
-    progress: 0,
-    message: null,
-    error_message: null,
-    content_hash: null,
-    started_at: null,
-    finished_at: null,
-  }
-}
+// Mock API module
+vi.mock('@/services/api', () => ({
+  runAllAgents: vi.fn(),
+}))
 
-function makeMockProcessing(opts: {
-  summary?: api.ProcessingStatusValue
-  mindmap?: api.ProcessingStatusValue
-  quiz_bank?: api.ProcessingStatusValue
-  vector_index?: api.ProcessingStatusValue
-  transcript_finalize?: api.ProcessingStatusValue
-} = {}): api.SessionProcessingStatus {
+import { runAllAgents } from '@/services/api'
+
+function makeStatus(
+  stages: Partial<SessionProcessingStatus['stages']>,
+): SessionProcessingStatus {
   return {
-    session_id: 's-1',
-    overall_status: 'ready',
-    can_ask_rag: true,
-    can_auto_generate: true,
-    needs_user_action: false,
+    session_id: 's1',
+    overall_status: 'idle',
     stages: {
-      upload_transcribe: makeStage('ready'),
-      recording_finalize: makeStage('ready'),
-      transcript_finalize: makeStage(opts.transcript_finalize ?? 'ready'),
-      vector_index: makeStage(opts.vector_index ?? 'ready'),
-      summary: makeStage(opts.summary ?? 'ready'),
-      mindmap: makeStage(opts.mindmap ?? 'ready'),
-      quiz_bank: makeStage(opts.quiz_bank ?? 'ready'),
+      upload_transcribe: { status: 'idle', progress: 0, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
+      recording_finalize: { status: 'idle', progress: 0, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
+      transcript_finalize: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'abc', started_at: null, finished_at: null },
+      vector_index: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'abc', started_at: null, finished_at: null },
+      mindmap: { status: 'idle', progress: 0, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
+      quiz_bank: { status: 'idle', progress: 0, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
+      ...stages,
     },
+    can_auto_generate: true,
+    can_ask_rag: true,
+    needs_user_action: false,
+    latest_tasks: [],
+    vector_chunks_count: 0,
   }
 }
 
 describe('useAutoGenerate', () => {
   beforeEach(() => {
-    vi.resetAllMocks()
+    vi.clearAllMocks()
     localStorage.clear()
   })
 
-  it('initializes autoGenerateStudyMaterials from localStorage', () => {
-    localStorage.setItem('nootbook_auto_generate_study_materials', 'false')
-    const { result } = renderHook(() => useAutoGenerate('s-1', makeMockProcessing()))
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('reads auto-generate setting from localStorage', () => {
+    localStorage.setItem('notero_auto_generate_study_materials', 'false')
+    const { result } = renderHook(() => useAutoGenerate('s1', null))
     expect(result.current.state.autoGenerateStudyMaterials).toBe(false)
   })
 
-  it('defaults autoGenerateStudyMaterials to true when localStorage is empty', () => {
-    const { result } = renderHook(() => useAutoGenerate('s-1', makeMockProcessing()))
+  it('defaults to true when localStorage is empty', () => {
+    const { result } = renderHook(() => useAutoGenerate('s1', null))
     expect(result.current.state.autoGenerateStudyMaterials).toBe(true)
   })
 
   it('persists setting to localStorage', () => {
-    const { result } = renderHook(() => useAutoGenerate('s-1', makeMockProcessing()))
+    const { result } = renderHook(() => useAutoGenerate('s1', null))
     act(() => {
       result.current.actions.setAutoGenerateStudyMaterials(false)
     })
-    expect(localStorage.getItem('nootbook_auto_generate_study_materials')).toBe('false')
+    expect(localStorage.getItem('notero_auto_generate_study_materials')).toBe('false')
     expect(result.current.state.autoGenerateStudyMaterials).toBe(false)
   })
 
-  it('shows completion toast when all agent stages are ready', async () => {
-    const { result } = renderHook(() => useAutoGenerate('s-1', makeMockProcessing()))
-    await waitFor(() => {
-      expect(result.current.state.autoGenerateToast).toBe('导图和题库生成完成')
+  it('shows running toast when any agent is running', () => {
+    const status = makeStatus({
+      mindmap: { status: 'running', progress: 0.5, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
     })
+    const { result } = renderHook(() => useAutoGenerate('s1', status))
+    expect(result.current.state.autoGenerateToast).toBe('正在生成学习资料...')
   })
 
-  it('shows running toast when any agent stage is running', async () => {
-    const { result } = renderHook(() =>
-      useAutoGenerate('s-1', makeMockProcessing({ summary: 'running' })),
-    )
-    expect(result.current.state.autoGenerateToast).toBe('正在自动生成学习资料...')
-  })
-
-  it('shows error toast when any agent stage has error', async () => {
-    const { result } = renderHook(() =>
-      useAutoGenerate('s-1', makeMockProcessing({ mindmap: 'error' })),
-    )
-    await waitFor(() => {
-      expect(result.current.state.autoGenerateToast).toBe('部分学习资料生成失败，可手动重试')
+  it('shows success toast when all agents are ready', async () => {
+    vi.mocked(runAllAgents).mockResolvedValue({ workflow_id: 'wf-1', session_id: 's1', agents: [] })
+    const status = makeStatus({
+      mindmap: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'h2', started_at: null, finished_at: null },
+      quiz_bank: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'h3', started_at: null, finished_at: null },
     })
-  })
-
-  it('handleTriggerAgents calls runAllAgents when given a sessionId', async () => {
-    vi.spyOn(api, 'runAllAgents').mockResolvedValue({
-      workflow_id: 'w-1',
-      session_id: 's-1',
-      agents: [],
-    })
-
-    // Use idle agent stages so observer effect doesn't set completion toast
-    const { result } = renderHook(() =>
-      useAutoGenerate('s-1', makeMockProcessing({ summary: 'idle', mindmap: 'idle', quiz_bank: 'idle' })),
-    )
+    const { result } = renderHook(() => useAutoGenerate('s1', status))
 
     await act(async () => {
-      await result.current.actions.handleTriggerAgents('s-1')
+      await Promise.resolve()
     })
-
-    expect(api.runAllAgents).toHaveBeenCalledWith('s-1', ['summary', 'mindmap', 'quiz'])
+    expect(result.current.state.autoGenerateToast).toBe('学习资料生成完成')
   })
 
-  it('handleTriggerAgents does nothing when given undefined', async () => {
-    vi.spyOn(api, 'runAllAgents').mockResolvedValue({
-      workflow_id: 'w-1',
-      session_id: 's-1',
-      agents: [],
+  it('shows error toast when any agent fails', async () => {
+    vi.mocked(runAllAgents).mockResolvedValue({ workflow_id: 'wf-1', session_id: 's1', agents: [] })
+    const status = makeStatus({
+      mindmap: { status: 'error', progress: 1, message: null, error_message: 'fail', content_hash: null, started_at: null, finished_at: null },
+      quiz_bank: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'h3', started_at: null, finished_at: null },
     })
-
-    const { result } = renderHook(() =>
-      useAutoGenerate(undefined, makeMockProcessing({ summary: 'idle', mindmap: 'idle', quiz_bank: 'idle' })),
-    )
+    const { result } = renderHook(() => useAutoGenerate('s1', status))
 
     await act(async () => {
-      await result.current.actions.handleTriggerAgents(undefined)
+      await Promise.resolve()
     })
-
-    expect(api.runAllAgents).not.toHaveBeenCalled()
+    expect(result.current.state.autoGenerateToast).toBe('导图生成失败，可手动重试')
   })
 
-  it('handleTriggerAgents shows error toast on failure', async () => {
-    vi.spyOn(api, 'runAllAgents').mockRejectedValue(new Error('agent error'))
-
-    const { result } = renderHook(() =>
-      useAutoGenerate('s-1', makeMockProcessing({ summary: 'idle', mindmap: 'idle', quiz_bank: 'idle' })),
-    )
+  it('clears toast after timeout', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.mocked(runAllAgents).mockResolvedValue({ workflow_id: 'wf-1', session_id: 's1', agents: [] })
+    const status = makeStatus({
+      mindmap: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'h2', started_at: null, finished_at: null },
+      quiz_bank: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'h3', started_at: null, finished_at: null },
+    })
+    const { result } = renderHook(() => useAutoGenerate('s1', status))
 
     await act(async () => {
-      await result.current.actions.handleTriggerAgents('s-1')
+      await Promise.resolve()
     })
+    expect(result.current.state.autoGenerateToast).toBe('学习资料生成完成')
 
-    expect(result.current.state.autoGenerateToast).toBe('自动启动学习资料生成失败，可手动重试')
+    act(() => {
+      vi.advanceTimersByTime(4001)
+    })
+    expect(result.current.state.autoGenerateToast).toBeNull()
+    vi.useRealTimers()
   })
 
-  it('auto-triggers agents when vector_index and transcript_finalize are ready', async () => {
-    vi.spyOn(api, 'runAllAgents').mockResolvedValue({
-      workflow_id: 'w-1',
-      session_id: 's-1',
-      agents: [],
-    })
-
-    renderHook(() => useAutoGenerate('s-1', makeMockProcessing()))
+  it('auto-triggers agents when transcript and vector index are ready', async () => {
+    vi.mocked(runAllAgents).mockResolvedValueOnce({ workflow_id: 'wf-1', session_id: 's1', agents: [] })
+    const status = makeStatus({})
+    renderHook(() => useAutoGenerate('s1', status))
 
     await waitFor(() => {
-      expect(api.runAllAgents).toHaveBeenCalledWith('s-1', ['summary', 'mindmap', 'quiz'])
+      expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap', 'quiz'])
     })
   })
 
-  it('does not auto-trigger when autoGenerateStudyMaterials is disabled', async () => {
-    localStorage.setItem('nootbook_auto_generate_study_materials', 'false')
-    vi.spyOn(api, 'runAllAgents').mockResolvedValue({
-      workflow_id: 'w-1',
-      session_id: 's-1',
-      agents: [],
-    })
-
-    renderHook(() => useAutoGenerate('s-1', makeMockProcessing()))
-
-    await new Promise((r) => setTimeout(r, 50))
-    expect(api.runAllAgents).not.toHaveBeenCalled()
+  it('does not auto-trigger when auto-generate is disabled', () => {
+    localStorage.setItem('notero_auto_generate_study_materials', 'false')
+    const status = makeStatus({})
+    renderHook(() => useAutoGenerate('s1', status))
+    expect(runAllAgents).not.toHaveBeenCalled()
   })
 
-  it('does not auto-trigger when vector_index is not ready', async () => {
-    vi.spyOn(api, 'runAllAgents').mockResolvedValue({
-      workflow_id: 'w-1',
-      session_id: 's-1',
-      agents: [],
+  it('handleTriggerAgents calls runAllAgents with default roles', async () => {
+    vi.mocked(runAllAgents).mockResolvedValueOnce({ workflow_id: 'wf-1', session_id: 's1', agents: [] })
+    const { result } = renderHook(() => useAutoGenerate('s1', null))
+
+    await act(async () => {
+      await result.current.actions.handleTriggerAgents('s1')
     })
 
-    renderHook(() => useAutoGenerate('s-1', makeMockProcessing({ vector_index: 'running' })))
-
-    await new Promise((r) => setTimeout(r, 50))
-    expect(api.runAllAgents).not.toHaveBeenCalled()
+    expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap', 'quiz'])
   })
 
-  it('does not auto-trigger when transcript_finalize is not ready', async () => {
-    vi.spyOn(api, 'runAllAgents').mockResolvedValue({
-      workflow_id: 'w-1',
-      session_id: 's-1',
-      agents: [],
+  it('handleTriggerAgents calls runAllAgents with given roles', async () => {
+    vi.mocked(runAllAgents).mockResolvedValueOnce({ workflow_id: 'wf-1', session_id: 's1', agents: [] })
+    const { result } = renderHook(() => useAutoGenerate('s1', null))
+
+    await act(async () => {
+      await result.current.actions.handleTriggerAgents('s1', ['mindmap'])
     })
 
-    renderHook(() => useAutoGenerate('s-1', makeMockProcessing({ transcript_finalize: 'running' })))
-
-    await new Promise((r) => setTimeout(r, 50))
-    expect(api.runAllAgents).not.toHaveBeenCalled()
+    expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap'])
   })
 })

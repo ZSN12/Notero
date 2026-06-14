@@ -16,6 +16,7 @@ VALID_IMPORTANCE = {"high", "medium", "low"}
 DEFAULT_IMPORTANCE = "medium"
 VALID_RELATION_TYPES = {"contrast", "step", "example_of", "used_by", "depends_on", "warning", "related"}
 DEFAULT_RELATION_TYPE = "related"
+RESERVED_NODE_IDS = {"root"}
 RELATION_LABELS = {
     "contrast": "对比",
     "step": "步骤",
@@ -105,6 +106,21 @@ def _collect_all_node_ids(nodes: list) -> set[str]:
     return ids
 
 
+def _remap_reserved_ids(nodes: list, id_remap: dict[str, str], counter: list[int]) -> None:
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        node_id = n.get("id")
+        if node_id in RESERVED_NODE_IDS:
+            new_id = f"node-root-{counter[0]}"
+            counter[0] += 1
+            id_remap[str(node_id)] = new_id
+            n["id"] = new_id
+        children = n.get("children", [])
+        if isinstance(children, list):
+            _remap_reserved_ids(children, id_remap, counter)
+
+
 def normalize_mind_map_relations(raw_relations, valid_node_ids: set[str]) -> list[dict]:
     """Normalize relations, discarding invalid ones."""
     if not isinstance(raw_relations, list):
@@ -147,6 +163,19 @@ def normalize_mind_map_data(data: dict) -> dict:
         raise ValueError("AI 返回的 JSON 不是对象")
 
     raw_nodes = data.get("nodes", [])
+
+    # Remap reserved ids before normalization
+    id_remap: dict[str, str] = {}
+    _remap_reserved_ids(raw_nodes, id_remap, [0])
+
+    if id_remap and isinstance(data.get("relations"), list):
+        for r in data["relations"]:
+            if isinstance(r, dict):
+                if r.get("source") in id_remap:
+                    r["source"] = id_remap[r["source"]]
+                if r.get("target") in id_remap:
+                    r["target"] = id_remap[r["target"]]
+
     nodes = normalize_mind_map_nodes(raw_nodes)
     if not nodes:
         raise ValueError("AI 返回的 JSON 中没有有效的节点")

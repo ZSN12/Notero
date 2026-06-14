@@ -9,7 +9,8 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import SessionProcessingState
+from app.models import SessionProcessingState, Task, VectorChunk, Note
+from app.services.vector_service import _compute_session_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +19,89 @@ VALID_STAGES = {
     "recording_finalize",
     "transcript_finalize",
     "vector_index",
-    "summary",
     "mindmap",
     "quiz_bank",
 }
 
 VALID_STATUSES = {"idle", "running", "ready", "error", "stale", "fallback"}
+
+
+_HEALABLE_STATUSES = {"error", "stale", "idle", "fallback"}
+
+
+def _get_stored_output_hash(note: Note, stage: str) -> str | None:
+    """Return the content_hash stored inside an agent output vocabulary entry."""
+    if not note or not isinstance(note.vocabulary, list):
+        return None
+    kind = None
+    if stage == "mindmap":
+        kind = "mind_map"
+    elif stage == "quiz_bank":
+        kind = "quiz_bank"
+    else:
+        return None
+    for item in note.vocabulary:
+        if isinstance(item, dict) and item.get("kind") == kind:
+            return item.get("content_hash") or None
+    return None
+
+
+def _heal_stage_state_if_fresh(
+    db: Session, session_id: str, stage: str, note: Note
+) -> SessionProcessingState | None:
+    """Promote a stage to ready if fresh output exists, regardless of a stale/error state row.
+
+    Fixes the common case where the agent task row ended in error (or the state
+    row was never updated) but the actual output — mind map / quiz bank in
+    note.vocabulary, or vector chunks in the vector_index table — was saved and
+    matches the current note content hash.
+    """
+    if stage not in ("mindmap", "quiz_bank", "vector_index"):
+        return None
+    state = (
+        db.query(SessionProcessingState)
+        .filter(
+            SessionProcessingState.session_id == session_id,
+            SessionProcessingState.stage == stage,
+        )
+        .first()
+    )
+    if state and state.status not in _HEALABLE_STATUSES:
+        return state
+
+    current_hash = _compute_session_content_hash(note)
+    is_fresh = False
+
+    if stage == "vector_index":
+        sample_chunk = (
+            db.query(VectorChunk)
+            .filter(VectorChunk.session_id == session_id)
+            .first()
+        )
+        if sample_chunk and sample_chunk.chunk_meta:
+            is_fresh = sample_chunk.chunk_meta.get("session_content_hash") == current_hash
+    else:
+        stored_hash = _get_stored_output_hash(note, stage)
+        is_fresh = bool(stored_hash and stored_hash == current_hash)
+
+    if is_fresh:
+        if not state:
+            state = SessionProcessingState(
+                session_id=session_id,
+                stage=stage,
+                status="ready",
+                progress=1.0,
+                content_hash=current_hash,
+            )
+            db.add(state)
+        else:
+            state.status = "ready"
+            state.progress = 1.0
+            state.content_hash = current_hash
+            state.error_message = None
+            state.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    return state
 
 
 def _get_or_create_state(
@@ -102,6 +180,7 @@ def set_error(
     state = _get_or_create_state(db, session_id, stage)
     state.status = "error"
     state.progress = 1.0
+    state.message = None
     state.error_message = error_message
     state.finished_at = datetime.now(timezone.utc)
     if commit:
@@ -227,19 +306,44 @@ def get_session_processing_status(db: Session, session_id: str) -> dict:
 
     stage_map = {s.stage: s for s in states}
 
+    # Self-heal stages: if actual output (mind map / quiz bank / vector chunks)
+    # exists and matches the current content hash, promote the persisted state
+    # row to ready even if it says error/stale/idle.
+    note = db.query(Note).filter(Note.session_id == session_id).first()
+    if note:
+        for stage_to_heal in ("vector_index", "mindmap", "quiz_bank"):
+            healed = _heal_stage_state_if_fresh(db, session_id, stage_to_heal, note)
+            if healed:
+                stage_map[stage_to_heal] = healed
+
     stages = {}
     for stage in VALID_STAGES:
         stages[stage] = _stage_to_dict(stage_map.get(stage))
 
-    # overall_status logic
-    statuses = [s.status for s in stage_map.values()]
-    if "running" in statuses:
+    # overall_status logic: be explicit about the core pipeline vs. auxiliary
+    # learning-material stages so the UI never shows "ready" while something
+    # critical is still missing or stale.
+    core_stages = ["transcript_finalize", "vector_index"]
+    auxiliary_stages = ["mindmap", "quiz_bank"]
+    all_statuses = [s.status for s in stage_map.values()]
+
+    if not stage_map or all(s == "idle" for s in all_statuses):
+        overall_status = "idle"
+    elif any(s == "running" for s in all_statuses):
         overall_status = "running"
-    elif "error" in statuses:
+    elif any(s == "error" for s in all_statuses):
         overall_status = "error"
-    elif "fallback" in statuses:
+    elif stages.get("transcript_finalize", {}).get("status") == "fallback":
+        # Transcript used local fallback: not an error, but not fully AI ready.
         overall_status = "fallback"
-    elif all(s in ("ready", "idle") for s in statuses):
+    elif any(s == "stale" for s in all_statuses):
+        # Core ready but some auxiliary material is stale → partial ready.
+        overall_status = "stale"
+    elif (
+        all(stages.get(s, {}).get("status") in ("ready", "idle") for s in VALID_STAGES)
+        and stages.get("transcript_finalize", {}).get("status") == "ready"
+        and stages.get("vector_index", {}).get("status") == "ready"
+    ):
         overall_status = "ready"
     else:
         overall_status = "idle"
@@ -256,6 +360,20 @@ def get_session_processing_status(db: Session, session_id: str) -> dict:
         stages[s].get("status") in ("error", "fallback") for s in VALID_STAGES
     )
 
+    # Aggregate auxiliary data to reduce front-end request fan-out
+    latest_tasks = (
+        db.query(Task)
+        .filter(Task.session_id == session_id)
+        .order_by(Task.created_at.desc())
+        .limit(5)
+        .all()
+    )
+    vector_chunks_count = (
+        db.query(VectorChunk)
+        .filter(VectorChunk.session_id == session_id)
+        .count()
+    )
+
     return {
         "session_id": session_id,
         "overall_status": overall_status,
@@ -263,4 +381,16 @@ def get_session_processing_status(db: Session, session_id: str) -> dict:
         "can_auto_generate": can_auto_generate,
         "can_ask_rag": can_ask_rag,
         "needs_user_action": needs_user_action,
+        "latest_tasks": [
+            {
+                "id": t.id,
+                "task_type": t.task_type,
+                "status": t.status,
+                "progress": float(t.progress or 0.0),
+                "error_message": t.error_message,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in latest_tasks
+        ],
+        "vector_chunks_count": vector_chunks_count,
     }

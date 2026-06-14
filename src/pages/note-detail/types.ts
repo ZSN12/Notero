@@ -50,7 +50,6 @@ export interface NoteRecord {
 export interface SessionRecord {
   id: string;
   title: string;
-  summary?: string;
   keywords?: string[];
   duration?: string;
   notebook_id: string;

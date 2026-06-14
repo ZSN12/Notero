@@ -2,6 +2,8 @@ import { API_BASE } from '@/config';
 import { getToken } from '@/services/auth';
 import type { BackendNote } from '@/services/api';
 
+const IS_DEV = import.meta.env.DEV;
+
 export interface ASRWebSocketCallbacks {
   onPartial: (text: string, startMs: number, endMs: number) => void;
   onFinal: (text: string, startMs: number, endMs: number) => void;
@@ -42,6 +44,7 @@ export class ASRWebSocketClient {
     return new Promise((resolve, reject) => {
       this.ws!.onopen = () => {
         this._connected = true;
+        if (IS_DEV) console.log('[ASRWebSocket] connected');
         this.sendJson({ type: 'start' });
         resolve();
       };
@@ -53,12 +56,14 @@ export class ASRWebSocketClient {
           // ignore non-JSON
         }
       };
-      this.ws!.onerror = () => {
+      this.ws!.onerror = (err) => {
         this._connected = false;
+        if (IS_DEV) console.error('[ASRWebSocket] error:', err);
         reject(new Error('WebSocket 连接失败'));
       };
       this.ws!.onclose = () => {
         this._connected = false;
+        if (IS_DEV) console.log('[ASRWebSocket] closed');
         if (this._endResolve) {
           this._endResolve();
           this._endResolve = null;
@@ -126,6 +131,7 @@ export class ASRWebSocketClient {
   }
 
   private handleMessage(data: Record<string, unknown>) {
+    if (IS_DEV) console.log('[ASRWebSocket] message:', data.type, data);
     switch (data.type) {
       case 'partial':
         this.callbacks.onPartial(data.text as string, data.start_ms as number, data.end_ms as number);

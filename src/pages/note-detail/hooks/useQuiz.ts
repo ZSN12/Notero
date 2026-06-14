@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   getSessionQuizzes, generateSessionQuiz, getQuizDetail,
-  submitQuizAnswers, deleteQuiz, rebuildQuizBank,
+  submitQuizAnswers, deleteQuiz, rebuildQuizBank, getQuizBankStatus,
 } from '@/services/api';
 import type { QuizListItem, QuizDetail, QuizBankStatus, SessionProcessingStatus } from '@/services/api';
 
@@ -12,10 +12,15 @@ function deriveBankStatus(
   if (!processingStatus) return null;
   const stage = processingStatus.stages.quiz_bank;
   if (!stage) return null;
+  const status = stage.status === 'running'
+    ? 'generating'
+    : stage.status === 'fallback'
+    ? 'stale'
+    : stage.status as QuizBankStatus['status'];
 
   return {
     session_id: sessionId,
-    status: stage.status === 'fallback' ? 'error' : stage.status as QuizBankStatus['status'],
+    status,
     question_count: 0,
     progress: stage.progress,
     error: stage.error_message,
@@ -35,8 +40,17 @@ export function useQuiz(
   const [quizSubmitted, setQuizSubmitted] = useState(false);
   const [quizError, setQuizError] = useState<string | null>(null);
   const [isRebuildingBank, setIsRebuildingBank] = useState(false);
+  const [actualBankStatus, setActualBankStatus] = useState<QuizBankStatus | null>(null);
 
-  const bankStatus = deriveBankStatus(sessionId || '', processingStatus);
+  const derivedBankStatus = deriveBankStatus(sessionId || '', processingStatus);
+  const bankStatus = actualBankStatus
+    ? {
+        ...actualBankStatus,
+        status: derivedBankStatus?.status === 'generating' ? derivedBankStatus.status : actualBankStatus.status,
+        progress: derivedBankStatus?.status === 'generating' ? derivedBankStatus.progress : actualBankStatus.progress,
+        error: derivedBankStatus?.status === 'generating' ? derivedBankStatus.error : actualBankStatus.error,
+      }
+    : derivedBankStatus;
 
   const loadQuizList = async () => {
     if (!sessionId) return;
@@ -46,28 +60,60 @@ export function useQuiz(
     } catch { /* ignore */ }
   };
 
+  const loadBankStatus = async () => {
+    if (!sessionId) return;
+    try {
+      const status = await getQuizBankStatus(sessionId);
+      setActualBankStatus(status);
+    } catch { /* ignore */ }
+  };
+
   useEffect(() => {
     if (sessionId && showQuiz) {
       loadQuizList();
+      loadBankStatus();
     }
   }, [sessionId, showQuiz]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setActualBankStatus(null);
+      return;
+    }
+    const stageStatus = processingStatus?.stages.quiz_bank?.status;
+    if (!showQuiz && stageStatus !== 'ready' && stageStatus !== 'error') return;
+    loadBankStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, showQuiz, processingStatus?.stages.quiz_bank?.status]);
 
   useEffect(() => {
     if (!sessionId || !showQuiz) return;
     const stage = processingStatus?.stages.quiz_bank;
     if (!stage) return;
-    if (stage.status === 'idle' || stage.status === 'stale' || stage.status === 'error') {
+    if (stage.status === 'idle') {
       handleRebuildBank();
+    } else if (stage.status === 'error') {
+      loadBankStatus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, showQuiz, processingStatus?.stages.quiz_bank?.status]);
+
+  // Auto-generate quiz when drawer opens and bank is ready but no quiz exists
+  useEffect(() => {
+    if (!sessionId || !showQuiz) return;
+    if (bankStatus?.status === 'ready' && quizList.length === 0 && !activeQuiz && !isGeneratingQuiz) {
+      handleGenerateQuiz();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, showQuiz, bankStatus?.status, quizList.length, activeQuiz, isGeneratingQuiz]);
 
   const handleRebuildBank = async () => {
     if (!sessionId) return;
     setIsRebuildingBank(true);
     setQuizError(null);
     try {
-      await rebuildQuizBank(sessionId);
+      const status = await rebuildQuizBank(sessionId);
+      setActualBankStatus(status);
     } catch (err: unknown) {
       setQuizError(err instanceof Error ? err.message : '生成题库失败');
     } finally {
@@ -81,10 +127,9 @@ export function useQuiz(
     setQuizError(null);
     try {
       const result = await generateSessionQuiz(sessionId);
-      if ('status' in result && (result.status === 'generating' || result.status === 'stale')) {
-        if (result.status === 'stale') {
-          await handleRebuildBank();
-        }
+      if ('status' in result && (result.status === 'generating')) {
+        setActualBankStatus(result as QuizBankStatus);
+        
         setIsGeneratingQuiz(false);
         return;
       }
@@ -99,6 +144,7 @@ export function useQuiz(
       setQuizAnswers({});
       setQuizSubmitted(false);
       await loadQuizList();
+      await loadBankStatus();
     } catch (err: unknown) {
       setQuizError(err instanceof Error ? err.message : '生成测验失败');
     } finally {

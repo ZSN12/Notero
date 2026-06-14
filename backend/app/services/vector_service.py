@@ -24,6 +24,11 @@ from sqlalchemy.orm import Session as DBSessionType
 from app.services.embedding_service import (
     neural_embedding, neural_embedding_batch, EMBEDDING_DIM,
 )
+from app.services.note_utils import (
+    get_canonical_transcript_text,
+    _extract_notes_from_content,
+    _extract_ppt_text_parts,
+)
 
 # ── Constants ──
 VEC_DIM_LEGACY = 512  # dimension of legacy TF-IDF vector
@@ -158,83 +163,73 @@ def _extract_text_from_note(note: Note) -> list[tuple[str, str, str, dict]]:
     """Extract indexable text chunks from a Note.
 
     Returns list of (source_type, source_id, text, metadata).
+
+    The canonical transcript is the single source of truth for transcript text;
+    PPT slides and student notes are kept as supplemental sources. We do not
+    treat layout_blocks as primary content so that user edits / deletions are
+    never resurrected from an older view.
     """
     results = []
 
-    # 1. Layout blocks (highest priority - structured content)
-    layout_blocks = note.layout_blocks
-    if layout_blocks and isinstance(layout_blocks, list):
-        for i, block in enumerate(layout_blocks):
-            if not isinstance(block, dict):
-                continue
-            btype = block.get("type", "")
-            content = block.get("content", "")
-            page = block.get("page")
-            title = block.get("title", "")
+    # 1. Canonical transcript (single source of truth).
+    canonical_transcript = get_canonical_transcript_text(note)
+    if canonical_transcript and len(canonical_transcript.strip()) >= MIN_CHUNK_CHARS:
+        results.append((
+            "transcript",
+            "canonical-transcript",
+            canonical_transcript.strip(),
+            {"block_type": "transcript", "source": "canonical"},
+        ))
 
-            block_id = block.get("id") or f"block-{i}"
+    # 2. Student notes section from note.content.
+    notes_text = _extract_notes_from_content(note.content)
+    if notes_text and len(notes_text.strip()) >= MIN_CHUNK_CHARS:
+        results.append((
+            "note",
+            "student-notes",
+            notes_text.strip(),
+            {"block_type": "note", "source": "content_notes"},
+        ))
 
-            if btype == "transcript" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
-                meta = {"block_id": block_id, "block_index": i, "block_type": "transcript"}
-                results.append(("transcript", block_id, content.strip(), meta))
-            elif btype == "note" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
-                meta = {"block_id": block_id, "block_index": i, "block_type": "note"}
-                results.append(("note", block_id, content.strip(), meta))
-            elif btype == "ppt":
-                ppt_text = ""
-                if title:
-                    ppt_text += title + " "
-                if content:
-                    ppt_text += content + " "
-                if ppt_text.strip() and len(ppt_text.strip()) >= MIN_CHUNK_CHARS:
-                    meta = {"block_id": block_id, "block_index": i, "block_type": "ppt", "page": page}
-                    results.append(("ppt", block_id, ppt_text.strip(), meta))
+    # 3. PPT text as supplemental material.
+    for ppt_part in _extract_ppt_text_parts(note):
+        if ppt_part and len(ppt_part.strip()) >= MIN_CHUNK_CHARS:
+            results.append(("ppt", f"ppt-{str(hash(ppt_part) & 0xffffffff)}", ppt_part.strip(), {"block_type": "ppt"}))
 
-    # 2. Transcript (if no layout blocks)
-    if not layout_blocks:
-        transcript = note.transcript
-        if transcript and isinstance(transcript, list):
-            for idx, chunk in enumerate(sorted(transcript, key=lambda x: x.get("chunk_index", 0))):
-                if not isinstance(chunk, dict):
+    # 4. Layout blocks fallback (only when no canonical content exists).
+    if not results:
+        layout_blocks = note.layout_blocks
+        if layout_blocks and isinstance(layout_blocks, list):
+            for i, block in enumerate(layout_blocks):
+                if not isinstance(block, dict):
                     continue
-                text = (
-                    chunk.get("display_text")
-                    or chunk.get("corrected_text")
-                    or chunk.get("text")
-                    or ""
-                ).strip()
-                if text and len(text) >= MIN_CHUNK_CHARS:
-                    chunk_index = chunk.get("chunk_index", idx)
-                    meta = {
-                        "block_id": f"transcript-{chunk_index}",
-                        "block_type": "transcript",
-                        "chunk_index": chunk_index,
-                        "correction_stage": chunk.get("correction_stage"),
-                        "is_ai_corrected": chunk.get("is_ai_corrected"),
-                    }
-                    results.append(("transcript", meta["block_id"], text, meta))
+                btype = block.get("type", "")
+                content = block.get("content", "")
+                page = block.get("page")
+                title = block.get("title", "")
+                block_id = block.get("id") or f"block-{i}"
 
-    # 3. Note content (fallback)
+                if btype == "transcript" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
+                    meta = {"block_id": block_id, "block_index": i, "block_type": "transcript"}
+                    results.append(("transcript", block_id, content.strip(), meta))
+                elif btype == "note" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
+                    meta = {"block_id": block_id, "block_index": i, "block_type": "note"}
+                    results.append(("note", block_id, content.strip(), meta))
+                elif btype == "ppt":
+                    ppt_text = ""
+                    if title:
+                        ppt_text += title + " "
+                    if content:
+                        ppt_text += content + " "
+                    if ppt_text.strip() and len(ppt_text.strip()) >= MIN_CHUNK_CHARS:
+                        meta = {"block_id": block_id, "block_index": i, "block_type": "ppt", "page": page}
+                        results.append(("ppt", block_id, ppt_text.strip(), meta))
+
+    # 5. Raw note content fallback.
     if not results and note.content:
         content = note.content.strip()
         if len(content) >= MIN_CHUNK_CHARS:
             results.append(("note", note.id, content, {}))
-
-    # 4. PPT images text (if available)
-    ppt_images = note.ppt_images
-    if ppt_images and isinstance(ppt_images, list):
-        for ppt_data in ppt_images:
-            if not isinstance(ppt_data, dict):
-                continue
-            slides = ppt_data.get("slides", [])
-            for slide in slides:
-                if not isinstance(slide, dict):
-                    continue
-                slide_text = slide.get("text", "")
-                page_num = slide.get("page", "")
-                if slide_text and len(slide_text.strip()) >= MIN_CHUNK_CHARS:
-                    meta = {"page": page_num}
-                    results.append(("ppt", str(page_num), slide_text.strip(), meta))
 
     return results
 

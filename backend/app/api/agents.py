@@ -15,18 +15,27 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.agents import AgentContext, get_agent, list_agents
 from app.core.auth import get_current_user
 from app.core.database import SessionLocal, get_db
-from app.core.task_runner import run_agent_task
+from app.core.exceptions import (
+    NoteroServiceError,
+    ResourceNotFoundError,
+    LLMUnavailableError,
+    LLMTimeoutError,
+    ProcessingError,
+)
 from app.models import Notebook, Note, Session as DBSession, Task, User
+from app.tasks.agent_tasks import run_agent
 from app.services.vector_service import _compute_session_content_hash
 from app.services.state_service import (
     set_running as set_state_running,
     set_ready as set_state_ready,
     set_error as set_state_error,
+    get_state,
     get_session_processing_status,
 )
 
@@ -56,6 +65,7 @@ def _get_start_lock(session_id: str, task_type: str) -> threading.Lock:
 # In tests, run the agent synchronously so mocks are deterministic and threads
 # cannot leak across test cases.
 _RUN_AGENTS_SYNCHRONOUSLY = os.environ.get("AGENTS_SYNC", "0") == "1"
+_USE_CELERY_FOR_AGENTS = os.environ.get("AGENTS_USE_CELERY", "0") == "1"
 
 
 class RunAgentsRequest(BaseModel):
@@ -63,6 +73,43 @@ class RunAgentsRequest(BaseModel):
 
 
 # ── Helpers ──
+
+def _dispatch_agent_task(session_id: str, user_id: str, role: str, task_id: str) -> None:
+    """Start an agent task.
+
+    Local development defaults to an in-process daemon thread. Celery is used
+    only when AGENTS_USE_CELERY=1, because a reachable broker without a running
+    worker would otherwise accept tasks that never execute.
+    """
+    if _RUN_AGENTS_SYNCHRONOUSLY:
+        _run_agent_thread(session_id, user_id, role, task_id)
+        return
+
+    if not _USE_CELERY_FOR_AGENTS:
+        thread = threading.Thread(
+            target=_run_agent_thread,
+            args=(session_id, user_id, role, task_id),
+            daemon=True,
+        )
+        thread.start()
+        return
+
+    try:
+        run_agent.delay(session_id, user_id, role, task_id)
+    except Exception:
+        logger.warning(
+            "celery_dispatch_failed_falling_back_to_thread session_id=%s role=%s task_id=%s",
+            session_id,
+            role,
+            task_id,
+            exc_info=True,
+        )
+        thread = threading.Thread(
+            target=_run_agent_thread,
+            args=(session_id, user_id, role, task_id),
+            daemon=True,
+        )
+        thread.start()
 
 def _get_user_session(session_id: str, user: User, db: Session) -> DBSession | None:
     return (
@@ -107,11 +154,14 @@ def auto_run_agents(
     session_id: str,
     user_id: str,
     roles: list[str] | None = None,
+    force: bool = False,
 ) -> dict | None:
     """Background trigger for agents after transcription completes.
 
     Owns its own DB session so it can be called safely from async generators
     or WebSocket handlers without inheriting the caller's session/transaction.
+    When ``force`` is False, agents whose output is already fresh for the
+    current content_hash are skipped.
     """
     db = SessionLocal()
     try:
@@ -150,7 +200,10 @@ def auto_run_agents(
             )
             return None
 
-        target_roles = roles or ["summary", "mindmap", "quiz"]
+        if roles is None:
+            target_roles = ["mindmap", "quiz"]
+        else:
+            target_roles = roles
         if not target_roles:
             return None
 
@@ -180,9 +233,10 @@ def auto_run_agents(
                     continue
                 agent = get_agent(role)
                 ready = _maybe_return_ready_or_stale(
-                    session_id, role, agent, note, db, user, notebook_obj, force=False
+                    session_id, role, agent, note, db, user, notebook_obj, force=force
                 )
                 if ready:
+                    _ensure_stage_ready_on_reuse(session_id, role, note, db)
                     continue
                 tasks_to_start.append(role)
 
@@ -211,13 +265,7 @@ def auto_run_agents(
         for info in tasks_info:
             role = info["role"]
             task_id = info["task"].id
-            if _RUN_AGENTS_SYNCHRONOUSLY:
-                _run_agent_thread(session_id, user_id, role, task_id)
-            else:
-                run_agent_task(
-                    target=lambda s=session_id, u=user_id, r=role, t=task_id: _run_agent_thread(s, u, r, t),
-                    daemon=True,
-                )
+            _dispatch_agent_task(session_id, user_id, role, task_id)
             logger.info(
                 "auto_agent_task_started session_id=%s role=%s task_id=%s",
                 session_id, role, task_id,
@@ -319,6 +367,23 @@ def _role_to_stage(role: str) -> str:
     return "quiz_bank" if role == "quiz" else role
 
 
+def _ensure_stage_ready_on_reuse(
+    session_id: str,
+    role: str,
+    note: Note,
+    db: Session,
+) -> None:
+    stage = _role_to_stage(role)
+    state = get_state(db, session_id, stage)
+    # Promote stale/idle/fallback/error to ready whenever we have verified that
+    # fresh output exists (the caller only invokes this after _maybe_return_ready_or_stale
+    # returns a ready response). This heals cases where the state row was left in
+    # error but the agent output was actually saved.
+    if state and state.status in ("stale", "idle", "fallback", "error"):
+        current_hash = _compute_session_content_hash(note)
+        set_state_ready(db, session_id, stage, content_hash=current_hash, commit=True)
+
+
 def _run_single_agent_sync(
     session_id: str,
     role: str,
@@ -335,20 +400,8 @@ def _run_single_agent_sync(
     if not note:
         raise ValueError("No note found for session")
 
-    content_text = ""
-    layout_blocks = note.layout_blocks
-    if layout_blocks and isinstance(layout_blocks, list):
-        content_text = "\n\n".join(
-            str(b.get("content", "")).strip()
-            for b in layout_blocks
-            if isinstance(b, dict) and b.get("content")
-        )
-    if not content_text and note.content:
-        content_text = note.content.strip()
-    if not content_text and note.transcript:
-        content_text = " ".join(
-            str(t.get("text", "")) for t in note.transcript if isinstance(t, dict)
-        ).strip()
+    from app.services.note_utils import get_canonical_note_text
+    content_text = get_canonical_note_text(note, include_ppt=True)
     if not content_text:
         raise ValueError("No indexable content in note")
 
@@ -364,6 +417,7 @@ def _run_single_agent_sync(
         session_id, role, agent, note, db, user, notebook, force
     )
     if ready:
+        _ensure_stage_ready_on_reuse(session_id, role, note, db)
         return ready
 
     # Create a tracking task.
@@ -409,7 +463,7 @@ def _run_single_agent_sync(
             return {
                 "session_id": session_id,
                 "role": role,
-                "status": "success",
+                "status": "ready",
                 "task_id": task.id,
                 "data": result.data,
             }
@@ -579,9 +633,11 @@ def run_all_agents(
     with lock:
         db.expire_all()
 
-        # Reuse active tasks — skip roles that already have a pending/running task.
+        # Reuse active tasks and skip roles whose output is already fresh.
         active_tasks_info: list[dict] = []
+        ready_agents_info: list[dict] = []
         tasks_to_start: list[str] = []
+        notebook_obj = _notebook_for_note(note, db)
         for role in roles:
             task_type = f"agent_{role}"
             active = _get_active_task(session_id, task_type, db)
@@ -593,15 +649,27 @@ def run_all_agents(
                     "progress": float(active.progress or 0.0),
                     "error": active.error_message,
                 })
-            else:
-                tasks_to_start.append(role)
+                continue
+            agent = get_agent(role)
+            ready = _maybe_return_ready_or_stale(
+                session_id, role, agent, note, db, current_user, notebook_obj, force=False
+            )
+            if ready:
+                _ensure_stage_ready_on_reuse(session_id, role, note, db)
+                ready_agents_info.append({
+                    "role": role,
+                    "status": "ready",
+                    "data": ready.get("data"),
+                })
+                continue
+            tasks_to_start.append(role)
 
         if not tasks_to_start:
             response.status_code = status.HTTP_200_OK
             return {
                 "workflow_id": "reused",
                 "session_id": session_id,
-                "agents": active_tasks_info,
+                "agents": active_tasks_info + ready_agents_info,
                 "reused": True,
             }
 
@@ -625,13 +693,7 @@ def run_all_agents(
     for info in tasks_info:
         role = info["role"]
         task_id = info["task"].id
-        if _RUN_AGENTS_SYNCHRONOUSLY:
-            _run_agent_thread(session_id, current_user.id, role, task_id)
-        else:
-            run_agent_task(
-                target=lambda s=session_id, u=current_user.id, r=role, t=task_id: _run_agent_thread(s, u, r, t),
-                daemon=True,
-            )
+        _dispatch_agent_task(session_id, current_user.id, role, task_id)
         logger.info(
             "agent_task_started session_id=%s role=%s task_id=%s",
             session_id, role, task_id,
@@ -669,28 +731,30 @@ def get_agent_tasks(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Latest task per agent role
-    tasks = (
-        db.query(Task)
+    # Latest task per agent role — use subquery to avoid loading all history
+    subq = (
+        db.query(
+            Task.task_type,
+            func.max(Task.created_at).label("max_created_at"),
+        )
         .filter(Task.session_id == session_id)
         .filter(Task.task_type.like("agent_%"))
-        .order_by(Task.created_at.desc())
+        .group_by(Task.task_type)
+        .subquery()
+    )
+    tasks = (
+        db.query(Task)
+        .join(
+            subq,
+            (Task.task_type == subq.c.task_type) & (Task.created_at == subq.c.max_created_at),
+        )
+        .filter(Task.session_id == session_id)
         .all()
     )
 
-    # Keep only the latest task per role
-    seen: set[str] = set()
-    latest: list[Task] = []
-    for task in tasks:
-        role = task.task_type.removeprefix("agent_") if task.task_type.startswith("agent_") else task.task_type
-        if role in seen:
-            continue
-        seen.add(role)
-        latest.append(task)
-
     return {
         "session_id": session_id,
-        "agents": [_task_to_dict(t) for t in latest],
+        "agents": [_task_to_dict(t) for t in tasks],
     }
 
 

@@ -1,6 +1,6 @@
 {
-  "name": "Nootbook - AI 智能笔记本",
-  "short_name": "Nootbook",
+  "name": "Notero - AI 智能笔记本",
+  "short_name": "Notero",
   "description": "AI 辅助课程笔记，支持录音转写、PPT 对齐、思维导图与测验",
   "start_url": "/",
   "display": "standalone",

@@ -17,7 +17,6 @@ interface SharedData {
     id: string;
     notebook_id: string;
     title: string;
-    summary: string | null;
     keywords: string[];
     duration: string | null;
     status: string;
@@ -181,7 +180,7 @@ export default function SharePage() {
               )}
               <span className="flex items-center gap-1.5">
                 <FileText className="w-3.5 h-3.5" />
-                由 Nootbook 智能课堂笔记生成
+                由 Notero 智能课堂笔记生成
               </span>
             </div>
             {session.keywords && session.keywords.length > 0 && (
@@ -195,17 +194,6 @@ export default function SharePage() {
               </div>
             )}
           </div>
-
-          {/* Summary */}
-          {session.summary && (
-            <div className="mb-10 p-5 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-100 dark:border-blue-800 rounded-2xl">
-              <h2 className="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-3 uppercase tracking-wider flex items-center gap-2">
-                <span className="w-1 h-4 bg-blue-500 rounded-full" />
-                课程摘要
-              </h2>
-              <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">{session.summary}</p>
-            </div>
-          )}
 
           {/* Layout Blocks */}
           {blocks.length > 0 ? (
@@ -223,7 +211,7 @@ export default function SharePage() {
 
           {/* Footer */}
           <div className="text-center text-xs text-slate-400 dark:text-slate-500 mt-12 pt-6 border-t border-slate-200 dark:border-slate-700">
-            由 Nootbook 智能课堂笔记生成
+            由 Notero 智能课堂笔记生成
           </div>
         </div>
       </div>

@@ -1,10 +1,18 @@
-from sqlalchemy import Column, DateTime, String, Text, Integer, JSON, ForeignKey, Float, Boolean, LargeBinary, UniqueConstraint
+from sqlalchemy import Column, DateTime, String, Text, Integer, JSON, ForeignKey, Float, Boolean, LargeBinary, UniqueConstraint, Index
 from sqlalchemy.orm import relationship, DeclarativeBase
 from sqlalchemy.sql import func
 import uuid
 
+try:
+    from pgvector.sqlalchemy import Vector
+    _PGVECTOR_AVAILABLE = True
+except ImportError:
+    _PGVECTOR_AVAILABLE = False
+
+
 class Base(DeclarativeBase):
     pass
+
 
 class User(Base):
     __tablename__ = "users"
@@ -19,8 +27,12 @@ class User(Base):
     notebooks = relationship("Notebook", back_populates="user", cascade="all, delete-orphan")
     vector_chunks = relationship("VectorChunk", back_populates="user", cascade="all, delete-orphan")
 
+
 class Notebook(Base):
     __tablename__ = "notebooks"
+    __table_args__ = (
+        Index("ix_notebooks_user_id_created", "user_id", "created_at"),
+    )
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(100), nullable=False)
@@ -36,10 +48,13 @@ class Notebook(Base):
 
 class Session(Base):
     __tablename__ = "sessions"
+    __table_args__ = (
+        Index("ix_sessions_notebook_id_created", "notebook_id", "created_at"),
+        Index("ix_sessions_share_token", "share_token"),
+    )
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     notebook_id = Column(String(36), ForeignKey("notebooks.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(200), nullable=False)
-    summary = Column(Text, nullable=True)
     keywords = Column(JSON, default=[])
     duration = Column(String(20))
     status = Column(String(20), default="pending")
@@ -58,6 +73,9 @@ class Session(Base):
 
 class Note(Base):
     __tablename__ = "notes"
+    __table_args__ = (
+        Index("ix_notes_session_id", "session_id"),
+    )
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
     content = Column(Text)
@@ -90,6 +108,9 @@ class Note(Base):
 
 class File(Base):
     __tablename__ = "files"
+    __table_args__ = (
+        Index("ix_files_session_id", "session_id"),
+    )
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
     file_type = Column(String(20), nullable=False)
@@ -101,6 +122,9 @@ class File(Base):
 
 class Task(Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        Index("ix_tasks_session_id_status", "session_id", "status"),
+    )
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
     task_type = Column(String(50), nullable=False)
@@ -112,6 +136,9 @@ class Task(Base):
 
 class Vocabulary(Base):
     __tablename__ = "vocabulary"
+    __table_args__ = (
+        Index("ix_vocabulary_notebook_id", "notebook_id"),
+    )
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     notebook_id = Column(String(36), ForeignKey("notebooks.id", ondelete="CASCADE"), nullable=False)
     term = Column(String(200), nullable=False)
@@ -134,6 +161,8 @@ class VectorChunk(Base):
     chunk_meta = Column(JSON, default={})
     embedding = Column(LargeBinary, nullable=True)  # packed float32 vector (legacy TF-IDF)
     embedding_v2 = Column(LargeBinary, nullable=True)  # packed float32 vector (neural embedding)
+    if _PGVECTOR_AVAILABLE:
+        embedding_vector = Column(Vector(1536), nullable=True)  # pgvector column for DB-level search
     content_hash = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     user = relationship("User", back_populates="vector_chunks")
@@ -142,6 +171,11 @@ class VectorChunk(Base):
 
 class SessionProcessingState(Base):
     __tablename__ = "session_processing_states"
+    __table_args__ = (
+        UniqueConstraint("session_id", "stage", name="uix_session_stage"),
+        Index("ix_sps_session_id", "session_id"),
+        Index("ix_sps_status_updated", "status", "updated_at"),
+    )
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
     stage = Column(String(50), nullable=False)
@@ -154,6 +188,5 @@ class SessionProcessingState(Base):
     finished_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     session = relationship("Session", back_populates="processing_states")
-    __table_args__ = (UniqueConstraint("session_id", "stage", name="uix_session_stage"),)
 
 __all__ = ["Base", "User", "Notebook", "Session", "Note", "File", "Task", "Vocabulary", "VectorChunk", "SessionProcessingState"]

@@ -1,7 +1,8 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import * as LucideIcons from 'lucide-react';
-import { ArrowRight, Trash2, Edit3 } from 'lucide-react';
+import { ArrowRight, Trash2, Edit3, Loader2 } from 'lucide-react';
 import type { Notebook } from '@/types';
 import { useStore } from '@/store/useStore';
 
@@ -12,16 +13,21 @@ interface NotebookCardProps {
 export default function NotebookCard({ notebook }: NotebookCardProps) {
   const navigate = useNavigate();
   const { removeNotebook, openDialog } = useStore();
+  const [isDeleting, setIsDeleting] = useState(false);
   const IconComponent = LucideIcons[notebook.icon as keyof typeof LucideIcons] as React.ElementType || LucideIcons.BookOpen;
 
   const handleDelete = async (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (isDeleting) return;
     if (window.confirm(`确定要删除"${notebook.title}"吗？所有课次也会被删除。`)) {
+      setIsDeleting(true);
       try {
         await removeNotebook(notebook.id);
         toast.success('笔记本已删除');
       } catch (error) {
         toast.error('删除失败，请稍后重试');
+      } finally {
+        setIsDeleting(false);
       }
     }
   };
@@ -47,10 +53,11 @@ export default function NotebookCard({ notebook }: NotebookCardProps) {
         </button>
         <button
           onClick={handleDelete}
-          className="min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30 transition-all"
+          disabled={isDeleting}
+          className="min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           title="删除学科"
         >
-          <Trash2 className="w-4 h-4" />
+          {isDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
         </button>
       </div>
 

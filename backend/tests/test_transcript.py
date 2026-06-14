@@ -1,9 +1,9 @@
-"""Tests for transcript update, summary generation, and restructure endpoints."""
+"""Tests for transcript update and restructure endpoints."""
 
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, PropertyMock, MagicMock
+from unittest.mock import patch, PropertyMock
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
@@ -85,41 +85,6 @@ class TestUpdateTranscript:
                 headers=headers,
             )
             assert resp.status_code == 404
-
-
-class TestGenerateSummary:
-    def test_generate_summary_no_transcript(self):
-        with TestClient(app) as client:
-            headers = auth_headers(client)
-            me = client.get("/api/auth/me", headers=headers)
-            user_id = me.json()["id"]
-            db = SessionLocal()
-            try:
-                sid = _create_session_with_note(db, user_id, transcript=None)
-            finally:
-                db.close()
-
-            resp = client.post("/api/process/generate-summary", params={"session_id": sid}, headers=headers)
-            assert resp.status_code == 400
-
-    def test_generate_summary_success_with_mock(self):
-        with TestClient(app) as client:
-            headers = auth_headers(client)
-            me = client.get("/api/auth/me", headers=headers)
-            user_id = me.json()["id"]
-            db = SessionLocal()
-            try:
-                sid = _create_session_with_note(db, user_id, content="This is a test lecture about machine learning.")
-            finally:
-                db.close()
-
-            mock_agent = MagicMock()
-            mock_agent.run.return_value = MagicMock(success=False, data=None, error_message="mock")
-            with patch("app.api.process.transcript.get_agent", return_value=mock_agent), \
-                 patch("app.api.process.transcript.generate_summary", return_value="A great summary."):
-                resp = client.post("/api/process/generate-summary", params={"session_id": sid}, headers=headers)
-                assert resp.status_code == 200
-                assert resp.json()["summary"] == "A great summary."
 
 
 class TestRestructureTranscript:

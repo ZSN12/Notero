@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 
 export interface StudentNote {
   type: string;
@@ -8,6 +8,7 @@ export interface StudentNote {
 export function useNotes() {
   const [notes, setNotes] = useState<StudentNote[]>([{ type: 'text', content: '' }]);
   const [editingNote, setEditingNote] = useState<string | null>(null);
+  const notesDraftRef = useRef<StudentNote[]>([{ type: 'text', content: '' }]);
 
   const cleanNoteContent = useCallback((value: string) => {
     const trimmed = value.trim();
@@ -19,8 +20,26 @@ export function useNotes() {
     setNotes((prev) => {
       const updated = [...prev];
       updated[index] = { ...updated[index], content };
+      notesDraftRef.current = updated.map((n) => ({ ...n }));
       return updated;
     });
+  }, []);
+
+  const updateNoteDraft = useCallback((index: number, content: string) => {
+    const draft = notesDraftRef.current;
+    if (draft[index]) {
+      draft[index] = { ...draft[index], content };
+    }
+  }, []);
+
+  const commitNotesDraft = useCallback(() => {
+    setNotes(notesDraftRef.current.map((n) => ({ ...n })));
+  }, []);
+
+  const resetDrafts = useCallback((newNotes: StudentNote[]) => {
+    const next = newNotes.length > 0 ? newNotes.map((n) => ({ ...n })) : [{ type: 'text', content: '' }];
+    notesDraftRef.current = next;
+    setNotes(next);
   }, []);
 
   const parseNotesFromContent = useCallback((content: string, hasTranscript: boolean = false) => {
@@ -42,10 +61,16 @@ export function useNotes() {
       notes,
       editingNote,
     },
+    refs: {
+      notesDraftRef,
+    },
     actions: {
       setNotes,
       setEditingNote,
       updateNote,
+      updateNoteDraft,
+      commitNotesDraft,
+      resetDrafts,
       parseNotesFromContent,
     },
   };

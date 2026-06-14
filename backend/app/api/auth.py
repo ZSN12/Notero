@@ -1,12 +1,12 @@
-from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Response
 from sqlalchemy.orm import Session
 import time
-import threading
 import os
 import uuid
 from pathlib import Path
 from app.core.database import get_db
 from app.core.auth import hash_password, verify_password, create_access_token, create_refresh_token, decode_refresh_token, get_current_user
+from app.core.login_tracker import get_attempts, record_failure, clear_attempts
 from app.api.schemas import UserCreate, UserLogin, UserResponse, Token, TokenRefresh, TokenRefreshResponse, PasswordReset, UserProfileUpdate, PasswordChange
 from app.models import User
 from app.config import BASE_DIR
@@ -17,12 +17,6 @@ AVATAR_DIR = BASE_DIR / "uploads" / "avatars"
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5MB
-
-# Login rate limiting: track failed attempts per email
-_login_lock = threading.Lock()
-_failed_login_attempts = {}  # email -> {"count": int, "locked_until": float}
-MAX_LOGIN_ATTEMPTS = 5
-LOGIN_LOCK_DURATION = 15 * 60  # 15 minutes
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -43,53 +37,57 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     return user
 
 
+_COOKIE_MAX_AGE = 7 * 24 * 60 * 60  # 7 days
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    """Set HttpOnly Secure cookie for JWT access token."""
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=_COOKIE_MAX_AGE,
+        path="/",
+    )
+
+
 @router.post("/login", response_model=Token)
-def login(data: UserLogin, db: Session = Depends(get_db)):
+def login(data: UserLogin, response: Response, db: Session = Depends(get_db)):
     email = data.email
 
     # Check if account is locked
-    with _login_lock:
-        attempts = _failed_login_attempts.get(email)
-        if attempts and attempts["locked_until"] and time.time() < attempts["locked_until"]:
-            remaining = int(attempts["locked_until"] - time.time())
-            raise HTTPException(
-                status_code=429,
-                detail=f"Account locked due to too many failed attempts. Try again in {remaining} seconds."
-            )
-        # Lock expired, reset
-        if attempts and attempts["locked_until"] and time.time() >= attempts["locked_until"]:
-            _failed_login_attempts.pop(email, None)
+    attempts = get_attempts(email)
+    if attempts and attempts.get("locked_until") and time.time() < attempts["locked_until"]:
+        remaining = int(attempts["locked_until"] - time.time())
+        raise HTTPException(
+            status_code=429,
+            detail=f"Account locked due to too many failed attempts. Try again in {remaining} seconds."
+        )
 
     user = db.query(User).filter(User.email == email).first()
     if not user or not verify_password(data.password, user.password_hash):
         # Record failed attempt
-        with _login_lock:
-            current = _failed_login_attempts.get(email, {"count": 0, "locked_until": 0})
-            current["count"] = current.get("count", 0) + 1
-
-            if current["count"] >= MAX_LOGIN_ATTEMPTS:
-                current["locked_until"] = time.time() + LOGIN_LOCK_DURATION
-                _failed_login_attempts[email] = current
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Account locked due to {MAX_LOGIN_ATTEMPTS} failed attempts. Try again in {LOGIN_LOCK_DURATION} seconds."
-                )
-
-            _failed_login_attempts[email] = current
-
+        remaining, locked = record_failure(email)
+        if locked:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Account locked due to too many failed attempts. Try again in {remaining} seconds."
+            )
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     # Successful login: reset failed attempts
-    with _login_lock:
-        _failed_login_attempts.pop(email, None)
+    clear_attempts(email)
 
     access_token = create_access_token(user.id)
     refresh_token = create_refresh_token(user.id)
+    _set_auth_cookie(response, access_token)
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 
 @router.post("/refresh", response_model=TokenRefreshResponse)
-def refresh_token(data: TokenRefresh, db: Session = Depends(get_db)):
+def refresh_token(data: TokenRefresh, response: Response, db: Session = Depends(get_db)):
     user_id = decode_refresh_token(data.refresh_token)
     if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
@@ -99,7 +97,14 @@ def refresh_token(data: TokenRefresh, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="User not found")
 
     new_access_token = create_access_token(user.id)
+    _set_auth_cookie(response, new_access_token)
     return {"access_token": new_access_token, "token_type": "bearer"}
+
+
+@router.post("/logout")
+def logout(response: Response):
+    response.delete_cookie(key="access_token", path="/")
+    return {"detail": "Logged out successfully"}
 
 
 @router.get("/me", response_model=UserResponse)
@@ -124,8 +129,7 @@ def reset_password(data: PasswordReset, db: Session = Depends(get_db)):
 
     user.password_hash = hash_password(data.new_password)
     db.commit()
-    with _login_lock:
-        _failed_login_attempts.pop(data.email, None)
+    clear_attempts(data.email)
     return {"status": "ok", "message": "Password has been reset successfully"}
 
 

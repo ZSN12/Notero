@@ -10,6 +10,7 @@ import {
   type Node,
   type Edge,
   type NodeProps,
+  type NodeChange,
   Handle,
   Position,
   MarkerType,
@@ -17,6 +18,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { ChevronRight, ChevronDown, BookOpen, FileText, Presentation, ArrowRight } from 'lucide-react';
 import type { MindMapNode, MindMapData } from '@/services/api';
+import { saveMindMapPositions } from '@/services/api';
 import ELK from 'elkjs/lib/elk.bundled.js';
 
 // ── Type accents (subtle left-border) ──
@@ -51,7 +53,7 @@ const TYPE_BADGE: Record<string, string> = {
 };
 
 // ── Custom node component ──
-function MindMapCardNode({ data, selected }: NodeProps) {
+function MindMapCardNode({ id, data, selected }: NodeProps) {
   const nodeData = data as unknown as {
     label: string;
     nodeType: string;
@@ -60,17 +62,17 @@ function MindMapCardNode({ data, selected }: NodeProps) {
   };
 
   const accent = TYPE_ACCENT[nodeData.nodeType] || TYPE_ACCENT.conclusion;
-  const isRoot = nodeData.isRoot;
+  const isRoot = id === '__session_root__' || nodeData.isRoot;
+  const cardClassName = isRoot
+    ? 'px-5 py-3 border-slate-800 dark:border-slate-600 bg-slate-800 dark:bg-slate-700 text-white shadow-lg'
+    : `px-3.5 py-2.5 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 border-l-[3px] ${accent} shadow-sm hover:shadow-md hover:border-slate-300 dark:hover:border-slate-500`;
 
   return (
     <div
       className={`
-        relative rounded-xl border bg-white dark:bg-slate-800
+        relative rounded-xl border
         transition-all cursor-pointer group
-        ${isRoot
-          ? 'px-5 py-3 border-slate-800 dark:border-slate-600 bg-slate-800 dark:bg-slate-700 text-white shadow-lg'
-          : `px-3.5 py-2.5 border-slate-200 dark:border-slate-700 border-l-[3px] ${accent} shadow-sm hover:shadow-md hover:border-slate-300 dark:hover:border-slate-500`
-        }
+        ${cardClassName}
         ${selected ? 'ring-2 ring-blue-400 shadow-md' : ''}
       `}
     >
@@ -84,7 +86,7 @@ function MindMapCardNode({ data, selected }: NodeProps) {
         <span
           className={`
             line-clamp-2 max-w-[220px]
-            ${isRoot ? 'text-base font-semibold' : 'text-sm font-medium text-slate-700 dark:text-slate-200'}
+            ${isRoot ? 'text-base font-semibold text-white' : 'text-sm font-medium text-slate-700 dark:text-slate-200'}
           `}
           title={nodeData.label}
         >
@@ -103,14 +105,16 @@ const nodeTypes = { mindMapCard: MindMapCardNode };
 const elk = new ELK();
 
 function estimateNodeSize(title: string, isRoot: boolean): { w: number; h: number } {
+  const safeTitle = title || '';
   const charWidth = isRoot ? 14 : 11;
   const padding = isRoot ? 60 : 44;
-  const w = Math.max(120, Math.min(260, title.length * charWidth + padding));
+  const w = Math.max(120, Math.min(260, safeTitle.length * charWidth + padding));
   const h = isRoot ? 48 : 40;
   return { w, h };
 }
 
-function flattenNodes(nodes: MindMapNode[], result: MindMapNode[] = []): MindMapNode[] {
+function flattenNodes(nodes: MindMapNode[] | undefined, result: MindMapNode[] = []): MindMapNode[] {
+  if (!nodes) return result;
   for (const n of nodes) {
     result.push(n);
     if (n.children) flattenNodes(n.children, result);
@@ -121,12 +125,14 @@ function flattenNodes(nodes: MindMapNode[], result: MindMapNode[] = []): MindMap
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function buildElkGraph(
   data: MindMapData,
+  rootTitle: string,
 ): { graph: any } {
   const elkNodes: Record<string, unknown>[] = [];
-  const rootSize = estimateNodeSize(data.title || '知识导图', true);
-  elkNodes.push({ id: 'root', width: rootSize.w, height: rootSize.h });
+  const rootSize = estimateNodeSize(rootTitle, true);
+  elkNodes.push({ id: '__session_root__', width: rootSize.w, height: rootSize.h });
 
-  function addElkNodes(nodes: MindMapNode[]) {
+  function addElkNodes(nodes: MindMapNode[] | undefined) {
+    if (!nodes) return;
     for (const n of nodes) {
       const size = estimateNodeSize(n.title, false);
       elkNodes.push({ id: n.id, width: size.w, height: size.h });
@@ -138,7 +144,8 @@ function buildElkGraph(
   addElkNodes(data.nodes);
 
   const elkEdges: Record<string, unknown>[] = [];
-  function addTreeEdges(nodes: MindMapNode[], parentId: string) {
+  function addTreeEdges(nodes: MindMapNode[] | undefined, parentId: string) {
+    if (!nodes) return;
     for (const n of nodes) {
       elkEdges.push({ id: `e-${parentId}-${n.id}`, sources: [parentId], targets: [n.id] });
       if (n.children?.length) {
@@ -146,7 +153,7 @@ function buildElkGraph(
       }
     }
   }
-  addTreeEdges(data.nodes, 'root');
+  addTreeEdges(data.nodes, '__session_root__');
 
   const relations = data.relations || [];
   for (const rel of relations) {
@@ -160,7 +167,7 @@ function buildElkGraph(
 
   return {
     graph: {
-      id: 'root',
+      id: 'graph-root',
       layoutOptions: {
         'elk.algorithm': 'layered',
         'elk.direction': 'RIGHT',
@@ -179,30 +186,32 @@ function buildElkGraph(
 
 async function mindMapToFlow(
   data: MindMapData,
+  rootTitle?: string,
 ): Promise<{ nodes: Node[]; edges: Edge[] }> {
-  const { graph } = buildElkGraph(data);
+  const resolvedRootTitle = rootTitle?.trim() || data.title?.trim() || '当前课次';
+  const { graph } = buildElkGraph(data, resolvedRootTitle);
 
   const layout = await elk.layout(graph);
 
   const flowNodes: Node[] = [];
   const flowEdges: Edge[] = [];
 
-  const allNodes = flattenNodes(data.nodes);
+  const allNodes = flattenNodes(data.nodes || []);
   const nodeMap = new Map(allNodes.map(n => [n.id, n]));
-  nodeMap.set('root', { id: 'root', title: data.title || '知识导图', type: 'topic', importance: 'high' } as MindMapNode);
+  nodeMap.set('__session_root__', { id: '__session_root__', title: resolvedRootTitle, type: 'topic', importance: 'high' } as MindMapNode);
 
   for (const elkNode of layout.children || []) {
     const mmNode = nodeMap.get(elkNode.id);
     if (!mmNode) continue;
 
-    const isRoot = elkNode.id === 'root';
+    const isRoot = elkNode.id === '__session_root__';
 
     flowNodes.push({
       id: elkNode.id,
       type: 'mindMapCard',
       position: { x: elkNode.x || 0, y: elkNode.y || 0 },
       data: {
-        label: isRoot ? (data.title || '知识导图') : mmNode.title,
+        label: isRoot ? resolvedRootTitle : mmNode.title,
         nodeType: isRoot ? 'topic' : (mmNode.type || 'conclusion'),
         importance: isRoot ? 'high' : (mmNode.importance || 'low'),
         isRoot,
@@ -257,12 +266,14 @@ function collectAllNodeIds(nodes: MindMapNode[], result = new Set<string>()): Se
 }
 
 function computeDefaultExpanded(nodes: MindMapNode[]): Set<string> {
-  return collectAllNodeIds(nodes, new Set<string>(['root']));
+  return collectAllNodeIds(nodes, new Set<string>(['__session_root__']));
 }
 
 // ── Main component ──
 interface MindMapCanvasProps {
   data: MindMapData;
+  rootTitle?: string;
+  sessionId: string;
   onSelect: (node: MindMapNode) => void;
   selectedNode: MindMapNode | null;
   onSourceClick: (source: { source_type: string; page?: number | null; block_id?: string; snippet?: string }) => void;
@@ -270,6 +281,8 @@ interface MindMapCanvasProps {
 
 function MindMapCanvasInner({
   data,
+  rootTitle,
+  sessionId,
   onSelect,
   selectedNode,
   onSourceClick,
@@ -279,14 +292,20 @@ function MindMapCanvasInner({
   const layoutInProgress = useRef(false);
   const queuedExpanded = useRef<Set<string> | null>(null);
   const { fitView } = useReactFlow();
+  const displayRootTitle = rootTitle?.trim() || data.title?.trim() || '知识导图';
 
   const runLayout = useCallback(() => {
     if (layoutInProgress.current) return;
     layoutInProgress.current = true;
 
-    mindMapToFlow(data)
+    mindMapToFlow(data, displayRootTitle)
       .then((result) => {
-        setNodes(result.nodes);
+        const savedPositions = data.positions || {};
+        const mergedNodes = result.nodes.map((n) => ({
+          ...n,
+          position: savedPositions[n.id] || n.position,
+        }));
+        setNodes(mergedNodes);
         setEdges(result.edges);
         layoutInProgress.current = false;
         setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 50);
@@ -295,7 +314,7 @@ function MindMapCanvasInner({
         console.error('ELK layout failed:', err);
         layoutInProgress.current = false;
       });
-  }, [data, setNodes, setEdges, fitView]);
+  }, [data, sessionId, displayRootTitle, setNodes, setEdges, fitView]);
 
   useEffect(() => {
     runLayout();
@@ -312,22 +331,50 @@ function MindMapCanvasInner({
       }
       return null;
     };
-    const mmNode = findNode(data.nodes, id);
+    const mmNode = id === '__session_root__'
+      ? {
+          id: '__session_root__',
+          title: displayRootTitle,
+          description: data.summary || '',
+          type: 'topic' as const,
+          importance: 'high' as const,
+          sources: [],
+          children: [],
+        }
+      : findNode(data.nodes, id);
     if (mmNode) {
       onSelect(mmNode);
-      setTimeout(() => {
-        fitView({ nodes: [{ id }], padding: 0.3, duration: 500 });
-      }, 100);
     }
-  }, [data.nodes, onSelect, fitView]);
+  }, [data.nodes, data.summary, displayRootTitle, onSelect]);
+
+  const handleSelectNodeRef = useRef(handleSelectNode);
+  handleSelectNodeRef.current = handleSelectNode;
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      if (node.id === 'root') return;
-      handleSelectNode(node.id);
+      handleSelectNodeRef.current(node.id);
     },
-    [handleSelectNode],
+    [],
   );
+
+  const handleNodesChange = useCallback((changes: NodeChange[]) => {
+    onNodesChange(changes);
+    const positionChanges = changes.filter(
+      (c): c is Extract<NodeChange, { type: 'position' }> => c.type === 'position'
+    );
+    if (positionChanges.length > 0) {
+            const updated = { ...(data.positions || {}) };
+      for (const c of positionChanges) {
+        if ('position' in c && c.position) {
+          updated[c.id] = c.position;
+        }
+      }
+      data.positions = updated;
+      saveMindMapPositions(sessionId, updated).catch((err) => {
+        console.error('Failed to save mind map positions:', err);
+      });
+    }
+  }, [onNodesChange, sessionId, data]);
 
   return (
     <div className="flex h-full">
@@ -336,7 +383,7 @@ function MindMapCanvasInner({
         <ReactFlow
           nodes={nodes}
           edges={edges}
-          onNodesChange={onNodesChange}
+          onNodesChange={handleNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeClick={onNodeClick}
           nodeTypes={nodeTypes}
@@ -344,6 +391,8 @@ function MindMapCanvasInner({
           fitViewOptions={{ padding: 0.2 }}
           minZoom={0.2}
           maxZoom={2}
+          nodesConnectable={false}
+          selectNodesOnDrag={false}
           proOptions={{ hideAttribution: true }}
           className="bg-slate-50/50 dark:bg-slate-900/50"
         >

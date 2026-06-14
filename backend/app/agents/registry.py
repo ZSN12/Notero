@@ -38,12 +38,10 @@ def _ensure_default_agents() -> None:
     if _AGENT_FACTORIES:
         return
 
-    from app.agents.summary_agent import SummaryAgent
     from app.agents.mindmap_agent import MindmapAgent
     from app.agents.quiz_agent import QuizAgent
     from app.agents.review_agent import ReviewPlannerAgent
 
-    register_agent(SummaryAgent.role, SummaryAgent)
     register_agent(MindmapAgent.role, MindmapAgent)
     register_agent(QuizAgent.role, QuizAgent)
     register_agent(ReviewPlannerAgent.role, ReviewPlannerAgent)

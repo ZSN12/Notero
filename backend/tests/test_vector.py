@@ -45,7 +45,7 @@ def _create_notebook_session_note(client: TestClient, headers: dict):
 
     sess = client.post(
         f"/api/sessions?notebook_id={notebook_id}",
-        json={"title": "Vector Test Session", "summary": "Testing vector search", "keywords": ["vector", "search"]},
+        json={"title": "Vector Test Session", "keywords": ["vector", "search"]},
         headers=headers,
     )
     assert sess.status_code == 201

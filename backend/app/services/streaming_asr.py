@@ -133,6 +133,47 @@ class StreamingRecognizer:
     def resume(self) -> None:
         self.is_paused = False
 
+    def flush_partial(self) -> list[dict]:
+        """Promote the current pending partial text to final events.
+
+        Used when the user manually pauses recording: the streaming model
+        may not have detected enough silence to emit a final segment, so we
+        force-commit whatever is buffered so the UI doesn't lose the last
+        spoken words.  We also flush the underlying ASR session accumulator
+        so that the next utterance after resume doesn't duplicate this text.
+        """
+        events: list[dict] = []
+
+        # Prefer the ASR session's accumulated text; it is the authoritative
+        # pending partial.  Fall back to our own partial_text if session is None.
+        flushed_segments: list[ASRSegment] = []
+        if self._asr_session:
+            flushed_segments = self._asr_session.flush()
+
+        if not flushed_segments and self.partial_text:
+            flushed_segments.append(
+                ASRSegment(
+                    text=self.partial_text,
+                    start_ms=int(self._session_start_ms),
+                    end_ms=int(self._total_ms),
+                )
+            )
+
+        for seg in flushed_segments:
+            self.final_segments.append(seg)
+            self.all_timestamps.append(seg.to_dict())
+            events.append({
+                "type": "final",
+                "text": seg.text,
+                "start_ms": seg.start_ms,
+                "end_ms": seg.end_ms,
+            })
+
+        self.partial_text = ""
+        self._session_start_ms = self._total_ms
+        self._last_final_at_ms = self._total_ms
+        return events
+
     def finalize(self) -> dict:
         """End of stream: flush remaining audio, do local cleanup, and return payload.
 

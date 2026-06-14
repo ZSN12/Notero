@@ -62,7 +62,7 @@ class TestNotebookExportImport:
                 db.commit()
                 db.refresh(nb)
 
-                s1 = DBSession(notebook_id=nb.id, title="S1", summary="sum1", keywords=["k1"])
+                s1 = DBSession(notebook_id=nb.id, title="S1", keywords=["k1"])
                 db.add(s1)
                 db.commit()
                 db.refresh(s1)
@@ -96,7 +96,6 @@ class TestNotebookExportImport:
                 "sessions": [
                     {
                         "title": "Session A",
-                        "summary": "Summary A",
                         "keywords": ["kw1", "kw2"],
                         "content": "Content A",
                         "transcript": [{"text": "hello"}],
@@ -223,7 +222,7 @@ class TestNotebookCRUD:
                 db.commit()
                 db.refresh(nb)
 
-                s1 = DBSession(notebook_id=nb.id, title="S1", summary="sum1", keywords=[])
+                s1 = DBSession(notebook_id=nb.id, title="S1", keywords=[])
                 db.add(s1)
                 db.commit()
                 nb_id = nb.id

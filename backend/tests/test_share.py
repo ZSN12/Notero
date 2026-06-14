@@ -45,7 +45,7 @@ def _create_notebook_and_session(client: TestClient, headers: dict):
 
     sess_resp = client.post(
         f"/api/sessions?notebook_id={notebook_id}",
-        json={"title": "Test Session", "summary": "A test summary", "keywords": ["test", "share"]},
+        json={"title": "Test Session", "keywords": ["test", "share"]},
         headers=headers,
     )
     assert sess_resp.status_code == 201, sess_resp.text
@@ -54,7 +54,7 @@ def _create_notebook_and_session(client: TestClient, headers: dict):
     return notebook_id, session_id
 
 
-# ── Share enable / disable / status ──
+# -- Share enable / disable / status --
 
 def test_share_enable_generates_token():
     with TestClient(app) as client:
@@ -131,7 +131,7 @@ def test_share_enable_idempotent():
         assert resp.status_code == 200
 
 
-# ── Public share endpoint ──
+# -- Public share endpoint --
 
 def test_public_share_no_token():
     """Access without token returns 403 (FastAPI requires query param)."""
@@ -185,7 +185,6 @@ def test_public_share_valid_token_returns_data():
         data = resp.json()
 
         assert data["session"]["title"] == "Test Session"
-        assert data["session"]["summary"] == "A test summary"
         assert data["session"]["keywords"] == ["test", "share"]
         assert data["notebook"]["title"] == "Test Notebook"
         assert "note" in data  # Key exists even if None
@@ -220,7 +219,7 @@ def test_public_share_nonexistent_session():
         assert resp.status_code == 404
 
 
-# ── Public media endpoint ──
+# -- Public media endpoint --
 
 def test_public_media_wrong_token():
     """Public media with wrong token returns 403."""
@@ -301,6 +300,81 @@ def test_share_enable_not_owner():
 
         resp = client.post(f"/api/sessions/{session_id}/share/enable", headers=other_headers)
         assert resp.status_code == 404
+
+
+# -- Expiration and max_views guards --
+
+def test_share_expires_after_expiration():
+    """Token should be rejected after share_expires_at passes."""
+    with TestClient(app) as client:
+        headers = auth_headers(client)
+        _, session_id = _create_notebook_and_session(client, headers)
+
+        resp = client.post(
+            f"/api/sessions/{session_id}/share/enable",
+            params={"expires_in_hours": -1},  # Already expired
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        token = resp.json()["share_token"]
+
+        # Access should be rejected due to expiration
+        resp = client.get(f"/api/public/share/{session_id}?token={token}")
+        assert resp.status_code == 403
+        assert "过期" in resp.json()["detail"]
+
+
+def test_share_max_views_limits_access():
+    """Access should be rejected after share_view_count reaches share_max_views."""
+    with TestClient(app) as client:
+        headers = auth_headers(client)
+        _, session_id = _create_notebook_and_session(client, headers)
+
+        resp = client.post(
+            f"/api/sessions/{session_id}/share/enable",
+            params={"max_views": 2},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        token = resp.json()["share_token"]
+
+        # First access - OK
+        resp = client.get(f"/api/public/share/{session_id}?token={token}")
+        assert resp.status_code == 200
+
+        # Second access - OK (this is the 2nd view, but we check BEFORE increment in some implementations)
+        # Actually the DB update is atomic: WHERE share_view_count < max_views, then increment
+        # So the 2nd access should still succeed (count was 0, now 1; next check 1 < 2 => OK)
+        resp = client.get(f"/api/public/share/{session_id}?token={token}")
+        assert resp.status_code == 200
+
+        # Third access - should fail (count was 2, now 2 >= 2)
+        resp = client.get(f"/api/public/share/{session_id}?token={token}")
+        assert resp.status_code == 403
+        assert "最大访问次数" in resp.json()["detail"]
+
+
+def test_share_max_views_one():
+    """max_views=1 should allow exactly one access."""
+    with TestClient(app) as client:
+        headers = auth_headers(client)
+        _, session_id = _create_notebook_and_session(client, headers)
+
+        resp = client.post(
+            f"/api/sessions/{session_id}/share/enable",
+            params={"max_views": 1},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        token = resp.json()["share_token"]
+
+        # First access - OK
+        resp = client.get(f"/api/public/share/{session_id}?token={token}")
+        assert resp.status_code == 200
+
+        # Second access - rejected
+        resp = client.get(f"/api/public/share/{session_id}?token={token}")
+        assert resp.status_code == 403
 
 
 def test_layout_blocks_survive_export_import_roundtrip():

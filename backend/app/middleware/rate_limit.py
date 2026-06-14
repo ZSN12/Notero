@@ -22,6 +22,7 @@ RATE_LIMITS: list[tuple[str | re.Pattern, int, int]] = [
     ("/api/vector/notebook", 10, 60),         # 10 notebook vector rebuilds per minute
     ("/api/vector/search", 60, 60),           # 60 vector searches per minute
     ("/api/notebooks", 30, 60),               # 30 requests per minute
+    (re.compile(r"^/api/sessions/[^/]+/processing-status"), 120, 60),  # processing status polling - generous limit
     ("/api/sessions", 30, 60),                # 30 requests per minute
     ("/api/notes", 30, 60),                   # 30 requests per minute
     ("/api/auth/register", 5, 3600),          # 5 registrations per hour

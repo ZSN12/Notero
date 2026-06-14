@@ -2,7 +2,10 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { ASRWebSocketClient } from '@/services/asrWebSocket';
 import { finishRecording, getAudioUrl, updateSessionDuration, fetchNote } from '@/services/api';
 
-export function useRecording(sessionId: string | undefined) {
+export function useRecording(
+  sessionId: string | undefined,
+  options?: { onFinalize?: () => void },
+) {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const isPausedRef = useRef(false);
@@ -140,7 +143,12 @@ export function useRecording(sessionId: string | undefined) {
           wsClient.sendAudioFrame(int16);
         };
         source.connect(processor);
-        processor.connect(audioContext.destination);
+        // Keep the node in the audio graph so it processes, but mute the output
+        // to prevent the microphone from being played back through the speakers.
+        const muteGain = audioContext.createGain();
+        muteGain.gain.value = 0;
+        processor.connect(muteGain);
+        muteGain.connect(audioContext.destination);
         scriptProcessorRef.current = processor;
       }
 
@@ -189,7 +197,7 @@ export function useRecording(sessionId: string | undefined) {
     setIsPaused(false);
   }, [_startTimerOnly]);
 
-  const stopRecording = useCallback(async (onTranscriptUpdate: (text: string) => void): Promise<{ note?: any } | undefined> => {
+  const stopRecording = useCallback(async (onTranscriptUpdate: (text: string) => void): Promise<{ note?: any; status?: string } | undefined> => {
     // 1. Cleanup audio
     if (streamRef.current) { streamRef.current.getTracks().forEach((track) => track.stop()); streamRef.current = null; }
     if (audioContextRef.current) { await audioContextRef.current.close(); audioContextRef.current = null; }
@@ -213,30 +221,26 @@ export function useRecording(sessionId: string | undefined) {
         await updateSessionDuration(sessionId, Date.now() - startTimeRef.current - pausedDurationRef.current);
       }
 
-      // 4. Call audio-finish (runs finalization on backend) and apply result
-      let finalNote: any = undefined;
+      // 4. Call audio-finish: concatenates audio, flushes the final chunk, and saves
+      // the local transcript. AI finalization is intentionally manual after real-time
+      // recording; the user must click "AI 整理" to generate mindmap / quiz / Q&A.
+      let finishStatus: string | undefined = undefined;
       if (sessionId) {
         const finishResult = await finishRecording(sessionId);
-        finalNote = finishResult.note;
-        if (finalNote?.transcript && finalNote.transcript.length > 0) {
-          const sorted = [...finalNote.transcript].sort(
-            (a: any, b: any) => (a.chunk_index || 0) - (b.chunk_index || 0)
-          );
-          const hasFinalTranscript = sorted.some((c: any) => c.correction_stage === 'final');
-          if (hasFinalTranscript) {
-            const dbText = sorted
-              .map((c: any) => c.display_text || c.corrected_text || c.text || c.raw_text || '')
-              .filter(Boolean)
-              .join('\n\n')
-              .trim();
-            if (dbText && dbText.length > 0) {
-              onTranscriptUpdate(dbText);
-            }
-          }
+        finishStatus = finishResult.status;
+        if (finishResult.status === 'error') {
+          setIsError(true);
+          setErrorMessage('录音保存失败，请稍后重试');
+        } else if (finishResult.status === 'no_audio' || finishResult.status === 'no_chunks') {
+          setIsError(true);
+          setErrorMessage('未检测到录音内容');
+        } else if (finishResult.status === 'finished') {
+          // Local transcript is saved; tell the UI to prompt for manual AI finalize.
+          options?.onFinalize?.();
         }
         setAudioPlaybackUrl(getAudioUrl(sessionId));
       }
-      return { note: finalNote };
+      return { status: finishStatus };
     } catch (error: any) {
       console.error('Failed to finish recording:', error);
       setIsError(true);
@@ -244,7 +248,7 @@ export function useRecording(sessionId: string | undefined) {
     } finally {
       setIsProcessing(false);
     }
-  }, [sessionId, _cleanupTimers]);
+  }, [sessionId, _cleanupTimers, options]);
 
   useEffect(() => {
     return () => {

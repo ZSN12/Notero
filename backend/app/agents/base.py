@@ -1,4 +1,4 @@
-"""Base agent framework for the nootbook multi-agent pipeline.
+"""Base agent framework for the notero multi-agent pipeline.
 
 Provides a unified interface for LLM-powered agents that operate on a
 Session/Note and persist their outputs into Note.vocabulary via Task tracking.
@@ -67,57 +67,11 @@ class AgentContext:
     def get_content_text(self, max_length: Optional[int] = None) -> str:
         """Extract all indexable content from the note into a single text.
 
-        Mirrors the extraction logic used by mindmap_service and quiz_service.
+        Uses the canonical extraction so user edits win over raw ASR and old
+        layout_blocks cannot resurrect deleted text.
         """
-        parts: list[str] = []
-
-        layout_blocks = self.note.layout_blocks
-        if layout_blocks and isinstance(layout_blocks, list):
-            for block in layout_blocks:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type", "")
-                content = block.get("content", "")
-                page = block.get("page")
-                title = block.get("title", "")
-
-                if btype == "transcript" and content:
-                    parts.append(f"[转写] {content.strip()}")
-                elif btype == "note" and content:
-                    parts.append(f"[笔记] {content.strip()}")
-                elif btype == "ppt":
-                    ppt_text = ""
-                    if title:
-                        ppt_text += title + " "
-                    if content:
-                        ppt_text += content + " "
-                    if ppt_text.strip():
-                        parts.append(f"[PPT第{page or '?'}页] {ppt_text.strip()}")
-
-        if not parts and self.note.content:
-            parts.append(self.note.content.strip())
-
-        if self.note.transcript and isinstance(self.note.transcript, list):
-            transcript_text = " ".join(
-                chunk.get("text", "")
-                for chunk in sorted(self.note.transcript, key=lambda x: x.get("chunk_index", 0))
-                if isinstance(chunk, dict)
-            ).strip()
-            if transcript_text and not any("[转写]" in p for p in parts):
-                parts.append(f"[转写] {transcript_text}")
-
-        if self.note.ppt_images and isinstance(self.note.ppt_images, list):
-            for ppt_data in self.note.ppt_images:
-                if not isinstance(ppt_data, dict):
-                    continue
-                for slide in ppt_data.get("slides", []):
-                    if not isinstance(slide, dict):
-                        continue
-                    slide_text = slide.get("text", "")
-                    if slide_text:
-                        parts.append(f"[PPT第{slide.get('page', '?')}页] {slide_text.strip()}")
-
-        text = "\n\n".join(parts)
+        from app.services.note_utils import get_canonical_note_text
+        text = get_canonical_note_text(self.note, include_ppt=True)
         if max_length and len(text) > max_length:
             text = text[:max_length]
         return text
@@ -128,7 +82,7 @@ class AgentContext:
 
 
 class BaseAgent(ABC):
-    """Abstract base class for all nootbook agents.
+    """Abstract base class for all notero agents.
 
     Subclasses define:
       - role: unique agent identifier
@@ -180,7 +134,11 @@ class BaseAgent(ABC):
         if not DEEPSEEK_API_KEY:
             raise ValueError("未配置 DEEPSEEK_API_KEY，无法运行 Agent")
 
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+        client = OpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL,
+            timeout=120.0,
+        )
         try:
             response = client.chat.completions.create(
                 model=DEEPSEEK_MODEL,

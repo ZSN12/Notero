@@ -8,6 +8,7 @@ from app.models import User
 from app.services import vector_service
 from app.services.state_service import set_running, set_ready, set_error
 from app.services.vector_service import _compute_session_content_hash
+from app.middleware.metrics import observe_vector_rebuild
 from app.models import Note
 
 router = APIRouter(prefix="/api/vector", tags=["vector"])
@@ -34,10 +35,12 @@ def rebuild_session_index(
         current_hash = _compute_session_content_hash(note) if note else ""
         set_ready(db, session_id, "vector_index", content_hash=current_hash, commit=False)
         db.commit()
+        observe_vector_rebuild("session", success=True)
         return {"session_id": session_id, "chunk_count": chunk_count, "status": "indexed"}
     except ValueError as e:
         set_error(db, session_id, "vector_index", error_message=str(e), commit=False)
         db.commit()
+        observe_vector_rebuild("session", success=False)
         raise HTTPException(status_code=404, detail=str(e))
 
 
@@ -50,8 +53,10 @@ def rebuild_notebook_index(
     """Rebuild vector index for all sessions in a notebook."""
     try:
         chunk_count = vector_service.build_notebook_index(notebook_id, current_user, db)
+        observe_vector_rebuild("notebook", success=True)
         return {"notebook_id": notebook_id, "chunk_count": chunk_count, "status": "indexed"}
     except ValueError as e:
+        observe_vector_rebuild("notebook", success=False)
         raise HTTPException(status_code=404, detail=str(e))
 
 
@@ -69,10 +74,12 @@ def rebuild_session_index_v2(
         current_hash = _compute_session_content_hash(note) if note else ""
         set_ready(db, session_id, "vector_index", content_hash=current_hash, commit=False)
         db.commit()
+        observe_vector_rebuild("session", success=True)
         return {"session_id": session_id, "chunk_count": chunk_count, "status": "indexed", "embedding_type": "neural"}
     except ValueError as e:
         set_error(db, session_id, "vector_index", error_message=str(e), commit=False)
         db.commit()
+        observe_vector_rebuild("session", success=False)
         raise HTTPException(status_code=404, detail=str(e))
 
 
