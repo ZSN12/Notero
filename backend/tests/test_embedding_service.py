@@ -23,7 +23,7 @@ from app.services.embedding_service import (
 class TestEmbeddingService:
     def test_available_when_api_key_set(self):
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI"):
+            with patch("openai.OpenAI"):
                 svc = EmbeddingService()
                 assert svc.available is True
 
@@ -34,7 +34,7 @@ class TestEmbeddingService:
 
     def test_embed_empty_text_returns_zero_vector(self):
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI"):
+            with patch("openai.OpenAI"):
                 svc = EmbeddingService()
                 result = svc.embed("")
                 assert result is not None
@@ -43,7 +43,7 @@ class TestEmbeddingService:
 
     def test_embed_whitespace_returns_zero_vector(self):
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI"):
+            with patch("openai.OpenAI"):
                 svc = EmbeddingService()
                 result = svc.embed("   \n\t  ")
                 assert result is not None
@@ -63,12 +63,12 @@ class TestEmbeddingService:
         mock_client.embeddings.create.return_value = mock_response
 
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI", return_value=mock_client):
+            with patch("openai.OpenAI", return_value=mock_client):
                 svc = EmbeddingService()
                 result = svc.embed("hello world")
                 assert result is not None
                 vec = struct.unpack(f"{EMBEDDING_DIM}f", result)
-                assert vec[0] == 0.1
+                assert abs(vec[0] - 0.1) < 1e-6
                 mock_client.embeddings.create.assert_called_once()
 
     def test_embed_api_failure_returns_none(self):
@@ -76,7 +76,7 @@ class TestEmbeddingService:
         mock_client.embeddings.create.side_effect = RuntimeError("API down")
 
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI", return_value=mock_client):
+            with patch("openai.OpenAI", return_value=mock_client):
                 svc = EmbeddingService()
                 result = svc.embed("hello")
                 assert result is None
@@ -88,7 +88,7 @@ class TestEmbeddingService:
         mock_client.embeddings.create.return_value = mock_response
 
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI", return_value=mock_client):
+            with patch("openai.OpenAI", return_value=mock_client):
                 svc = EmbeddingService()
                 result = svc.embed("hello")
                 assert result is None
@@ -97,7 +97,7 @@ class TestEmbeddingService:
 class TestEmbedBatch:
     def test_batch_all_empty_texts(self):
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI"):
+            with patch("openai.OpenAI"):
                 svc = EmbeddingService()
                 results = svc.embed_batch(["", "  ", "\t"])
                 assert len(results) == 3
@@ -115,15 +115,15 @@ class TestEmbedBatch:
         mock_client.embeddings.create.return_value = mock_response
 
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI", return_value=mock_client):
+            with patch("openai.OpenAI", return_value=mock_client):
                 svc = EmbeddingService()
                 results = svc.embed_batch(["hello", "", "world", "  "])
                 assert len(results) == 4
                 # Non-empty texts at index 0 and 2
                 vec0 = struct.unpack(f"{EMBEDDING_DIM}f", results[0])
-                assert vec0[0] == 0.1
+                assert abs(vec0[0] - 0.1) < 1e-6
                 vec2 = struct.unpack(f"{EMBEDDING_DIM}f", results[2])
-                assert vec2[0] == 0.2
+                assert abs(vec2[0] - 0.2) < 1e-6
                 # Empty texts are zero vectors
                 vec1 = struct.unpack(f"{EMBEDDING_DIM}f", results[1])
                 assert all(v == 0.0 for v in vec1)
@@ -138,7 +138,7 @@ class TestEmbedBatch:
         ]
 
         with patch("app.services.embedding_service.DASHSCOPE_API_KEY", "test-key"):
-            with patch("app.services.embedding_service.OpenAI", return_value=mock_client):
+            with patch("openai.OpenAI", return_value=mock_client):
                 svc = EmbeddingService()
                 results = svc.embed_batch(["hello"])
                 assert len(results) == 1

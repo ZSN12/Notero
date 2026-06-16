@@ -48,7 +48,12 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install pytest pytest-cov
-      - run: |
+          pip install -r backend/requirements-dev.txt
+      - name: Fast test layer (unit + integration)
+        run: |
           cd backend
-          python -m pytest tests/ -v --cov=app --cov-report=term-missing --cov-fail-under=50
+          python -m pytest tests/ -v -m "not slow and not llm and not e2e" --cov=app --cov-report=term-missing --cov-fail-under=50
+      - name: Slow test layer (llm / slow / e2e)
+        run: |
+          cd backend
+          python -m pytest tests/ -v -m "slow or llm or e2e" --cov=app --cov-report=term-missing --cov-fail-under=50

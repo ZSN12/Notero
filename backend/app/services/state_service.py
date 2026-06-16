@@ -18,6 +18,7 @@ VALID_STAGES = {
     "upload_transcribe",
     "recording_finalize",
     "transcript_finalize",
+    "transcript_organize",
     "vector_index",
     "mindmap",
     "quiz_bank",
@@ -38,6 +39,8 @@ def _get_stored_output_hash(note: Note, stage: str) -> str | None:
         kind = "mind_map"
     elif stage == "quiz_bank":
         kind = "quiz_bank"
+    elif stage == "transcript_organize":
+        kind = "organized_transcript"
     else:
         return None
     for item in note.vocabulary:
@@ -56,7 +59,7 @@ def _heal_stage_state_if_fresh(
     note.vocabulary, or vector chunks in the vector_index table — was saved and
     matches the current note content hash.
     """
-    if stage not in ("mindmap", "quiz_bank", "vector_index"):
+    if stage not in ("mindmap", "quiz_bank", "vector_index", "transcript_organize"):
         return None
     state = (
         db.query(SessionProcessingState)
@@ -311,7 +314,7 @@ def get_session_processing_status(db: Session, session_id: str) -> dict:
     # row to ready even if it says error/stale/idle.
     note = db.query(Note).filter(Note.session_id == session_id).first()
     if note:
-        for stage_to_heal in ("vector_index", "mindmap", "quiz_bank"):
+        for stage_to_heal in ("vector_index", "mindmap", "quiz_bank", "transcript_organize"):
             healed = _heal_stage_state_if_fresh(db, session_id, stage_to_heal, note)
             if healed:
                 stage_map[stage_to_heal] = healed

@@ -1,10 +1,8 @@
-import re
-import time
 import logging
+import re
 from difflib import SequenceMatcher
 from typing import List, Optional
 from app.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-from app.services.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -116,33 +114,23 @@ class TermCorrector:
         keywords: Optional[List[str]] = None,
         ppt_slides: Optional[list] = None,
     ) -> str:
-        """LLM correction + reorder. Falls back to deterministic cleanup on error."""
+        """LLM correction + reorder. Falls back to deterministic cleanup on error.
+
+        The LLM call is delegated to TranscriptOrganizerAgent so that the agent
+        owns the canonical restructuring logic while legacy callers can still use
+        this thin wrapper.
+        """
+        from app.agents.transcript_agent import TranscriptOrganizerAgent
+
         if not self._client or not text or not text.strip():
             return text
 
-        keyword_str = "、".join(keywords) if keywords else "无"
-        ppt_context = ""
-
-        if ppt_slides:
-            ppt_lines = ["## PPT 页面信息（按课堂顺序）"]
-            for s in ppt_slides:
-                page = s.get("page", "?")
-                title = s.get("title", "")
-                stext = s.get("text", "")[:200]
-                ppt_lines.append(f"第{page}页：{title} — {stext}")
-            ppt_context = "\n".join(ppt_lines)
-            prompt_template = load_prompt("asr_reorder")
-        else:
-            prompt_template = load_prompt("asr_correction")
-
-        prompt = prompt_template.render(
+        result = TranscriptOrganizerAgent.restructure_text(
+            raw_text=text,
             course_title=course_title,
-            keywords=keyword_str,
-            text=text,
-            ppt_context=ppt_context,
+            keywords=keywords,
+            ppt_slides=ppt_slides,
         )
-
-        result = self._call_llm(prompt, prompt_template.system, temperature=0.2)
         if not result or not result.strip():
             logger.info("restructure_transcript_llm_empty_return course=%s text_len=%s", course_title, len(text))
             return text
@@ -748,44 +736,6 @@ class TermCorrector:
         source_first_person = len(re.findall(r"(我们|你们|大家|是不是|对吧|怎么)", source or ""))
         candidate_narration = len(re.findall(r"(老师|同学|本次|课程|课堂|讲解|提醒)", text))
         return candidate_narration >= 3 and candidate_narration > source_first_person
-
-    # ──────────────────────────────────────────────────────────────────
-    # LLM call
-    # ──────────────────────────────────────────────────────────────────
-
-    def _call_llm(
-        self,
-        prompt: str,
-        system_msg: str,
-        temperature: float = 0.2,
-        timeout_seconds: float = 60.0,
-    ) -> str:
-        import logging
-        _logger = logging.getLogger(__name__)
-        _logger.info(
-            "termcorrector_llm_call model=%s prompt_len=%s system_len=%s timeout=%s",
-            DEEPSEEK_MODEL, len(prompt), len(system_msg), timeout_seconds,
-        )
-        t0 = time.time()
-        response = self._client.chat.completions.create(
-            model=DEEPSEEK_MODEL,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=temperature,
-            timeout=timeout_seconds,
-        )
-        elapsed = time.time() - t0
-        content = response.choices[0].message.content.strip()
-        content = re.sub(r'^```(?:\w+)?\n', '', content, flags=re.MULTILINE)
-        content = re.sub(r'\n?```\s*$', '', content, flags=re.MULTILINE)
-        _logger.info(
-            "termcorrector_llm_response elapsed=%.2fs content_len=%s content_preview=%r",
-            elapsed, len(content), content[:120],
-        )
-        return content.strip()
-
 
 # Singleton
 corrector = TermCorrector()

@@ -57,6 +57,25 @@ _agent_tasks_total = Counter(
     ["role", "status"],
     registry=NOTERO_REGISTRY,
 )
+_agent_execution_duration_seconds = Histogram(
+    "notero_agent_execution_duration_seconds",
+    "Agent execution latency",
+    ["role", "status"],
+    buckets=[0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
+    registry=NOTERO_REGISTRY,
+)
+_agent_retries_total = Counter(
+    "notero_agent_retries_total",
+    "Agent execution retries",
+    ["role", "attempt"],
+    registry=NOTERO_REGISTRY,
+)
+_agent_errors_total = Counter(
+    "notero_agent_errors_total",
+    "Agent execution errors by type",
+    ["role", "error_type"],
+    registry=NOTERO_REGISTRY,
+)
 
 _vector_index_rebuilds_total = Counter(
     "notero_vector_index_rebuilds_total",
@@ -112,6 +131,25 @@ def observe_asr_processing(source: str, duration_seconds: float):
 def observe_agent_task(role: str, success: bool = True):
     status = "success" if success else "error"
     _agent_tasks_total.labels(role=role, status=status).inc()
+
+
+def observe_agent_execution(
+    role: str,
+    duration_seconds: float,
+    status: str,
+    retries: int = 0,
+):
+    """Record agent execution duration, final status, and retry count."""
+    _agent_execution_duration_seconds.labels(role=role, status=status).observe(
+        duration_seconds
+    )
+    for attempt in range(1, retries + 1):
+        _agent_retries_total.labels(role=role, attempt=str(attempt)).inc()
+
+
+def observe_agent_error(role: str, error_type: str):
+    """Record a classified agent error."""
+    _agent_errors_total.labels(role=role, error_type=error_type).inc()
 
 
 def observe_vector_rebuild(scope: str, success: bool = True):

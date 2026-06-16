@@ -108,7 +108,7 @@ class ReviewPlannerAgent(BaseAgent):
     def run(self, ctx: AgentContext) -> AgentResult:
         started = time.monotonic()
         try:
-            content_text = ctx.get_content_text(max_length=6000)
+            content_text = ctx.get_content_text_for_agent(max_length=6000)
             if not content_text.strip():
                 return AgentResult(success=False, error_message="没有可用的索引内容")
 

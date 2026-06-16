@@ -1,5 +1,12 @@
 import { useState } from 'react';
 import { finalizeTranscript } from '@/services/api';
+import { transcriptTextFromRawTranscript } from '@/lib/noteLayout';
+
+interface TranscriptEntry {
+  correction_stage?: string;
+  is_ai_corrected?: boolean;
+  correction_error?: string;
+}
 
 export function useRestructure() {
   const [isRestructuring, setIsRestructuring] = useState(false);
@@ -18,20 +25,21 @@ export function useRestructure() {
       const result = await finalizeTranscript(sessionId, autoGenerate);
       const note = result?.note;
       if (note?.transcript && note.transcript.length > 0) {
-        const sorted = [...note.transcript].sort((a: { chunk_index?: number }, b: { chunk_index?: number }) => (a.chunk_index || 0) - (b.chunk_index || 0));
-        const lastEntry = sorted[sorted.length - 1] as { is_ai_corrected?: boolean; correction_error?: string } | undefined;
-        const dbText = sorted
-          .map((c: { display_text?: string; corrected_text?: string; text?: string }) => c.display_text || c.corrected_text || c.text || '')
-          .filter(Boolean)
-          .join('\n\n')
-          .trim();
+        const dbText = transcriptTextFromRawTranscript(note.transcript);
         if (dbText) {
           onReceiveAiText(dbText, { force: true });
         }
-        if (lastEntry?.is_ai_corrected) {
+        // Determine correction status from the latest authoritative entry only.
+        let latest: TranscriptEntry | undefined;
+        for (const entry of note.transcript as TranscriptEntry[]) {
+          if (entry && (entry.correction_stage === 'final' || entry.correction_stage === 'user_edited')) {
+            latest = entry;
+          }
+        }
+        if (latest?.is_ai_corrected) {
           onCorrectionStatus({ type: 'corrected' });
-        } else if (lastEntry?.correction_error) {
-          onCorrectionStatus({ type: 'error', message: lastEntry.correction_error });
+        } else if (latest?.correction_error) {
+          onCorrectionStatus({ type: 'error', message: latest.correction_error });
         } else {
           onCorrectionStatus({ type: 'local' });
         }

@@ -40,8 +40,8 @@ def _ensure_default_agents() -> None:
 
     from app.agents.mindmap_agent import MindmapAgent
     from app.agents.quiz_agent import QuizAgent
-    from app.agents.review_agent import ReviewPlannerAgent
+    from app.agents.transcript_agent import TranscriptOrganizerAgent
 
     register_agent(MindmapAgent.role, MindmapAgent)
     register_agent(QuizAgent.role, QuizAgent)
-    register_agent(ReviewPlannerAgent.role, ReviewPlannerAgent)
+    register_agent(TranscriptOrganizerAgent.role, TranscriptOrganizerAgent)

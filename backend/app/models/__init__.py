@@ -26,6 +26,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     notebooks = relationship("Notebook", back_populates="user", cascade="all, delete-orphan")
     vector_chunks = relationship("VectorChunk", back_populates="user", cascade="all, delete-orphan")
+    workflows = relationship("AgentWorkflow", back_populates="user", cascade="all, delete-orphan")
 
 
 class Notebook(Base):
@@ -70,6 +71,7 @@ class Session(Base):
     tasks = relationship("Task", back_populates="session", cascade="all, delete-orphan")
     vector_chunks = relationship("VectorChunk", back_populates="session", cascade="all, delete-orphan")
     processing_states = relationship("SessionProcessingState", back_populates="session", cascade="all, delete-orphan")
+    workflows = relationship("AgentWorkflow", back_populates="session", cascade="all, delete-orphan")
 
 class Note(Base):
     __tablename__ = "notes"
@@ -132,6 +134,7 @@ class Task(Base):
     progress = Column(Float, default=0.0)
     error_message = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     session = relationship("Session", back_populates="tasks")
 
 class Vocabulary(Base):
@@ -189,4 +192,29 @@ class SessionProcessingState(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     session = relationship("Session", back_populates="processing_states")
 
-__all__ = ["Base", "User", "Notebook", "Session", "Note", "File", "Task", "Vocabulary", "VectorChunk", "SessionProcessingState"]
+
+class AgentWorkflow(Base):
+    __tablename__ = "agent_workflows"
+    __table_args__ = (
+        Index("ix_agent_workflows_session_id", "session_id"),
+        Index("ix_agent_workflows_status", "status"),
+    )
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    roles = Column(JSON, default=list, nullable=False)
+    dependencies = Column(JSON, default=dict, nullable=False)
+    role_states = Column(JSON, default=dict, nullable=False)
+    status = Column(String(20), default="pending", nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    session = relationship("Session", back_populates="workflows")
+    user = relationship("User", back_populates="workflows")
+
+
+__all__ = [
+    "Base", "User", "Notebook", "Session", "Note", "File", "Task",
+    "Vocabulary", "VectorChunk", "SessionProcessingState", "AgentWorkflow",
+]

@@ -20,6 +20,7 @@ function makeStatus(
       upload_transcribe: { status: 'idle', progress: 0, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
       recording_finalize: { status: 'idle', progress: 0, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
       transcript_finalize: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'abc', started_at: null, finished_at: null },
+      transcript_organize: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'abc', started_at: null, finished_at: null },
       vector_index: { status: 'ready', progress: 1, message: null, error_message: null, content_hash: 'abc', started_at: null, finished_at: null },
       mindmap: { status: 'idle', progress: 0, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
       quiz_bank: { status: 'idle', progress: 0, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },

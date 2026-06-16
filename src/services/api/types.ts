@@ -271,7 +271,7 @@ export interface RAGCallbacks {
   onError: (error: string) => void;
 }
 
-export type ProcessingStage = 'upload_transcribe' | 'recording_finalize' | 'transcript_finalize' | 'vector_index' | 'mindmap' | 'quiz_bank';
+export type ProcessingStage = 'upload_transcribe' | 'recording_finalize' | 'transcript_finalize' | 'transcript_organize' | 'vector_index' | 'mindmap' | 'quiz_bank';
 export type ProcessingStatusValue = 'idle' | 'running' | 'ready' | 'error' | 'stale' | 'fallback';
 
 export interface ProcessingStageState {

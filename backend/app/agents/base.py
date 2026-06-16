@@ -49,6 +49,7 @@ class AgentResult:
     success: bool
     data: Optional[dict[str, Any]] = None
     error_message: Optional[str] = None
+    skipped: bool = False
 
 
 @dataclass
@@ -79,6 +80,40 @@ class AgentContext:
     def get_keywords_text(self) -> str:
         """Return comma-separated keywords or a default placeholder."""
         return ", ".join(self.session.keywords) if self.session.keywords else "无"
+
+    def get_organized_transcript_text(self, max_length: Optional[int] = None) -> str:
+        """Return the organized transcript plain_text if a fresh entry exists."""
+        from app.services.vector_service import _compute_session_content_hash
+
+        if not isinstance(self.note.vocabulary, list):
+            return ""
+
+        current_hash = _compute_session_content_hash(self.note)
+        for item in self.note.vocabulary:
+            if not isinstance(item, dict) or item.get("kind") != "organized_transcript":
+                continue
+            stored_hash = item.get("content_hash")
+            if stored_hash != current_hash:
+                continue
+            data = item.get("data") or {}
+            plain_text = (data.get("plain_text") or "").strip()
+            if not plain_text:
+                continue
+            if max_length and len(plain_text) > max_length:
+                return plain_text[:max_length]
+            return plain_text
+        return ""
+
+    def get_content_text_for_agent(self, max_length: Optional[int] = None) -> str:
+        """Preferred input text for downstream agents.
+
+        Uses the organized transcript if it is fresh; otherwise falls back to the
+        canonical note text (raw transcript + notes + PPT).
+        """
+        organized = self.get_organized_transcript_text(max_length=max_length)
+        if organized:
+            return organized
+        return self.get_content_text(max_length=max_length)
 
 
 class BaseAgent(ABC):

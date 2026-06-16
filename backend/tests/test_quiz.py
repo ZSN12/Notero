@@ -1,17 +1,8 @@
 import json
-import os
-import sys
 import time
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
-
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BACKEND_DIR))
-
-os.environ["SKIP_ASR_PRELOAD"] = "1"
-os.environ["DEEPSEEK_API_KEY"] = "test-key-for-quiz"
 
 from fastapi.testclient import TestClient
 from app.main import app
@@ -30,6 +21,34 @@ def auth_headers(client: TestClient) -> dict[str, str]:
         "Authorization": f"Bearer {resp.json()['access_token']}",
         "Origin": "http://localhost:5173",
     }
+
+
+def _create_notebook_session_note(client: TestClient, headers: dict):
+    """Create notebook + session + note with content. Returns (notebook_id, session_id)."""
+    nb = client.post("/api/notebooks", json={"title": "Quiz V2 NB"}, headers=headers)
+    assert nb.status_code == 201
+    notebook_id = nb.json()["id"]
+
+    sess = client.post(
+        f"/api/sessions?notebook_id={notebook_id}",
+        json={"title": "Quiz V2 Session", "keywords": ["design", "patterns"]},
+        headers=headers,
+    )
+    assert sess.status_code == 201
+    session_id = sess.json()["id"]
+
+    client.put(
+        f"/api/notes/session/{session_id}",
+        json={
+            "content": "## 语音转文字\n\n设计模式是软件工程中常用的解决方案。单例模式确保一个类只有一个实例。工厂方法模式定义了一个创建对象的接口。观察者模式定义了对象间的一对多依赖关系。策略模式定义了一系列算法，把它们封装起来，使它们可以互相替换。",
+            "layout_blocks": [
+                {"id": "t1", "type": "transcript", "content": "设计模式是软件工程中常用的解决方案。单例模式确保一个类只有一个实例。工厂方法模式定义了一个创建对象的接口。观察者模式定义了对象间的一对多依赖关系。策略模式定义了一系列算法，把它们封装起来，使它们可以互相替换。"}
+            ]
+        },
+        headers=headers,
+    )
+
+    return notebook_id, session_id
 
 
 def _create_other_user(email: str, username: str, password: str = "other1234") -> None:

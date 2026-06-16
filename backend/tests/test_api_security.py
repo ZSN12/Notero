@@ -1,87 +1,62 @@
-import os
-import sys
-from pathlib import Path
-
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BACKEND_DIR))
-
-os.environ["SKIP_ASR_PRELOAD"] = "1"
-
 from fastapi.testclient import TestClient
 
-from app.main import app
+from tests.harness.helpers import auth_headers
 
 
-def auth_headers(client: TestClient) -> dict[str, str]:
+def test_health_and_login(client: TestClient):
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
     resp = client.post(
         "/api/auth/login",
         json={"email": "admin", "password": "admin123"},
     )
     assert resp.status_code == 200
-    return {
-        "Authorization": f"Bearer {resp.json()['access_token']}",
-        "Origin": "http://localhost:5173",
-    }
+    assert "access_token" in resp.json()
+    assert "refresh_token" in resp.json()
 
 
-def test_health_and_login():
-    with TestClient(app) as client:
-        resp = client.get("/api/health")
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
+def test_password_reset_allows_account_only_reset(client: TestClient):
+    resp = client.post(
+        "/api/auth/register",
+        json={
+            "username": "Reset User",
+            "email": "reset@example.com",
+            "password": "oldpass123",
+            "security_question": "What is your favorite color?",
+            "security_answer": "blue",
+        },
+    )
+    assert resp.status_code == 201
 
-        resp = client.post(
-            "/api/auth/login",
-            json={"email": "admin", "password": "admin123"},
-        )
-        assert resp.status_code == 200
-        assert "access_token" in resp.json()
-        assert "refresh_token" in resp.json()
+    resp = client.post(
+        "/api/auth/reset-password",
+        json={
+            "email": "reset@example.com",
+            "security_answer": "blue",
+            "new_password": "newpass123",
+        },
+    )
+    assert resp.status_code == 200
 
-
-def test_password_reset_allows_account_only_reset():
-    with TestClient(app) as client:
-        resp = client.post(
-            "/api/auth/register",
-            json={
-                "username": "Reset User",
-                "email": "reset@example.com",
-                "password": "oldpass123",
-                "security_question": "What is your favorite color?",
-                "security_answer": "blue",
-            },
-        )
-        assert resp.status_code == 201
-
-        resp = client.post(
-            "/api/auth/reset-password",
-            json={
-                "email": "reset@example.com",
-                "security_answer": "blue",
-                "new_password": "newpass123",
-            },
-        )
-        assert resp.status_code == 200
-
-        resp = client.post(
-            "/api/auth/login",
-            json={"email": "reset@example.com", "password": "newpass123"},
-        )
-        assert resp.status_code == 200
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": "reset@example.com", "password": "newpass123"},
+    )
+    assert resp.status_code == 200
 
 
-def test_media_routes_require_authentication():
-    with TestClient(app) as client:
-        resp = client.get("/api/media/audio/example.wav")
-        assert resp.status_code in (401, 403)
+def test_media_routes_require_authentication(client: TestClient):
+    resp = client.get("/api/media/audio/example.wav")
+    assert resp.status_code in (401, 403)
 
 
-def test_ppt_align_requires_owned_session():
-    with TestClient(app) as client:
-        headers = auth_headers(client)
-        resp = client.post(
-            "/api/process/ppt-align",
-            params={"session_id": "missing-session", "text": "hello"},
-            headers=headers,
-        )
-        assert resp.status_code == 404
+def test_ppt_align_requires_owned_session(client: TestClient):
+    headers = auth_headers(client)
+    resp = client.post(
+        "/api/process/ppt-align",
+        params={"session_id": "missing-session", "text": "hello"},
+        headers=headers,
+    )
+    assert resp.status_code == 404

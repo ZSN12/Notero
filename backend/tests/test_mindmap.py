@@ -1,15 +1,6 @@
 import json
-import os
-import sys
 import time
-from pathlib import Path
 from unittest.mock import patch, MagicMock
-
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BACKEND_DIR))
-
-os.environ["SKIP_ASR_PRELOAD"] = "1"
-os.environ["DEEPSEEK_API_KEY"] = "test-key-for-mindmap"
 
 from fastapi.testclient import TestClient
 from app.main import app

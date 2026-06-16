@@ -1,119 +1,85 @@
 """Celery tasks for agent execution.
 
-Replaces the previous threading-based task runner with a proper task queue.
+The actual execution logic lives in ``app.agents.runner.AgentRunner``;
+this module only adapts Celery retries to the runner.
 """
 
 import logging
 
+from celery.exceptions import Retry
+
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
-from app.models import Task, User, Session as DBSession, Notebook
-from app.agents import get_agent, AgentContext
-from app.services.state_service import (
-    set_running as set_state_running,
-    set_ready as set_state_ready,
-    set_error as set_state_error,
-)
-from app.services.vector_service import _compute_session_content_hash
+from app.agents.runner import AgentRunner
 
 logger = logging.getLogger(__name__)
 
 
-def _role_to_stage(role: str) -> str:
-    return "quiz_bank" if role == "quiz" else role
+def _is_retryable_error(message: str | None) -> bool:
+    """Return True when an error is likely transient and worth requeuing."""
+    if not message:
+        return False
+    text = message.lower()
+    return any(
+        keyword in text
+        for keyword in ("timeout", "timed out", "unavailable", "connection", "network")
+    )
 
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
 def run_agent(self, session_id: str, user_id: str, role: str, task_id: str) -> dict:
-    """Run a single agent in a Celery worker with its own DB session.
+    """Run a single agent in a Celery worker.
 
-    Retries up to 2 times on failure.
+    Retries are handled at two levels:
+    - AgentRunner performs in-process retries for transient LLM errors.
+    - Celery requeues the task for worker-level failures (crash, kill, etc.).
     """
     db = SessionLocal()
-    stage = _role_to_stage(role)
     try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        user = db.query(User).filter(User.id == user_id).first()
-        if not task or not user:
-            logger.error("agent_task_missing_prereqs task_id=%s user_id=%s", task_id, user_id)
-            return {"status": "error", "error": "Missing prerequisites"}
+        runner = AgentRunner()
+        result = runner.run(session_id, user_id, role, task_id, db)
 
-        task.status = "running"
-        task.progress = 0.1
-        task.error_message = None
-        db.commit()
+        # If the task was already running elsewhere, do not notify or retry.
+        if result.skipped:
+            logger.info(
+                "celery_agent_task_skipped session_id=%s role=%s task_id=%s reason=%s",
+                session_id, role, task_id, result.error_message,
+            )
+            return {"status": "skipped", "task_id": task_id, "reason": result.error_message}
 
-        set_state_running(db, session_id, stage, progress=0.1, commit=False)
-        db.commit()
-
-        session = (
-            db.query(DBSession)
-            .filter(DBSession.id == session_id)
-            .join(Notebook)
-            .filter(Notebook.user_id == user_id)
-            .first()
-        )
-        if not session:
-            raise ValueError("Session not found or access denied")
-
-        from app.models import Note
-        note = db.query(Note).filter(Note.session_id == session_id).first()
-        if not note:
-            raise ValueError("No note found for session")
-
-        notebook = db.query(Notebook).filter(Notebook.id == session.notebook_id).first()
-        if not notebook:
-            raise ValueError("Notebook not found")
-
-        agent = get_agent(role)
-        ctx = AgentContext(
-            session_id=session_id,
-            user=user,
-            db=db,
-            note=note,
-            session=session,
-            notebook=notebook,
-            task=task,
-        )
-        result = agent.run(ctx)
-
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if not task:
-            set_state_error(db, session_id, stage, error_message="Task lost", commit=False)
-            db.commit()
-            return {"status": "error", "error": "Task lost"}
+        # Notify orchestrator regardless of success/failure.
+        try:
+            from app.agents.orchestrator import on_agent_completed
+            on_agent_completed(
+                session_id, user_id, role, result.success, result.error_message
+            )
+        except Exception:
+            logger.exception(
+                "celery_orchestrator_notify_failed session_id=%s role=%s task_id=%s",
+                session_id, role, task_id,
+            )
 
         if result.success:
-            task.status = "success"
-            task.progress = 1.0
-            task.error_message = None
-            current_hash = _compute_session_content_hash(note)
-            set_state_ready(db, session_id, stage, content_hash=current_hash, commit=False)
-            db.commit()
-            return {"status": "success", "task_id": task.id, "data": result.data}
+            return {"status": "success", "task_id": task_id, "data": result.data}
 
-        task.status = "error"
-        task.progress = 1.0
-        task.error_message = result.error_message or "未知错误"
-        set_state_error(db, session_id, stage, error_message=result.error_message or "未知错误", commit=False)
-        db.commit()
-        raise ValueError(task.error_message)
+        logger.warning(
+            "celery_agent_task_failed session_id=%s role=%s task_id=%s error=%s",
+            session_id, role, task_id, result.error_message,
+        )
 
+        # AgentRunner already retried transient errors internally. Non-retryable
+        # failures (invalid output, bad input) should fail fast.
+        if _is_retryable_error(result.error_message):
+            self.retry(exc=ValueError(result.error_message))
+        return {"status": "error", "task_id": task_id, "error": result.error_message}
+
+    except Retry:
+        raise
     except Exception as exc:
-        db.rollback()
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
-            task.status = "error"
-            task.progress = 1.0
-            task.error_message = str(exc)
-            db.commit()
-        set_state_error(db, session_id, stage, error_message=str(exc), commit=False)
-        db.commit()
-        logger.exception("agent_task_failed session_id=%s role=%s", session_id, role)
-        # Retry on transient failures
-        try:
-            self.retry(exc=exc)
-        except Exception:
-            return {"status": "error", "error": str(exc)}
+        logger.exception(
+            "celery_agent_task_exception session_id=%s role=%s task_id=%s",
+            session_id, role, task_id,
+        )
+        self.retry(exc=exc)
     finally:
         db.close()

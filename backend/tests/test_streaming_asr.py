@@ -1,38 +1,11 @@
 """Tests for streaming ASR recognizer and manager."""
 
-import os
-import sys
 import wave
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BACKEND_DIR))
-
-os.environ["SKIP_ASR_PRELOAD"] = "1"
+from unittest.mock import patch
 
 from app.services.streaming_asr import StreamingRecognizer, StreamingASRManager
 from app.services.transcriber import ASRSegment
-
-
-class MockASRSession:
-    """Mock streaming ASR session for testing."""
-
-    def __init__(self, texts=None, finals=None):
-        self._texts = texts or []
-        self._finals = finals or []
-        self._index = 0
-
-    def feed_pcm(self, pcm_bytes):
-        if self._index < len(self._texts):
-            text = self._texts[self._index]
-            is_final = self._finals[self._index] if self._index < len(self._finals) else False
-            self._index += 1
-            return text, is_final
-        return "", False
-
-    def finalize(self):
-        return []
+from tests.harness.mocks import MockASRSession
 
 
 class TestStreamingRecognizer:

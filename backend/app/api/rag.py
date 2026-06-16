@@ -42,7 +42,7 @@ class RAGAskRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
     notebook_id: Optional[str] = None
-    top_k: int = Field(5, ge=1, le=50)
+    top_k: int = Field(5)
 
 
 class SourceItem(BaseModel):
@@ -141,6 +141,8 @@ def rag_ask(
     """
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+    if req.top_k < 1 or req.top_k > 50:
+        raise HTTPException(status_code=400, detail="top_k must be between 1 and 50")
 
     # Validate ownership (both must be valid if provided)
     if req.notebook_id:

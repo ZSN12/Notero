@@ -1,14 +1,10 @@
 """Tests for the unified LLM provider abstraction."""
 
-import os
-import sys
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BACKEND_DIR))
+import pytest
 
-os.environ["SKIP_ASR_PRELOAD"] = "1"
+pytestmark = pytest.mark.llm
 
 from app.core.llm import (
     ChatMessage,
@@ -30,7 +26,7 @@ class TestDeepSeekProvider:
 
     def test_available_with_api_key(self):
         mock_client = MagicMock()
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DeepSeekProvider(api_key="sk-test")
             assert provider.available is True
 
@@ -51,7 +47,7 @@ class TestDeepSeekProvider:
         ]
         mock_client.chat.completions.create.return_value = mock_resp
 
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DeepSeekProvider(api_key="sk-test")
             resp = provider.chat([ChatMessage(role="user", content="hello")])
             assert len(resp.choices) == 1
@@ -64,7 +60,7 @@ class TestDeepSeekProvider:
         chunk3 = MagicMock(choices=[MagicMock(delta=MagicMock(content=None))])
         mock_client.chat.completions.create.return_value = iter([chunk1, chunk2, chunk3])
 
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DeepSeekProvider(api_key="sk-test")
             chunks = list(provider.chat_stream([ChatMessage(role="user", content="hello")]))
             assert chunks == ["Hello", " world"]
@@ -75,7 +71,7 @@ class TestDeepSeekProvider:
         mock_resp.choices = [MagicMock(message=MagicMock(role="assistant", content="ok"))]
         mock_client.chat.completions.create.return_value = mock_resp
 
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DeepSeekProvider(api_key="sk-test", default_model="custom-model")
             provider.chat([ChatMessage(role="user", content="hi")])
             call_kwargs = mock_client.chat.completions.create.call_args[1]
@@ -87,7 +83,7 @@ class TestDeepSeekProvider:
         mock_resp.choices = [MagicMock(message=MagicMock(role="assistant", content="ok"))]
         mock_client.chat.completions.create.return_value = mock_resp
 
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DeepSeekProvider(api_key="sk-test", default_model="default")
             provider.chat([ChatMessage(role="user", content="hi")], model="override")
             call_kwargs = mock_client.chat.completions.create.call_args[1]
@@ -101,13 +97,13 @@ class TestDashScopeEmbeddingProvider:
 
     def test_available_with_api_key(self):
         mock_client = MagicMock()
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DashScopeEmbeddingProvider(api_key="sk-test")
             assert provider.available is True
 
     def test_embed_all_empty_texts(self):
         mock_client = MagicMock()
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DashScopeEmbeddingProvider(api_key="sk-test")
             results = provider.embed(["", "  "])
             assert len(results) == 2
@@ -119,7 +115,7 @@ class TestDashScopeEmbeddingProvider:
         mock_resp.data = [MagicMock(embedding=[0.1] * 1536)]
         mock_client.embeddings.create.return_value = mock_resp
 
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DashScopeEmbeddingProvider(api_key="sk-test")
             results = provider.embed(["hello"])
             assert len(results) == 1
@@ -131,7 +127,7 @@ class TestDashScopeEmbeddingProvider:
         mock_resp.data = [MagicMock(embedding=[0.1] * 100)]  # wrong dim
         mock_client.embeddings.create.return_value = mock_resp
 
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DashScopeEmbeddingProvider(api_key="sk-test")
             results = provider.embed(["hello"])
             assert results[0] is None
@@ -140,7 +136,7 @@ class TestDashScopeEmbeddingProvider:
         mock_client = MagicMock()
         mock_client.embeddings.create.side_effect = RuntimeError("API down")
 
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DashScopeEmbeddingProvider(api_key="sk-test")
             results = provider.embed(["hello"])
             assert results == [None]
@@ -154,7 +150,7 @@ class TestDashScopeEmbeddingProvider:
         ]
         mock_client.embeddings.create.return_value = mock_resp
 
-        with patch("app.core.llm.OpenAI", return_value=mock_client):
+        with patch("openai.OpenAI", return_value=mock_client):
             provider = DashScopeEmbeddingProvider(api_key="sk-test")
             results = provider.embed(["hello", "", "world"])
             assert len(results) == 3

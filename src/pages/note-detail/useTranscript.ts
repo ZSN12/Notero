@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchNote, updateNote as apiUpdateNote, insertPPTIntoTranscript, ContentBlock, Slide } from '@/services/api';
-import { contentBlocksFromLayout, layoutFromNoteParts, normalizeHtmlText } from '@/lib/noteLayout';
+import { contentBlocksFromLayout, layoutFromNoteParts, normalizeHtmlText, transcriptTextFromRawTranscript } from '@/lib/noteLayout';
 
 const CORRECTION_POLL_MS = 12000;
 const FINAL_CORRECTION_POLL_MS = 2500;
@@ -344,13 +344,7 @@ export function useTranscript(
   }, []);
 
   const transcriptTextFromNote = useCallback((note: any) => {
-    if (!note?.transcript || !Array.isArray(note.transcript) || note.transcript.length === 0) return '';
-    return [...note.transcript]
-      .sort((a: any, b: any) => (a.chunk_index || 0) - (b.chunk_index || 0))
-      .map((chunk: any) => chunk.display_text || chunk.corrected_text || chunk.text || chunk.raw_text || '')
-      .filter(Boolean)
-      .join('\n\n')
-      .trim();
+    return transcriptTextFromRawTranscript(note?.transcript);
   }, []);
 
   const appendTranscriptText = useCallback((newText: string, skipDedup = false) => {

@@ -9,9 +9,7 @@ Provides:
 from __future__ import annotations
 
 import logging
-import os
 import threading
-import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
@@ -21,15 +19,7 @@ from sqlalchemy.orm import Session
 from app.agents import AgentContext, get_agent, list_agents
 from app.core.auth import get_current_user
 from app.core.database import SessionLocal, get_db
-from app.core.exceptions import (
-    NoteroServiceError,
-    ResourceNotFoundError,
-    LLMUnavailableError,
-    LLMTimeoutError,
-    ProcessingError,
-)
-from app.models import Notebook, Note, Session as DBSession, Task, User
-from app.tasks.agent_tasks import run_agent
+from app.models import AgentWorkflow, Notebook, Note, Session as DBSession, Task, User
 from app.services.vector_service import _compute_session_content_hash
 from app.services.state_service import (
     set_running as set_state_running,
@@ -62,10 +52,12 @@ def _get_start_lock(session_id: str, task_type: str) -> threading.Lock:
     return lock
 
 
-# In tests, run the agent synchronously so mocks are deterministic and threads
-# cannot leak across test cases.
-_RUN_AGENTS_SYNCHRONOUSLY = os.environ.get("AGENTS_SYNC", "0") == "1"
-_USE_CELERY_FOR_AGENTS = os.environ.get("AGENTS_USE_CELERY", "0") == "1"
+from app.agents.orchestrator import (
+    AgentWorkflowOrchestrator,
+    AGENT_DEPENDENCIES,
+    start_workflow,
+    _expand_roles,
+)
 
 
 class RunAgentsRequest(BaseModel):
@@ -73,43 +65,6 @@ class RunAgentsRequest(BaseModel):
 
 
 # ── Helpers ──
-
-def _dispatch_agent_task(session_id: str, user_id: str, role: str, task_id: str) -> None:
-    """Start an agent task.
-
-    Local development defaults to an in-process daemon thread. Celery is used
-    only when AGENTS_USE_CELERY=1, because a reachable broker without a running
-    worker would otherwise accept tasks that never execute.
-    """
-    if _RUN_AGENTS_SYNCHRONOUSLY:
-        _run_agent_thread(session_id, user_id, role, task_id)
-        return
-
-    if not _USE_CELERY_FOR_AGENTS:
-        thread = threading.Thread(
-            target=_run_agent_thread,
-            args=(session_id, user_id, role, task_id),
-            daemon=True,
-        )
-        thread.start()
-        return
-
-    try:
-        run_agent.delay(session_id, user_id, role, task_id)
-    except Exception:
-        logger.warning(
-            "celery_dispatch_failed_falling_back_to_thread session_id=%s role=%s task_id=%s",
-            session_id,
-            role,
-            task_id,
-            exc_info=True,
-        )
-        thread = threading.Thread(
-            target=_run_agent_thread,
-            args=(session_id, user_id, role, task_id),
-            daemon=True,
-        )
-        thread.start()
 
 def _get_user_session(session_id: str, user: User, db: Session) -> DBSession | None:
     return (
@@ -201,7 +156,7 @@ def auto_run_agents(
             return None
 
         if roles is None:
-            target_roles = ["mindmap", "quiz"]
+            target_roles = ["transcript", "mindmap", "quiz"]
         else:
             target_roles = roles
         if not target_roles:
@@ -225,11 +180,16 @@ def auto_run_agents(
             db.expire_all()
 
             # Reuse active tasks and skip roles whose output is already fresh.
-            tasks_to_start: list[str] = []
-            for role in target_roles:
+            initial_role_states: dict[str, dict] = {}
+
+            # Include upstream dependencies so the orchestrator can dispatch them
+            # before downstream agents.
+            expanded_roles = _expand_roles(target_roles, AGENT_DEPENDENCIES)
+            for role in expanded_roles:
                 task_type = f"agent_{role}"
                 active = _get_active_task(session_id, task_type, db)
                 if active:
+                    initial_role_states[role] = {"status": "running", "task_id": active.id}
                     continue
                 agent = get_agent(role)
                 ready = _maybe_return_ready_or_stale(
@@ -237,51 +197,58 @@ def auto_run_agents(
                 )
                 if ready:
                     _ensure_stage_ready_on_reuse(session_id, role, note, db)
+                    initial_role_states[role] = {"status": "success"}
                     continue
-                tasks_to_start.append(role)
+                initial_role_states[role] = {"status": "pending"}
 
-            if not tasks_to_start:
+            has_pending = any(
+                state.get("status") == "pending" for state in initial_role_states.values()
+            )
+            has_running = any(
+                state.get("status") == "running" for state in initial_role_states.values()
+            )
+            if not has_pending and not has_running:
                 logger.info(
-                    "auto_run_agents_skipped session_id=%s reason=all_fresh_or_running",
+                    "auto_run_agents_skipped session_id=%s reason=all_fresh",
                     session_id,
                 )
                 return {"session_id": session_id, "reused": True}
 
-            tasks_info: list[dict] = []
-            for role in tasks_to_start:
-                task = Task(
-                    session_id=session_id,
-                    task_type=f"agent_{role}",
-                    status="pending",
-                    progress=0.0,
-                    error_message=None,
-                )
-                db.add(task)
-                tasks_info.append({"role": role, "task": task})
-            db.commit()
-            for info in tasks_info:
-                db.refresh(info["task"])
-
-        for info in tasks_info:
-            role = info["role"]
-            task_id = info["task"].id
-            _dispatch_agent_task(session_id, user_id, role, task_id)
-            logger.info(
-                "auto_agent_task_started session_id=%s role=%s task_id=%s",
-                session_id, role, task_id,
+            workflow = start_workflow(
+                session_id,
+                user_id,
+                expanded_roles,
+                dependencies=AGENT_DEPENDENCIES,
+                role_states=initial_role_states,
+                db=db,
             )
+            if not workflow:
+                logger.error("auto_run_agents_workflow_create_failed session_id=%s", session_id)
+                return None
 
-        return {
+        db.expire_all()
+        workflow_states = dict(workflow.role_states)
+        agents_by_role: dict[str, dict] = {}
+        for role in expanded_roles:
+            state = workflow_states.get(role, {})
+            task_id = state.get("task_id")
+            task = None
+            if task_id:
+                task = db.query(Task).filter(Task.id == task_id).first()
+            agents_by_role[role] = {
+                "role": role,
+                "task_id": task_id,
+                "status": state.get("status", "pending"),
+                "progress": float(task.progress or 0.0) if task else 0.0,
+                "error": task.error_message if task else None,
+            }
+
+        result = {
+            "workflow_id": workflow.id,
             "session_id": session_id,
-            "agents": [
-                {
-                    "role": info["role"],
-                    "task_id": info["task"].id,
-                    "status": info["task"].status,
-                }
-                for info in tasks_info
-            ],
+            "agents": list(agents_by_role.values()),
         }
+        return result
     finally:
         db.close()
 
@@ -364,7 +331,11 @@ def _maybe_return_ready_or_stale(
 
 
 def _role_to_stage(role: str) -> str:
-    return "quiz_bank" if role == "quiz" else role
+    if role == "quiz":
+        return "quiz_bank"
+    if role == "transcript":
+        return "transcript_organize"
+    return role
 
 
 def _ensure_stage_ready_on_reuse(
@@ -488,105 +459,6 @@ def _run_single_agent_sync(
         raise ValueError(str(e))
 
 
-def _run_agent_thread(
-    session_id: str,
-    user_id: str,
-    role: str,
-    task_id: str,
-) -> None:
-    """Thread worker: owns a fresh DB session and runs one agent to completion."""
-    db = SessionLocal()
-    stage = _role_to_stage(role)
-    try:
-        task = db.query(Task).filter(Task.id == task_id).first()
-        user = db.query(User).filter(User.id == user_id).first()
-        if not task or not user:
-            logger.error("agent_thread_missing_prereqs task_id=%s user_id=%s", task_id, user_id)
-            return
-
-        task.status = "running"
-        task.progress = 0.1
-        task.error_message = None
-        db.commit()
-
-        set_state_running(db, session_id, stage, progress=0.1, commit=False)
-        db.commit()
-
-        session = (
-            db.query(DBSession)
-            .filter(DBSession.id == session_id)
-            .join(Notebook)
-            .filter(Notebook.user_id == user_id)
-            .first()
-        )
-        if not session:
-            raise ValueError("Session not found or access denied")
-
-        note = db.query(Note).filter(Note.session_id == session_id).first()
-        if not note:
-            raise ValueError("No note found for session")
-
-        notebook = db.query(Notebook).filter(Notebook.id == session.notebook_id).first()
-        if not notebook:
-            raise ValueError("Notebook not found")
-
-        agent = get_agent(role)
-        ctx = AgentContext(
-            session_id=session_id,
-            user=user,
-            db=db,
-            note=note,
-            session=session,
-            notebook=notebook,
-            task=task,
-        )
-        result = agent.run(ctx)
-
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if not task:
-            set_state_error(db, session_id, stage, error_message="Task lost", commit=False)
-            db.commit()
-            return
-
-        if result.success:
-            task.status = "success"
-            task.progress = 1.0
-            task.error_message = None
-            current_hash = _compute_session_content_hash(note)
-            set_state_ready(db, session_id, stage, content_hash=current_hash, commit=False)
-            db.commit()
-            logger.info(
-                "agent_task_success session_id=%s role=%s task_id=%s",
-                session_id, role, task_id,
-            )
-        else:
-            task.status = "error"
-            task.progress = 1.0
-            task.error_message = result.error_message or "未知错误"
-            set_state_error(db, session_id, stage, error_message=result.error_message or "未知错误", commit=False)
-            db.commit()
-            logger.warning(
-                "agent_task_error session_id=%s role=%s task_id=%s error=%s",
-                session_id, role, task_id, task.error_message,
-            )
-    except Exception as e:
-        db.rollback()
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
-            task.status = "error"
-            task.progress = 1.0
-            task.error_message = str(e)
-            db.commit()
-        set_state_error(db, session_id, stage, error_message=str(e), commit=False)
-        db.commit()
-        logger.exception(
-            "agent_thread_failed session_id=%s role=%s task_id=%s",
-            session_id, role, task_id,
-        )
-    finally:
-        db.close()
-
-
 # ── Endpoints ──
 
 @router.post("/session/{session_id}/run")
@@ -636,9 +508,13 @@ def run_all_agents(
         # Reuse active tasks and skip roles whose output is already fresh.
         active_tasks_info: list[dict] = []
         ready_agents_info: list[dict] = []
-        tasks_to_start: list[str] = []
+        initial_role_states: dict[str, dict] = {}
         notebook_obj = _notebook_for_note(note, db)
-        for role in roles:
+
+        # Include upstream dependencies so the orchestrator can dispatch them
+        # before downstream agents.
+        expanded_roles = _expand_roles(roles, AGENT_DEPENDENCIES)
+        for role in expanded_roles:
             task_type = f"agent_{role}"
             active = _get_active_task(session_id, task_type, db)
             if active:
@@ -649,6 +525,7 @@ def run_all_agents(
                     "progress": float(active.progress or 0.0),
                     "error": active.error_message,
                 })
+                initial_role_states[role] = {"status": "running", "task_id": active.id}
                 continue
             agent = get_agent(role)
             ready = _maybe_return_ready_or_stale(
@@ -661,10 +538,17 @@ def run_all_agents(
                     "status": "ready",
                     "data": ready.get("data"),
                 })
+                initial_role_states[role] = {"status": "success"}
                 continue
-            tasks_to_start.append(role)
+            initial_role_states[role] = {"status": "pending"}
 
-        if not tasks_to_start:
+        has_pending = any(
+            state.get("status") == "pending" for state in initial_role_states.values()
+        )
+        has_running = any(
+            state.get("status") == "running" for state in initial_role_states.values()
+        )
+        if not has_pending and not has_running:
             response.status_code = status.HTTP_200_OK
             return {
                 "workflow_id": "reused",
@@ -673,48 +557,47 @@ def run_all_agents(
                 "reused": True,
             }
 
-        # Synchronously create Task rows inside the lock.
-        tasks_info: list[dict] = []
-        for role in tasks_to_start:
-            task = Task(
-                session_id=session_id,
-                task_type=f"agent_{role}",
-                status="pending",
-                progress=0.0,
-                error_message=None,
-            )
-            db.add(task)
-            tasks_info.append({"role": role, "task": task})
-        db.commit()
-        for info in tasks_info:
-            db.refresh(info["task"])
-
-    # Launch threads outside the lock so the lock isn't held during slow LLM calls.
-    for info in tasks_info:
-        role = info["role"]
-        task_id = info["task"].id
-        _dispatch_agent_task(session_id, current_user.id, role, task_id)
-        logger.info(
-            "agent_task_started session_id=%s role=%s task_id=%s",
-            session_id, role, task_id,
+        workflow = start_workflow(
+            session_id,
+            current_user.id,
+            expanded_roles,
+            dependencies=AGENT_DEPENDENCIES,
+            role_states=initial_role_states,
+            db=db,
         )
+        if not workflow:
+            raise HTTPException(status_code=500, detail="Failed to create agent workflow")
+
+    # Build response from the workflow state. Task rows are created by the
+    # orchestrator; refresh our view so we can include their IDs.
+    db.expire_all()
+    workflow_states = dict(workflow.role_states)
+    agents_by_role: dict[str, dict] = {}
+    for role in expanded_roles:
+        state = workflow_states.get(role, {})
+        task_id = state.get("task_id")
+        task = None
+        if task_id:
+            task = db.query(Task).filter(Task.id == task_id).first()
+        agents_by_role[role] = {
+            "role": role,
+            "task_id": task_id,
+            "status": state.get("status", "pending"),
+            "progress": float(task.progress or 0.0) if task else 0.0,
+            "error": task.error_message if task else None,
+        }
+
+    # Reused active/ready entries take precedence so the caller sees the most
+    # accurate state for roles that were already in progress or cached.
+    for info in ready_agents_info + active_tasks_info:
+        agents_by_role[info["role"]] = info
 
     result = {
-        "workflow_id": str(uuid.uuid4()),
+        "workflow_id": workflow.id,
         "session_id": session_id,
-        "agents": [
-            {
-                "role": info["role"],
-                "task_id": info["task"].id,
-                "status": info["task"].status,
-                "progress": float(info["task"].progress or 0.0),
-                "error": info["task"].error_message,
-            }
-            for info in tasks_info
-        ],
+        "agents": list(agents_by_role.values()),
     }
-    if active_tasks_info:
-        result["agents"] = active_tasks_info + result["agents"]
+    if active_tasks_info or ready_agents_info:
         result["reused"] = True
     response.status_code = status.HTTP_202_ACCEPTED
     return result
@@ -755,6 +638,71 @@ def get_agent_tasks(
     return {
         "session_id": session_id,
         "agents": [_task_to_dict(t) for t in tasks],
+    }
+
+
+@router.get("/workflows/{workflow_id}")
+def get_workflow(
+    workflow_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the state of a single agent workflow."""
+    workflow = (
+        db.query(AgentWorkflow)
+        .filter(AgentWorkflow.id == workflow_id)
+        .filter(AgentWorkflow.user_id == current_user.id)
+        .first()
+    )
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    return {
+        "workflow_id": workflow.id,
+        "session_id": workflow.session_id,
+        "status": workflow.status,
+        "roles": workflow.roles,
+        "dependencies": workflow.dependencies,
+        "role_states": workflow.role_states,
+        "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
+        "updated_at": workflow.updated_at.isoformat() if workflow.updated_at else None,
+        "finished_at": workflow.finished_at.isoformat() if workflow.finished_at else None,
+        "last_heartbeat_at": workflow.last_heartbeat_at.isoformat() if workflow.last_heartbeat_at else None,
+    }
+
+
+@router.get("/session/{session_id}/workflows")
+def get_session_workflows(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return agent workflows for a session, newest first."""
+    session = _get_user_session(session_id, current_user, db)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    workflows = (
+        db.query(AgentWorkflow)
+        .filter(AgentWorkflow.session_id == session_id)
+        .filter(AgentWorkflow.user_id == current_user.id)
+        .order_by(AgentWorkflow.created_at.desc())
+        .all()
+    )
+
+    return {
+        "session_id": session_id,
+        "workflows": [
+            {
+                "workflow_id": w.id,
+                "status": w.status,
+                "roles": w.roles,
+                "role_states": w.role_states,
+                "created_at": w.created_at.isoformat() if w.created_at else None,
+                "finished_at": w.finished_at.isoformat() if w.finished_at else None,
+            }
+            for w in workflows
+        ],
     }
 
 

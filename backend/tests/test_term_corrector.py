@@ -340,26 +340,32 @@ class TestRestructureTranscript:
         assert c.restructure_transcript("", "test") == ""
         assert c.restructure_transcript("   ", "test") == "   "
 
-    def test_llm_success(self):
+    @patch("app.agents.transcript_agent.TranscriptOrganizerAgent.restructure_text")
+    def test_llm_success(self, mock_restructure):
+        mock_restructure.return_value = "cleaned text"
         c = TermCorrector()
         c._client = MagicMock()
-        with patch.object(c, "_call_llm", return_value="cleaned text"):
-            result = c.restructure_transcript("raw", "course", keywords=["kw"])
-            assert result == "cleaned text"
+        result = c.restructure_transcript("raw", "course", keywords=["kw"])
+        assert result == "cleaned text"
+        mock_restructure.assert_called_once_with(
+            raw_text="raw", course_title="course", keywords=["kw"], ppt_slides=None
+        )
 
-    def test_llm_empty_returns_original(self):
+    @patch("app.agents.transcript_agent.TranscriptOrganizerAgent.restructure_text")
+    def test_llm_empty_returns_original(self, mock_restructure):
+        mock_restructure.return_value = ""
         c = TermCorrector()
         c._client = MagicMock()
-        with patch.object(c, "_call_llm", return_value=""):
-            result = c.restructure_transcript("raw", "course")
-            assert result == "raw"
+        result = c.restructure_transcript("raw", "course")
+        assert result == "raw"
 
-    def test_llm_exception_propagates(self):
+    @patch("app.agents.transcript_agent.TranscriptOrganizerAgent.restructure_text")
+    def test_llm_exception_propagates(self, mock_restructure):
+        mock_restructure.side_effect = Exception("boom")
         c = TermCorrector()
         c._client = MagicMock()
-        with patch.object(c, "_call_llm", side_effect=Exception("boom")):
-            with pytest.raises(Exception, match="boom"):
-                c.restructure_transcript("raw", "course")
+        with pytest.raises(Exception, match="boom"):
+            c.restructure_transcript("raw", "course")
 
     def test_correct_segments_delegation(self):
         c = TermCorrector()
@@ -367,43 +373,6 @@ class TestRestructureTranscript:
             result = c.correct_segments("text", "course", keywords=["k"])
             assert result == "result"
             mock_re.assert_called_once_with("text", "course", ["k"])
-
-
-class TestCallLLM:
-    def test_call_llm_success(self):
-        c = TermCorrector()
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "  result  "
-        mock_client.chat.completions.create.return_value = mock_response
-        c._client = mock_client
-
-        result = c._call_llm("prompt", "system")
-        assert result == "result"
-        mock_client.chat.completions.create.assert_called_once()
-
-    def test_call_llm_strips_markdown(self):
-        c = TermCorrector()
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "```json\nresult\n```"
-        mock_client.chat.completions.create.return_value = mock_response
-        c._client = mock_client
-
-        result = c._call_llm("prompt", "system")
-        assert result == "result"
-
-    def test_call_llm_exception_propagates(self):
-        c = TermCorrector()
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = Exception("network error")
-        c._client = mock_client
-
-        with patch("app.services.term_corrector.logger"):
-            with pytest.raises(Exception, match="network error"):
-                c._call_llm("prompt", "system")
 
 
 class TestEnsureParagraphBreaks:
