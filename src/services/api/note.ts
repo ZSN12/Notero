@@ -1,5 +1,7 @@
 import { request, getMediaUrl, API_BASE, authHeaders } from './core';
-import type { BackendNote, TranscriptChunk } from './types';
+import type { BackendNote, TranscriptChunk, SessionAnnotations } from './types';
+
+export type { SessionAnnotations, StrokeAnnotation } from './types';
 
 export async function fetchNote(sessionId: string): Promise<BackendNote | null> {
   try {
@@ -13,11 +15,20 @@ export async function fetchNote(sessionId: string): Promise<BackendNote | null> 
   }
 }
 
-export async function updateNote(sessionId: string, content: string, layoutBlocks?: import('@/lib/noteLayout').NoteLayoutBlock[]): Promise<BackendNote | null> {
+export async function updateNote(
+  sessionId: string,
+  content: string,
+  layoutBlocks?: import('@/lib/noteLayout').NoteLayoutBlock[],
+  annotations?: SessionAnnotations | null,
+): Promise<BackendNote | null> {
   try {
+    const payload: Record<string, unknown> = { content, layout_blocks: layoutBlocks };
+    if (annotations !== undefined) {
+      payload.annotations = annotations;
+    }
     const data = await request<BackendNote>(`/api/notes/session/${sessionId}`, {
       method: 'PUT',
-      body: JSON.stringify({ content, layout_blocks: layoutBlocks }),
+      body: JSON.stringify(payload),
     });
     return data;
   } catch (err: any) {
@@ -28,12 +39,12 @@ export async function updateNote(sessionId: string, content: string, layoutBlock
   }
 }
 
-export async function finishRecording(sessionId: string): Promise<{ status: string; audio_path: string | null }> {
+export async function finishRecording(sessionId: string): Promise<{ status: string; audio_path: string | null; note?: any }> {
   try {
     // Audio concatenation can take a few seconds for long recordings. Real-time
     // recording stop no longer triggers AI finalization automatically; the user
     // must click "AI 整理" to run the unified restructure.
-    const data = await request<{ status: string; audio_path: string | null }>(
+    const data = await request<{ status: string; audio_path: string | null; note?: any }>(
       `/api/process/audio-finish?session_id=${sessionId}`,
       { method: 'POST', timeoutMs: 60000 }
     );
@@ -69,13 +80,14 @@ export async function updateTranscript(sessionId: string, transcript: Transcript
 
 export interface FinalizeTranscriptResult {
   note: BackendNote;
-  agents: { session_id: string; agents?: Array<{ role: string; task_id: string; status: string; progress: number; error: string | null }>; reused?: boolean } | null;
+  agents: { workflow_id?: string; session_id: string; agents?: Array<{ role: string; task_id: string | null; status: string; progress: number; error: string | null }>; reused?: boolean } | null;
 }
 
 export async function finalizeTranscript(
   sessionId: string,
   autoGenerate = true,
   force = false,
+  retryFailedOnly = false,
 ): Promise<FinalizeTranscriptResult> {
   const res = await fetch(`${API_BASE}/api/process/transcript-finalize?session_id=${sessionId}`, {
     method: 'POST',
@@ -83,7 +95,7 @@ export async function finalizeTranscript(
       'Content-Type': 'application/json',
       ...authHeaders(),
     },
-    body: JSON.stringify({ auto_generate: autoGenerate, force }),
+    body: JSON.stringify({ auto_generate: autoGenerate, force, retry_failed_only: retryFailedOnly }),
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => 'Unknown error');

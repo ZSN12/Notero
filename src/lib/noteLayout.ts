@@ -39,6 +39,12 @@ export function transcriptTextFromRawTranscript(transcript?: unknown[] | null): 
     }
   }
   if (latest) {
+    const stage = latest.correction_stage;
+    // user_edited with an explicitly empty display_text is a valid deletion:
+    // do not fall back to raw_text or older content.
+    if (stage === 'user_edited') {
+      return String(latest.display_text ?? '').trim();
+    }
     const text =
       latest.display_text ??
       latest.corrected_text ??

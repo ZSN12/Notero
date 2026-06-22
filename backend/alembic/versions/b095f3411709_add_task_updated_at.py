@@ -8,6 +8,7 @@ Create Date: 2026-06-16 15:28:02.952307
 from typing import Sequence, Union
 
 from alembic import op
+from sqlalchemy import inspect
 import sqlalchemy as sa
 
 
@@ -20,6 +21,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Add updated_at to tasks."""
+    bind = op.get_bind()
+    columns = {c["name"] for c in inspect(bind).get_columns("tasks")}
+    if "updated_at" in columns:
+        return
     op.add_column(
         "tasks",
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=True),

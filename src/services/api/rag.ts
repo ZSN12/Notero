@@ -1,5 +1,5 @@
 import { API_BASE, authHeaders } from './core';
-import type { RAGCallbacks, RAGSource } from './types';
+import type { RAGCallbacks, RAGMessage, RAGSource } from './types';
 
 export function askRAG(
   query: string,
@@ -79,4 +79,54 @@ export function askRAG(
 
   run();
   return { abort: () => controller.abort() };
+}
+
+export async function fetchRAGMessages(sessionId: string): Promise<RAGMessage[]> {
+  const res = await fetch(
+    `${API_BASE}/api/rag/messages?session_id=${encodeURIComponent(sessionId)}&limit=200`,
+    {
+      headers: authHeaders(),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '请求失败' }));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as RAGMessage[];
+  return data.map((m) => ({
+    ...m,
+    sources: m.sources || [],
+  }));
+}
+
+export async function clearRAGMessages(sessionId: string): Promise<{ deleted: number }> {
+  const res = await fetch(
+    `${API_BASE}/api/rag/messages?session_id=${encodeURIComponent(sessionId)}`,
+    {
+      method: 'DELETE',
+      headers: authHeaders(),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: '请求失败' }));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<{ deleted: number }>;
+}
+
+export function serializeRAGSources(sources?: RAGSource[]): RAGSource[] {
+  return (sources || []).map((s) => ({
+    chunk_id: s.chunk_id,
+    notebook_id: s.notebook_id,
+    notebook_title: s.notebook_title,
+    session_id: s.session_id,
+    session_title: s.session_title,
+    source_type: s.source_type,
+    snippet: s.snippet,
+    score: s.score,
+    page: s.page ?? null,
+    block_id: s.block_id ?? null,
+    chunk_index: s.chunk_index ?? null,
+    metadata: s.metadata || {},
+  }));
 }

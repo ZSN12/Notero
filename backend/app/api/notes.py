@@ -4,13 +4,11 @@ from datetime import datetime, timezone
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.api.schemas import NoteResponse, NoteUpdate
-from app.models import Note, Session as DBSession, Notebook, User
+from app.models import Note, Session as DBSession, User
+from app.services.session_service import get_user_session as _get_session_by_user
 from app.services.state_service import get_state, set_stale
 from app.services.vector_service import _compute_session_content_hash
-from app.services.note_utils import (
-    _extract_transcript_from_content,
-    _latest_authoritative_transcript_entry,
-)
+from app.services.note_utils import _extract_transcript_from_content
 
 router = APIRouter(prefix="/api/notes", tags=["notes"])
 
@@ -18,64 +16,72 @@ _TRANSCRIPT_MARKER = "## 语音转文字"
 
 
 def _sync_transcript_from_content(note: Note) -> None:
-    """Sync note.transcript with the transcript area of note.content.
+    """Sync transcript entries when the user edits the content markdown.
 
-    When the user edits the visible transcript in the editor, create or update
-    a 'user_edited' transcript entry so that later ASR chunks and finalization
-    do not restore text the user has deleted.
+    Marks the previous authoritative entry as superseded and appends a
+    ``user_edited`` entry preserving the original raw ASR text.
     """
-    if not isinstance(note.transcript, list):
-        note.transcript = []
-
     content = note.content or ""
     if not content.startswith(_TRANSCRIPT_MARKER):
         return
 
-    edited_text = _extract_transcript_from_content(content)
+    extracted = _extract_transcript_from_content(content)
+    entries = note.transcript if isinstance(note.transcript, list) else []
 
-    # Find the best raw_text donor among existing entries for audit.
-    existing_raw_text = ""
-    for entry in note.transcript:
-        if isinstance(entry, dict) and not existing_raw_text:
-            existing_raw_text = entry.get("raw_text") or entry.get("text") or ""
+    # Find the latest authoritative entry.
+    latest_idx = -1
+    for i, entry in enumerate(entries):
+        if isinstance(entry, dict) and entry.get("correction_stage") in (
+            "final",
+            "local",
+            "user_edited",
+        ):
+            latest_idx = i
 
-    # Compute current canonical text from the latest authoritative entry. We
-    # check key membership so an intentionally empty user edit ("") is not
-    # compared against the older raw_text fallback.
-    latest = _latest_authoritative_transcript_entry(note.transcript)
-    current_text = ""
-    if latest is not None:
-        for key in ("display_text", "corrected_text", "text"):
-            if key in latest:
-                current_text = str(latest[key] or "").strip()
-                break
-        else:
-            current_text = str(latest.get("raw_text") or "").strip()
-
-    if edited_text == current_text:
+    if latest_idx == -1:
+        note.transcript = [
+            {
+                "chunk_index": 0,
+                "text": extracted,
+                "display_text": extracted,
+                "raw_text": "",
+                "timestamps": [],
+                "correction_stage": "user_edited",
+            }
+        ]
         return
 
-    # Mark every prior authoritative entry as superseded so that canonical
-    # readers never join an older version with this new user edit.
-    for entry in note.transcript:
-        if isinstance(entry, dict) and entry.get("correction_stage") in ("final", "local", "user_edited"):
-            entry["correction_stage"] = "superseded"
+    latest = entries[latest_idx]
+    latest_text = (latest.get("display_text") or latest.get("text") or "").strip()
+    if latest_text == extracted:
+        return
 
-    note.transcript.append({
-        "chunk_index": 0,
-        "text": edited_text,
-        "display_text": edited_text,
-        "raw_text": existing_raw_text,
-        "timestamps": [],
-        "correction_stage": "user_edited",
-    })
+    new_entries = list(entries)
+    stage = latest.get("correction_stage")
+    raw_text = latest.get("raw_text", "") if isinstance(latest, dict) else ""
+    chunk_index = latest.get("chunk_index", 0) if isinstance(latest, dict) else 0
+
+    if stage in ("final", "local"):
+        superseded = dict(latest)
+        superseded["correction_stage"] = "superseded"
+        new_entries[latest_idx] = superseded
+
+    new_entries.append(
+        {
+            "chunk_index": chunk_index,
+            "text": extracted,
+            "display_text": extracted,
+            "raw_text": raw_text,
+            "timestamps": [],
+            "correction_stage": "user_edited",
+        }
+    )
+    note.transcript = new_entries
 
 
 def _get_user_session(session_id: str, user: User, db: Session) -> DBSession:
     """Verify session exists and belongs to user."""
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == user.id).first()
+    session = _get_session_by_user(db, session_id, user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
@@ -97,6 +103,7 @@ def serialize_note(note: Note | None, session_id: str | None = None) -> dict:
             "ppt_images": [],
             "vocabulary": [],
             "layout_blocks": None,
+            "annotations": None,
             "created_at": now,
         }
 
@@ -119,6 +126,7 @@ def serialize_note(note: Note | None, session_id: str | None = None) -> dict:
         "ppt_images": note.ppt_images if isinstance(note.ppt_images, list) else [],
         "vocabulary": vocabulary_items,
         "layout_blocks": layout_blocks,
+        "annotations": note.annotations if isinstance(note.annotations, dict) else None,
         "created_at": note.created_at or datetime.now(timezone.utc),
     }
 
@@ -153,7 +161,7 @@ def _mark_stale_if_changed(session_id: str, db: Session) -> None:
     if not note:
         return
     current_hash = _compute_session_content_hash(note)
-    for stage in ("vector_index", "mindmap", "quiz_bank"):
+    for stage in ("vector_index", "summary", "mindmap", "quiz_bank"):
         state = get_state(db, session_id, stage)
         if state and state.status == "ready" and state.content_hash != current_hash:
             set_stale(db, session_id, stage, content_hash=current_hash)
@@ -179,8 +187,11 @@ def update_note(
         db.add(note)
     else:
         note.content = data.content or ""
+    update_payload = data.model_dump(exclude_unset=True)
     if data.layout_blocks is not None:
         note.layout_blocks = [b.model_dump() for b in data.layout_blocks]
+    if 'annotations' in update_payload:
+        note.annotations = data.annotations
     _sync_transcript_from_content(note)
     db.commit()
     db.refresh(note)

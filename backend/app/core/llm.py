@@ -17,6 +17,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Dict, Any
 
+from openai import OpenAI
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +31,7 @@ class ChatMessage:
 @dataclass
 class ChatChoice:
     message: ChatMessage
+    finish_reason: Optional[str] = None
 
 
 @dataclass
@@ -52,6 +55,7 @@ class LLMProvider(ABC):
         model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, str]] = None,
         stream: bool = False,
         **kwargs: Any,
     ) -> ChatResponse:
@@ -104,7 +108,6 @@ class DeepSeekProvider(LLMProvider):
         self._client = None
         if self.api_key:
             try:
-                from openai import OpenAI
                 self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
                 logger.info("deepseek_provider_initialized model=%s", self.default_model)
             except Exception as exc:
@@ -123,13 +126,14 @@ class DeepSeekProvider(LLMProvider):
         model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, str]] = None,
         stream: bool = False,
         **kwargs: Any,
     ) -> ChatResponse:
         if not self.available:
             raise RuntimeError("DeepSeek provider is not available (missing API key)")
 
-        params = {
+        params: Dict[str, Any] = {
             "model": model or self.default_model,
             "messages": self._to_openai_messages(messages),
             "temperature": temperature,
@@ -138,10 +142,15 @@ class DeepSeekProvider(LLMProvider):
         }
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
+        if response_format is not None:
+            params["response_format"] = response_format
 
         resp = self._client.chat.completions.create(**params)
         choices = [
-            ChatChoice(message=ChatMessage(role=c.message.role, content=c.message.content))
+            ChatChoice(
+                message=ChatMessage(role=c.message.role, content=c.message.content),
+                finish_reason=getattr(c, "finish_reason", None),
+            )
             for c in resp.choices
         ]
         return ChatResponse(choices=choices)
@@ -187,7 +196,6 @@ class DashScopeEmbeddingProvider(EmbeddingProvider):
         self._client = None
         if self.api_key:
             try:
-                from openai import OpenAI
                 self._client = OpenAI(
                     api_key=self.api_key,
                     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -307,3 +315,10 @@ def get_default_embedding_provider() -> EmbeddingProvider:
     if _embedding_provider is None:
         _embedding_provider = get_embedding_provider()
     return _embedding_provider
+
+
+def _reset_default_providers() -> None:
+    """Reset lazy singletons. Intended for tests only."""
+    global _chat_provider, _embedding_provider
+    _chat_provider = None
+    _embedding_provider = None

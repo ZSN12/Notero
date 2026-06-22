@@ -7,7 +7,6 @@ import {
   deleteNotebook as apiDeleteNotebook,
   fetchSessions,
   createSession as apiCreateSession,
-  updateSession as apiUpdateSession,
   deleteSession as apiDeleteSession,
 } from '@/services/api';
 
@@ -17,14 +16,13 @@ interface StoreState {
   dialog: DialogState;
   loading: boolean;
   error: string | null;
-  openDialog: (type: DialogType, notebookId?: string, editingNotebook?: Notebook, editingSession?: Session) => void;
+  openDialog: (type: DialogType, notebookId?: string, editingNotebook?: Notebook) => void;
   closeDialog: () => void;
   loadNotebooks: () => Promise<void>;
   loadSessions: (notebookId: string) => Promise<void>;
   createNotebook: (title: string) => Promise<void>;
   updateNotebook: (notebookId: string, title: string) => Promise<void>;
   createSession: (notebookId: string, title: string) => Promise<void>;
-  updateSession: (sessionId: string, title: string) => Promise<void>;
   removeNotebook: (notebookId: string) => Promise<void>;
   removeSession: (notebookId: string, sessionId: string) => Promise<void>;
 }
@@ -36,8 +34,8 @@ export const useStore = create<StoreState>((set, get) => ({
   loading: false,
   error: null,
 
-  openDialog: (type, notebookId, editingNotebook, editingSession) =>
-    set({ dialog: { isOpen: true, type, notebookId, editingNotebook, editingSession } }),
+  openDialog: (type, notebookId, editingNotebook) =>
+    set({ dialog: { isOpen: true, type, notebookId, editingNotebook } }),
   closeDialog: () => set({ dialog: { isOpen: false, type: null } }),
 
   loadNotebooks: async () => {
@@ -120,22 +118,6 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  updateSession: async (sessionId, title) => {
-    try {
-      const updated = await apiUpdateSession(sessionId, title);
-      set((state) => ({
-        sessions: state.sessions.map((s) =>
-          s.id === sessionId ? updated : s
-        ),
-      }));
-    } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : '更新失败',
-      });
-      throw error;
-    }
-  },
-
   removeNotebook: async (notebookId) => {
     try {
       await apiDeleteNotebook(notebookId);
@@ -154,16 +136,26 @@ export const useStore = create<StoreState>((set, get) => ({
   removeSession: async (notebookId, sessionId) => {
     try {
       await apiDeleteSession(sessionId);
-      set((state) => ({
-        sessions: state.sessions.filter((s) => s.id !== sessionId),
-      }));
-      // Reload sessions from backend to ensure sessionCount is accurate
-      await get().loadSessions(notebookId);
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : '删除失败',
       });
       throw error;
+    }
+
+    // The session is already deleted on the server; remove it locally even if
+    // the subsequent list refresh fails.
+    set((state) => ({
+      sessions: state.sessions.filter((s) => s.id !== sessionId),
+    }));
+
+    // Reload sessions from backend to ensure sessionCount is accurate.
+    // loadSessions swallows its own errors to keep page loads stable, so we
+    // detect failure by checking the store error state.
+    await get().loadSessions(notebookId);
+    if (get().error) {
+      set({ error: '列表刷新失败' });
+      throw new Error('列表刷新失败');
     }
   },
 }));

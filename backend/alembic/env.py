@@ -22,8 +22,10 @@ config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 # Interpret the config file for Python logging.
+# disable_existing_loggers=False so that running migrations from within the
+# app (FastAPI startup) does not silence the app's own loggers afterwards.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

@@ -38,7 +38,7 @@ export default function ChapterList() {
   };
 
   const handleCopyAll = () => {
-    const content = notebookSessions.map(s => `# ${s.title}`).join('\n\n');
+    const content = notebookSessions.map(s => `# ${s.title}\n${s.summary}`).join('\n\n');
     navigator.clipboard.writeText(content).then(() => {
       setCopyFeedback('已复制');
       setTimeout(() => setCopyFeedback(''), 2000);
@@ -47,7 +47,7 @@ export default function ChapterList() {
 
   const handleDownload = () => {
     if (!notebook) return;
-    const content = notebookSessions.map(s => `# ${s.title}`).join('\n\n');
+    const content = notebookSessions.map(s => `# ${s.title}\n${s.summary}`).join('\n\n');
     const blob = new Blob([content], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

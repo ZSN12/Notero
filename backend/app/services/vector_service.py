@@ -7,6 +7,7 @@ Search uses numpy for fast vectorized cosine similarity.
 
 import hashlib
 import json
+import logging
 import math
 import re
 import struct
@@ -18,17 +19,16 @@ import numpy as np
 
 from app.models import (
     VectorChunk, Session as DBSession, Note, Notebook, User,
+    _PGVECTOR_AVAILABLE,
 )
 from sqlalchemy.orm import Session as DBSessionType
 
 from app.services.embedding_service import (
     neural_embedding, neural_embedding_batch, EMBEDDING_DIM,
 )
-from app.services.note_utils import (
-    get_canonical_transcript_text,
-    _extract_notes_from_content,
-    _extract_ppt_text_parts,
-)
+from app.services.session_service import get_user_session as _get_session_by_user
+
+logger = logging.getLogger(__name__)
 
 # ── Constants ──
 VEC_DIM_LEGACY = 512  # dimension of legacy TF-IDF vector
@@ -86,6 +86,27 @@ def _text_to_embedding(text: str) -> tuple[bytes, Optional[bytes]]:
     legacy = _text_to_embedding_tfidf(text)
     neural = neural_embedding(text)
     return legacy, neural
+
+
+def _neural_bytes_to_list(emb_bytes: bytes) -> Optional[list[float]]:
+    """Unpack packed float32 neural embedding bytes into a list.
+
+    Returns None if the bytes are missing or have the wrong length.
+    """
+    if not emb_bytes:
+        return None
+    expected = EMBEDDING_DIM * 4
+    if len(emb_bytes) != expected:
+        logger.warning(
+            "neural_embedding_bytes_wrong_length expected=%s got=%s",
+            expected, len(emb_bytes),
+        )
+        return None
+    try:
+        return list(struct.unpack(f"{EMBEDDING_DIM}f", emb_bytes))
+    except Exception:
+        logger.warning("neural_embedding_bytes_unpack_failed", exc_info=True)
+        return None
 
 
 # ── Cosine Similarity (numpy vectorized) ──
@@ -163,73 +184,83 @@ def _extract_text_from_note(note: Note) -> list[tuple[str, str, str, dict]]:
     """Extract indexable text chunks from a Note.
 
     Returns list of (source_type, source_id, text, metadata).
-
-    The canonical transcript is the single source of truth for transcript text;
-    PPT slides and student notes are kept as supplemental sources. We do not
-    treat layout_blocks as primary content so that user edits / deletions are
-    never resurrected from an older view.
     """
     results = []
 
-    # 1. Canonical transcript (single source of truth).
-    canonical_transcript = get_canonical_transcript_text(note)
-    if canonical_transcript and len(canonical_transcript.strip()) >= MIN_CHUNK_CHARS:
-        results.append((
-            "transcript",
-            "canonical-transcript",
-            canonical_transcript.strip(),
-            {"block_type": "transcript", "source": "canonical"},
-        ))
+    # 1. Layout blocks (highest priority - structured content)
+    layout_blocks = note.layout_blocks
+    if layout_blocks and isinstance(layout_blocks, list):
+        for i, block in enumerate(layout_blocks):
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            content = block.get("content", "")
+            page = block.get("page")
+            title = block.get("title", "")
 
-    # 2. Student notes section from note.content.
-    notes_text = _extract_notes_from_content(note.content)
-    if notes_text and len(notes_text.strip()) >= MIN_CHUNK_CHARS:
-        results.append((
-            "note",
-            "student-notes",
-            notes_text.strip(),
-            {"block_type": "note", "source": "content_notes"},
-        ))
+            block_id = block.get("id") or f"block-{i}"
 
-    # 3. PPT text as supplemental material.
-    for ppt_part in _extract_ppt_text_parts(note):
-        if ppt_part and len(ppt_part.strip()) >= MIN_CHUNK_CHARS:
-            results.append(("ppt", f"ppt-{str(hash(ppt_part) & 0xffffffff)}", ppt_part.strip(), {"block_type": "ppt"}))
+            if btype == "transcript" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
+                meta = {"block_id": block_id, "block_index": i, "block_type": "transcript"}
+                results.append(("transcript", block_id, content.strip(), meta))
+            elif btype == "note" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
+                meta = {"block_id": block_id, "block_index": i, "block_type": "note"}
+                results.append(("note", block_id, content.strip(), meta))
+            elif btype == "ppt":
+                ppt_text = ""
+                if title:
+                    ppt_text += title + " "
+                if content:
+                    ppt_text += content + " "
+                if ppt_text.strip() and len(ppt_text.strip()) >= MIN_CHUNK_CHARS:
+                    meta = {"block_id": block_id, "block_index": i, "block_type": "ppt", "page": page}
+                    results.append(("ppt", block_id, ppt_text.strip(), meta))
 
-    # 4. Layout blocks fallback (only when no canonical content exists).
-    if not results:
-        layout_blocks = note.layout_blocks
-        if layout_blocks and isinstance(layout_blocks, list):
-            for i, block in enumerate(layout_blocks):
-                if not isinstance(block, dict):
+    # 2. Transcript (if no layout blocks)
+    if not layout_blocks:
+        transcript = note.transcript
+        if transcript and isinstance(transcript, list):
+            for idx, chunk in enumerate(sorted(transcript, key=lambda x: x.get("chunk_index", 0))):
+                if not isinstance(chunk, dict):
                     continue
-                btype = block.get("type", "")
-                content = block.get("content", "")
-                page = block.get("page")
-                title = block.get("title", "")
-                block_id = block.get("id") or f"block-{i}"
+                text = (
+                    chunk.get("display_text")
+                    or chunk.get("corrected_text")
+                    or chunk.get("text")
+                    or ""
+                ).strip()
+                if text and len(text) >= MIN_CHUNK_CHARS:
+                    chunk_index = chunk.get("chunk_index", idx)
+                    meta = {
+                        "block_id": f"transcript-{chunk_index}",
+                        "block_type": "transcript",
+                        "chunk_index": chunk_index,
+                        "correction_stage": chunk.get("correction_stage"),
+                        "is_ai_corrected": chunk.get("is_ai_corrected"),
+                    }
+                    results.append(("transcript", meta["block_id"], text, meta))
 
-                if btype == "transcript" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
-                    meta = {"block_id": block_id, "block_index": i, "block_type": "transcript"}
-                    results.append(("transcript", block_id, content.strip(), meta))
-                elif btype == "note" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
-                    meta = {"block_id": block_id, "block_index": i, "block_type": "note"}
-                    results.append(("note", block_id, content.strip(), meta))
-                elif btype == "ppt":
-                    ppt_text = ""
-                    if title:
-                        ppt_text += title + " "
-                    if content:
-                        ppt_text += content + " "
-                    if ppt_text.strip() and len(ppt_text.strip()) >= MIN_CHUNK_CHARS:
-                        meta = {"block_id": block_id, "block_index": i, "block_type": "ppt", "page": page}
-                        results.append(("ppt", block_id, ppt_text.strip(), meta))
-
-    # 5. Raw note content fallback.
+    # 3. Note content (fallback)
     if not results and note.content:
         content = note.content.strip()
         if len(content) >= MIN_CHUNK_CHARS:
             results.append(("note", note.id, content, {}))
+
+    # 4. PPT images text (if available)
+    ppt_images = note.ppt_images
+    if ppt_images and isinstance(ppt_images, list):
+        for ppt_data in ppt_images:
+            if not isinstance(ppt_data, dict):
+                continue
+            slides = ppt_data.get("slides", [])
+            for slide in slides:
+                if not isinstance(slide, dict):
+                    continue
+                slide_text = slide.get("text", "")
+                page_num = slide.get("page", "")
+                if slide_text and len(slide_text.strip()) >= MIN_CHUNK_CHARS:
+                    meta = {"page": page_num}
+                    results.append(("ppt", str(page_num), slide_text.strip(), meta))
 
     return results
 
@@ -252,9 +283,7 @@ def _compute_session_content_hash(note: Note) -> str:
 
 def build_session_index(session_id: str, user: User, db: DBSessionType, use_neural: bool = True) -> int:
     """Build vector index for a single session. Returns number of chunks created."""
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == user.id).first()
+    session = _get_session_by_user(db, session_id, user.id)
     if not session:
         raise ValueError("Session not found or access denied")
 
@@ -298,6 +327,7 @@ def build_session_index(session_id: str, user: User, db: DBSessionType, use_neur
     for i, chunk_text in enumerate(chunk_texts):
         content_hash = hashlib.sha256(chunk_text.encode('utf-8')).hexdigest()
         legacy_emb = _text_to_embedding_tfidf(chunk_text)  # legacy TF-IDF only
+        neural_emb = neural_embeddings[i]
 
         vc = VectorChunk(
             user_id=user.id,
@@ -309,9 +339,11 @@ def build_session_index(session_id: str, user: User, db: DBSessionType, use_neur
             text=chunk_text,
             chunk_meta=chunk_metas[i],
             embedding=legacy_emb,
-            embedding_v2=neural_embeddings[i],
+            embedding_v2=neural_emb,
             content_hash=content_hash,
         )
+        if _PGVECTOR_AVAILABLE:
+            vc.embedding_vector = _neural_bytes_to_list(neural_emb)
         db.add(vc)
         chunk_count += 1
 
@@ -336,6 +368,111 @@ def build_notebook_index(notebook_id: str, user: User, db: DBSessionType, use_ne
 
 # ── Search ──
 
+def _build_result(chunk: VectorChunk, score: float, db: DBSessionType) -> dict:
+    """Build a single search result dict with title lookups."""
+    session = db.query(DBSession).filter(DBSession.id == chunk.session_id).first()
+    notebook = db.query(Notebook).filter(Notebook.id == chunk.notebook_id).first()
+
+    return {
+        "chunk_id": chunk.id,
+        "notebook_id": chunk.notebook_id,
+        "notebook_title": notebook.title if notebook else "未知",
+        "session_id": chunk.session_id,
+        "session_title": session.title if session else "未知",
+        "source_type": chunk.source_type,
+        "source_id": chunk.source_id,
+        "snippet": chunk.text[:200] + ("..." if len(chunk.text) > 200 else ""),
+        "score": round(score, 4),
+        "metadata": chunk.chunk_meta or {},
+    }
+
+
+def _search_vectors_pgvector(
+    user: User,
+    query_vec: list[float],
+    session_id: Optional[str],
+    notebook_id: Optional[str],
+    limit: int,
+    db: DBSessionType,
+) -> Optional[list[dict]]:
+    """Use pgvector cosine-distance operator for fast approximate search.
+
+    Returns None if pgvector is unavailable or the query fails, so callers
+    can fall back to the numpy scan.
+    """
+    if not _PGVECTOR_AVAILABLE:
+        return None
+
+    embedding_col = getattr(VectorChunk, "embedding_vector", None)
+    if embedding_col is None:
+        return None
+
+    # cosine distance: 0 = identical, 2 = opposite.
+    # score (similarity) = 1 - distance.
+    max_distance = 0.99  # equivalent to score > 0.01
+
+    try:
+        distance_expr = embedding_col.op("<=>")(query_vec)
+        q = (
+            db.query(VectorChunk, distance_expr.label("distance"))
+            .filter(VectorChunk.user_id == user.id)
+            .filter(embedding_col.isnot(None))
+            .filter(distance_expr < max_distance)
+        )
+        if session_id:
+            q = q.filter(VectorChunk.session_id == session_id)
+        if notebook_id:
+            q = q.filter(VectorChunk.notebook_id == notebook_id)
+
+        rows = (
+            q.order_by(distance_expr.asc())
+            .limit(limit)
+            .all()
+        )
+        return [_build_result(chunk, 1.0 - float(distance), db) for chunk, distance in rows]
+    except Exception:
+        logger.warning("pgvector_search_failed", exc_info=True)
+        return None
+
+
+def _search_vectors_numpy(
+    user: User,
+    query_emb_bytes: bytes,
+    chunks: list[VectorChunk],
+    limit: int,
+    db: DBSessionType,
+) -> list[dict]:
+    """Legacy numpy full-scan cosine similarity (fallback)."""
+    has_v2 = any(c.embedding_v2 is not None for c in chunks)
+    prefer_v2 = has_v2
+
+    embeddings_np, valid_chunks = _unpack_embeddings(chunks, prefer_v2=prefer_v2)
+    if len(valid_chunks) == 0:
+        return []
+
+    query_vec = np.frombuffer(query_emb_bytes, dtype=np.float32)
+
+    MAX_BATCH = 2000
+    if len(valid_chunks) > MAX_BATCH:
+        all_scores = []
+        for i in range(0, len(valid_chunks), MAX_BATCH):
+            batch_emb = embeddings_np[i:i+MAX_BATCH]
+            batch_scores = _cosine_similarity(query_vec, batch_emb)
+            all_scores.extend(batch_scores.tolist())
+        scores = np.array(all_scores)
+    else:
+        scores = _cosine_similarity(query_vec, embeddings_np)
+
+    scored = [
+        (chunk, float(score))
+        for chunk, score in zip(valid_chunks, scores)
+        if score > 0.01
+    ]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    return [_build_result(chunk, score, db) for chunk, score in scored[:limit]]
+
+
 def search_vectors(
     user: User,
     query: str,
@@ -350,7 +487,6 @@ def search_vectors(
 
     # Build base query - only user's own chunks
     q = db.query(VectorChunk).filter(VectorChunk.user_id == user.id)
-
     if session_id:
         q = q.filter(VectorChunk.session_id == session_id)
     if notebook_id:
@@ -360,78 +496,30 @@ def search_vectors(
     if not chunks:
         return []
 
-    # Determine if we have neural embeddings available
-    has_v2 = any(c.embedding_v2 is not None for c in chunks)
-    prefer_v2 = has_v2
+    # Try neural query embedding first; if the service is unavailable,
+    # fall back to legacy TF-IDF for the numpy scan path.
+    query_emb_bytes = neural_embedding(query)
+    if query_emb_bytes is not None:
+        query_vec = _neural_bytes_to_list(query_emb_bytes)
+        if query_vec is not None:
+            pg_results = _search_vectors_pgvector(
+                user, query_vec, session_id, notebook_id, limit, db
+            )
+            if pg_results is not None:
+                return pg_results
+        # If pgvector failed, still try numpy with the neural bytes.
+        return _search_vectors_numpy(user, query_emb_bytes, chunks, limit, db)
 
-    # Get query embedding (match the type used in chunks)
-    if prefer_v2:
-        query_emb_bytes = neural_embedding(query)
-        if query_emb_bytes is None:
-            # Neural service unavailable, fallback to legacy
-            prefer_v2 = False
-
-    if not prefer_v2:
-        query_emb_bytes = _text_to_embedding_tfidf(query)
-
-    # Unpack chunk embeddings into numpy array
-    embeddings_np, valid_chunks = _unpack_embeddings(chunks, prefer_v2=prefer_v2)
-    if len(valid_chunks) == 0:
-        return []
-
-    # Unpack query vector
-    query_vec = np.frombuffer(query_emb_bytes, dtype=np.float32)
-
-    # Vectorized cosine similarity (batched to avoid OOM with large N)
-    MAX_BATCH = 2000
-    if len(valid_chunks) > MAX_BATCH:
-        all_scores = []
-        for i in range(0, len(valid_chunks), MAX_BATCH):
-            batch_emb = embeddings_np[i:i+MAX_BATCH]
-            batch_scores = _cosine_similarity(query_vec, batch_emb)
-            all_scores.extend(batch_scores.tolist())
-        scores = np.array(all_scores)
-    else:
-        scores = _cosine_similarity(query_vec, embeddings_np)
-
-    # Build scored results
-    scored = []
-    for chunk, score in zip(valid_chunks, scores):
-        if score > 0.01:
-            scored.append((chunk, float(score)))
-
-    # Sort by score descending
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    # Build results
-    results = []
-    for chunk, score in scored[:limit]:
-        session = db.query(DBSession).filter(DBSession.id == chunk.session_id).first()
-        notebook = db.query(Notebook).filter(Notebook.id == chunk.notebook_id).first()
-
-        results.append({
-            "chunk_id": chunk.id,
-            "notebook_id": chunk.notebook_id,
-            "notebook_title": notebook.title if notebook else "未知",
-            "session_id": chunk.session_id,
-            "session_title": session.title if session else "未知",
-            "source_type": chunk.source_type,
-            "source_id": chunk.source_id,
-            "snippet": chunk.text[:200] + ("..." if len(chunk.text) > 200 else ""),
-            "score": round(score, 4),
-            "metadata": chunk.chunk_meta or {},
-        })
-
-    return results
+    # Neural service unavailable: TF-IDF fallback.
+    query_emb_bytes = _text_to_embedding_tfidf(query)
+    return _search_vectors_numpy(user, query_emb_bytes, chunks, limit, db)
 
 
 # ── Status ──
 
 def get_session_index_status(session_id: str, user: User, db: DBSessionType) -> dict:
     """Get indexing status for a session."""
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == user.id).first()
+    session = _get_session_by_user(db, session_id, user.id)
     if not session:
         raise ValueError("Session not found or access denied")
 
@@ -456,11 +544,18 @@ def get_session_index_status(session_id: str, user: User, db: DBSessionType) -> 
             indexed_hash = sample_chunk.chunk_meta.get("session_content_hash", "")
         status = "indexed" if indexed_hash == current_hash else "stale"
 
-    # Check if has neural embeddings
-    has_neural = db.query(VectorChunk).filter(
-        VectorChunk.session_id == session_id,
-        VectorChunk.embedding_v2.isnot(None),
-    ).count() > 0
+    # Check if has neural embeddings (pgvector column is the source of truth)
+    neural_col = getattr(VectorChunk, "embedding_vector", None)
+    if neural_col is not None:
+        has_neural = db.query(VectorChunk).filter(
+            VectorChunk.session_id == session_id,
+            neural_col.isnot(None),
+        ).count() > 0
+    else:
+        has_neural = db.query(VectorChunk).filter(
+            VectorChunk.session_id == session_id,
+            VectorChunk.embedding_v2.isnot(None),
+        ).count() > 0
 
     return {
         "session_id": session_id,

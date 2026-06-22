@@ -135,10 +135,10 @@ class TestDeleteSessionFiles:
 
 
 class TestDeleteNotebookFiles:
-    def test_deletes_all_sessions(self, db):
+    def test_deletes_all_sessions(self, db, admin_user):
         from app.models import Notebook, Session
 
-        nb = Notebook(title="Test", user_id="u1")
+        nb = Notebook(title="Test", user_id=admin_user.id)
         db.add(nb)
         db.commit()
         db.refresh(nb)

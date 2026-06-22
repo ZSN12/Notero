@@ -10,8 +10,8 @@ export function stripHTML(html: string): string {
   return tmp.textContent || tmp.innerText || '';
 }
 
-export function escapeHtml(text: string): string {
-  return text
+export function escapeHtml(unsafe: string): string {
+  return unsafe
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

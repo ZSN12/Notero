@@ -4,21 +4,32 @@
 
 Notero 不是一个简单的“AI 总结器”。它更关注真实课堂里的完整链路：录音转写、PPT 对齐、AI 语义整理、本地兜底、RAG 引用溯源、知识导图、题库生成和长任务状态恢复。
 
-> 当前项目优先打磨 Web 端体验，后续可复用同一套后端状态模型迁移到 Pad 端。
+当前项目同时提供 Web 课堂工作台与 Pad 课件批注界面，共用同一套后端数据、任务状态和学习资料生成链路。
 
 ## Demo
 
-- 产品截图：<img width="1888" height="902" alt="581ebbdef44a029d6996c69d3c6cf64a" src="https://github.com/user-attachments/assets/52083036-9c32-425d-81eb-294e9c90b48d" />
-           <img width="1502" height="889" alt="4526f2e27ed31eb9410027732a316009" src="https://github.com/user-attachments/assets/0e98b918-4a02-4f91-bcae-fe5321e691f0" />
-           <img width="1907" height="939" alt="bf66455947f357b25d10ceae19a51ea7" src="https://github.com/user-attachments/assets/03b3bb01-382b-435e-991d-412e1b6518ea" />
+### 演示视频
 
+[▶ 点击观看 Notero 功能演示](./docs/assets/demo.mp4)
 
-- 知识导图截图：<img width="1708" height="897" alt="fdf06888ded9b835ac545f1bd54803e0" src="https://github.com/user-attachments/assets/ba9c5c2a-759a-4503-aece-508641743143" />
+> 视频展示课堂录音转写、AI 整理及学习资料生成等核心流程。
 
-- RAG 引用溯源截图：<img width="1766" height="943" alt="image" src="https://github.com/user-attachments/assets/e4b24063-0619-4269-aeb5-c43a2c7b6bf0" />
+### 产品截图
 
-- 演示视频：
+<p align="center">
+  <img width="92%" alt="Notero 课堂工作台" src="https://github.com/user-attachments/assets/52083036-9c32-425d-81eb-294e9c90b48d" />
+</p>
 
+<p align="center">
+  <img width="45%" alt="Notero 学习资料" src="https://github.com/user-attachments/assets/0e98b918-4a02-4f91-bcae-fe5321e691f0" />
+  <img width="45%" alt="Notero 知识导图" src="https://github.com/user-attachments/assets/ba9c5c2a-759a-4503-aece-508641743143" />
+</p>
+
+### RAG 引用溯源
+
+<p align="center">
+  <img width="92%" alt="Notero RAG 引用溯源" src="https://github.com/user-attachments/assets/e4b24063-0619-4269-aeb5-c43a2c7b6bf0" />
+</p>
 
 ## Features
 
@@ -30,6 +41,8 @@ Notero 不是一个简单的“AI 总结器”。它更关注真实课堂里的�
 - 题库与测验：自动生成题库，测验优先覆盖错题和未做题。
 - 多 Agent 自动化：转写完成后自动建立索引，并生成 summary、mindmap、quiz bank。
 - 统一状态机：将转写、AI 整理、索引、导图、题库等长任务状态落库，刷新后可恢复。
+- Pad 课件批注：支持逐页画笔、橡皮擦、撤销/重做和标注持久化。
+- 多轮课堂问答：保留课次问答历史，支持来源定位与上下文压缩。
 - 分享与导出：支持课次分享、导出和基础权限控制。
 
 ## Architecture
@@ -46,6 +59,11 @@ flowchart LR
   E --> H["知识导图 Agent"]
   E --> I["题库 Agent"]
   E --> J["Summary Agent"]
+  H --> L["Celery Worker"]
+  I --> L
+  J --> L
+  L <--> M["Redis"]
+  F --> N["PostgreSQL + pgvector"]
   K["Session Processing State"] --> B
   K --> D
   K --> F
@@ -56,10 +74,11 @@ flowchart LR
 ## Tech Stack
 
 - Frontend: React 18, TypeScript, Vite, Tailwind CSS, React Flow, ELK
-- Backend: FastAPI, SQLAlchemy, Alembic, PostgreSQL
+- Backend: FastAPI, SQLAlchemy, Alembic, PostgreSQL, pgvector
 - AI: DeepSeek OpenAI-compatible API, DashScope embedding / ASR fallback
 - Audio: FunASR, FunASR streaming model, FFmpeg
-- Search: local vector index with neural embedding fallback
+- Async Tasks: Celery, Redis
+- Search: PostgreSQL/pgvector with neural embedding fallback
 - Tests: Pytest, Vitest, GitHub Actions
 
 ## Requirements
@@ -67,6 +86,7 @@ flowchart LR
 - Node.js 20+
 - Python 3.10+ or 3.11+
 - PostgreSQL 15+
+- Redis 6+
 - FFmpeg
 - Optional but recommended: CUDA / GPU for faster local ASR
 
@@ -124,7 +144,7 @@ The backend runs Alembic migrations on startup.
 
 ```bash
 cd backend
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --reload-dir app --reload-exclude tests --port 8000
 ```
 
 ### 6. Run frontend
@@ -137,7 +157,7 @@ Open the Vite URL shown in the terminal, usually `http://localhost:5173`.
 
 ## Docker
 
-Docker Compose includes PostgreSQL and the backend image. Copy `.env.example` to `.env`, adjust AI keys, then run:
+Docker Compose includes PostgreSQL, Redis, the backend service and Celery workers. Copy `.env.example` to `.env`, adjust AI keys, then run:
 
 ```bash
 docker-compose up --build
@@ -190,12 +210,13 @@ Each developer should configure their own PostgreSQL database, AI API keys, and 
 - 设计三层转写稿保存模型，避免 AI 不可用时回退到 raw ASR。
 - 构建统一课次处理状态机，管理转写、索引、导图、题库等长任务状态。
 - 实现课堂 RAG 问答，支持转写/PPT/笔记多源检索与引用溯源。
-- 使用 Agent pipeline 自动生成 summary、mindmap、quiz bank。
-- 将 PostgreSQL、Alembic、Docker、CI 接入完整开发流程。
+- 使用 Agent pipeline 与 Celery 并行生成 summary、mindmap、quiz bank，并通过 Redis 协调任务状态。
+- 基于 PostgreSQL/pgvector 构建课堂资料检索，结合 `content_hash` 实现索引与学习资料失效检测。
+- 将 PostgreSQL、Alembic、Redis、Docker、CI 接入完整开发流程。
 
 ## Roadmap
 
-- 更稳定的 Pad 端适配
+- 完善 Pad 手写笔压感与音频时间轴联动
 - 更细粒度的音频时间戳与段落溯源
 - RAG 多轮对话记忆
 - 错题间隔重复复习
@@ -204,4 +225,3 @@ Each developer should configure their own PostgreSQL database, AI API keys, and 
 ## Contributing
 
 欢迎提交 Issue 和 PR！请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md) 了解开发环境搭建、代码规范和提交流程。
-

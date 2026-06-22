@@ -8,7 +8,7 @@ import ErrorBoundary from "@/components/ErrorBoundary";
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const ChapterList = lazy(() => import("@/pages/ChapterList"));
 const NoteDetail = lazy(() => import("@/pages/NoteDetail"));
-const PadNoteDetail = lazy(() => import("@/pages/pad"));
+const PadPage = lazy(() => import("@/pages/pad"));
 const Login = lazy(() => import("@/pages/Login"));
 const SharePage = lazy(() => import("@/pages/SharePage"));
 const Profile = lazy(() => import("@/pages/Profile"));
@@ -39,7 +39,7 @@ export default function App() {
           <Route path="/" element={<ProtectedRoute><ErrorBoundary><Dashboard /></ErrorBoundary></ProtectedRoute>} />
           <Route path="/subject/:id" element={<ProtectedRoute><ErrorBoundary><ChapterList /></ErrorBoundary></ProtectedRoute>} />
           <Route path="/subject/:id/session/:sessionId" element={<ProtectedRoute><ErrorBoundary><NoteDetail /></ErrorBoundary></ProtectedRoute>} />
-          <Route path="/subject/:id/session/:sessionId/pad" element={<ProtectedRoute><ErrorBoundary><PadNoteDetail /></ErrorBoundary></ProtectedRoute>} />
+          <Route path="/subject/:id/session/:sessionId/pad" element={<ProtectedRoute><ErrorBoundary><PadPage /></ErrorBoundary></ProtectedRoute>} />
           <Route path="/profile" element={<ProtectedRoute><ErrorBoundary><Profile /></ErrorBoundary></ProtectedRoute>} />
         </Routes>
       </Suspense>

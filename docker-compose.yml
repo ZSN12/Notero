@@ -33,6 +33,7 @@ services:
       - .env
     environment:
       NOTERO_ENV: production
+      AGENTS_USE_CELERY: 1
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notero}
       REDIS_URL: redis://redis:6379/0
     depends_on:
@@ -58,6 +59,7 @@ services:
     env_file:
       - .env
     environment:
+      AGENTS_USE_CELERY: 1
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notero}
       REDIS_URL: redis://redis:6379/0
     depends_on:
@@ -77,6 +79,7 @@ services:
     env_file:
       - .env
     environment:
+      AGENTS_USE_CELERY: 1
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notero}
       REDIS_URL: redis://redis:6379/0
     depends_on:

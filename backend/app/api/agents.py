@@ -9,7 +9,7 @@ Provides:
 from __future__ import annotations
 
 import logging
-import threading
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
@@ -19,12 +19,16 @@ from sqlalchemy.orm import Session
 from app.agents import AgentContext, get_agent, list_agents
 from app.core.auth import get_current_user
 from app.core.database import SessionLocal, get_db
+from app.core.locks import get_session_task_lock
 from app.models import AgentWorkflow, Notebook, Note, Session as DBSession, Task, User
+from app.config import AGENT_HEARTBEAT_SECONDS, AGENT_TIMEOUT_SECONDS
 from app.services.vector_service import _compute_session_content_hash
+from app.services.note_utils import get_canonical_note_text
 from app.services.state_service import (
     set_running as set_state_running,
     set_ready as set_state_ready,
     set_error as set_state_error,
+    set_queued as set_state_queued,
     get_state,
     get_session_processing_status,
 )
@@ -32,24 +36,6 @@ from app.services.state_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
-
-
-# Per-(session_id, task_type) lock to close the race window between checking for
-# an active task and inserting a new one.
-_START_LOCKS: dict[str, threading.Lock] = {}
-_START_LOCKS_GUARD = threading.Lock()
-
-
-def _get_start_lock(session_id: str, task_type: str) -> threading.Lock:
-    key = f"{session_id}:{task_type}"
-    lock = _START_LOCKS.get(key)
-    if lock is None:
-        with _START_LOCKS_GUARD:
-            lock = _START_LOCKS.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                _START_LOCKS[key] = lock
-    return lock
 
 
 from app.agents.orchestrator import (
@@ -62,6 +48,7 @@ from app.agents.orchestrator import (
 
 class RunAgentsRequest(BaseModel):
     roles: list[str] | None = None
+    force: bool = False
 
 
 # ── Helpers ──
@@ -93,15 +80,12 @@ def _notebook_for_note(note: Note, db: Session) -> Notebook | None:
 
 
 def _should_auto_trigger_agents(db: Session, session_id: str) -> bool:
-    """Return True when transcript is finalized and vector index is ready.
-
-    DeepSeek fallback (transcript_finalize.fallback) does NOT auto-trigger
-    mindmap/quiz generation — only vector index is built automatically.
-    """
+    """Return True when an AI-finalized transcript and vector index are ready."""
     status = get_session_processing_status(db, session_id)
     stages = status.get("stages", {})
     vector_ok = stages.get("vector_index", {}).get("status") == "ready"
-    transcript_ok = stages.get("transcript_finalize", {}).get("status") == "ready"
+    transcript_status = stages.get("transcript_finalize", {}).get("status")
+    transcript_ok = transcript_status == "ready"
     return vector_ok and transcript_ok
 
 
@@ -175,7 +159,7 @@ def auto_run_agents(
 
         notebook_obj = _notebook_for_note(note, db)
 
-        lock = _get_start_lock(session_id, "run_all")
+        lock = get_session_task_lock(session_id, "run_all")
         with lock:
             db.expire_all()
 
@@ -188,12 +172,15 @@ def auto_run_agents(
             for role in expanded_roles:
                 task_type = f"agent_{role}"
                 active = _get_active_task(session_id, task_type, db)
-                if active:
+                if active and _is_active_task_usable(active):
                     initial_role_states[role] = {"status": "running", "task_id": active.id}
                     continue
+                if active:
+                    _mark_task_stale(db, active, role, session_id)
                 agent = get_agent(role)
+                role_force = force and role in target_roles
                 ready = _maybe_return_ready_or_stale(
-                    session_id, role, agent, note, db, user, notebook_obj, force=force
+                    session_id, role, agent, note, db, user, notebook_obj, force=role_force
                 )
                 if ready:
                     _ensure_stage_ready_on_reuse(session_id, role, note, db)
@@ -229,7 +216,9 @@ def auto_run_agents(
         db.expire_all()
         workflow_states = dict(workflow.role_states)
         agents_by_role: dict[str, dict] = {}
-        for role in expanded_roles:
+        # Only report the roles the caller originally requested; upstream
+        # dependencies expanded by the orchestrator are an implementation detail.
+        for role in target_roles:
             state = workflow_states.get(role, {})
             task_id = state.get("task_id")
             task = None
@@ -284,6 +273,53 @@ def _get_active_task(session_id: str, task_type: str, db: Session) -> Task | Non
         .order_by(Task.created_at.desc())
         .first()
     )
+
+
+def _is_active_task_usable(task: Task) -> bool:
+    """Return True if an active task is still likely being worked on.
+
+    A running task without a recent heartbeat is a stale/fake-running task
+    left behind by a crashed worker or a pre-fix deployment. A pending task
+    that has sat for the full timeout is also considered lost.
+    """
+    updated_at = task.updated_at or task.created_at
+    if updated_at is None:
+        return False
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - updated_at
+    if task.status == "running":
+        return age <= timedelta(seconds=AGENT_HEARTBEAT_SECONDS)
+    return age <= timedelta(seconds=AGENT_TIMEOUT_SECONDS)
+
+
+def _mark_task_stale(db: Session, task: Task, role: str, session_id: str) -> None:
+    """Mark a stale active task as error so the user can retry."""
+    from app.services.agent_state_service import INTERRUPTED_MESSAGE, set_agent_error
+
+    task.status = "error"
+    task.progress = 1.0
+    task.error_message = INTERRUPTED_MESSAGE
+    task.updated_at = datetime.now(timezone.utc)
+    db.add(task)
+    # Best-effort state update; the role may not have a state row yet.
+    try:
+        set_agent_error(
+            db,
+            session_id,
+            role,
+            task.id,
+            INTERRUPTED_MESSAGE,
+            commit=False,
+        )
+    except Exception:
+        logger.exception(
+            "mark_task_stale_state_failed session_id=%s role=%s task_id=%s",
+            session_id,
+            role,
+            task.id,
+        )
+    db.commit()
 
 
 def _maybe_return_ready_or_stale(
@@ -478,16 +514,12 @@ def run_all_agents(
     if not note:
         raise HTTPException(status_code=400, detail="No note found for session")
 
-    has_content = bool(
-        note.content
-        or note.transcript
-        or note.ppt_images
-        or note.layout_blocks
-    )
-    if not has_content:
+    content_text = get_canonical_note_text(note, include_ppt=True)
+    if not content_text.strip():
         raise HTTPException(status_code=400, detail="No indexable content in note")
 
     roles = body.roles if body and body.roles else list_agents()
+    force = body.force if body else False
     if not roles:
         raise HTTPException(status_code=400, detail="No agents available")
 
@@ -501,7 +533,7 @@ def run_all_agents(
     # Acquire a global-ish lock for this session so that checking for active
     # tasks and creating new ones is atomic. Without this, two concurrent calls
     # can both see no active task and each create one.
-    lock = _get_start_lock(session_id, "run_all")
+    lock = get_session_task_lock(session_id, "run_all")
     with lock:
         db.expire_all()
 
@@ -517,7 +549,7 @@ def run_all_agents(
         for role in expanded_roles:
             task_type = f"agent_{role}"
             active = _get_active_task(session_id, task_type, db)
-            if active:
+            if active and _is_active_task_usable(active):
                 active_tasks_info.append({
                     "role": role,
                     "task_id": active.id,
@@ -527,9 +559,12 @@ def run_all_agents(
                 })
                 initial_role_states[role] = {"status": "running", "task_id": active.id}
                 continue
+            if active:
+                _mark_task_stale(db, active, role, session_id)
             agent = get_agent(role)
+            role_force = force and role in roles
             ready = _maybe_return_ready_or_stale(
-                session_id, role, agent, note, db, current_user, notebook_obj, force=False
+                session_id, role, agent, note, db, current_user, notebook_obj, force=role_force
             )
             if ready:
                 _ensure_stage_ready_on_reuse(session_id, role, note, db)
@@ -567,6 +602,25 @@ def run_all_agents(
         )
         if not workflow:
             raise HTTPException(status_code=500, detail="Failed to create agent workflow")
+
+        # Mark roles that are pending only because they are waiting for upstream
+        # dependencies as queued, so the UI can show "waiting" instead of a fake
+        # "running" spinner. Roles that are ready to execute immediately will be
+        # dispatched by the orchestrator and transitioned to running by AgentRunner.
+        pending_roles = [
+            role for role, state in initial_role_states.items()
+            if state.get("status") == "pending"
+        ]
+        for role in pending_roles:
+            set_state_queued(
+                db,
+                session_id,
+                _role_to_stage(role),
+                message="等待前置任务执行",
+                commit=False,
+            )
+        if pending_roles:
+            db.commit()
 
     # Build response from the workflow state. Task rows are created by the
     # orchestrator; refresh our view so we can include their IDs.

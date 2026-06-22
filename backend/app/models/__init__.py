@@ -26,7 +26,6 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     notebooks = relationship("Notebook", back_populates="user", cascade="all, delete-orphan")
     vector_chunks = relationship("VectorChunk", back_populates="user", cascade="all, delete-orphan")
-    workflows = relationship("AgentWorkflow", back_populates="user", cascade="all, delete-orphan")
 
 
 class Notebook(Base):
@@ -46,6 +45,7 @@ class Notebook(Base):
     sessions = relationship("Session", back_populates="notebook", cascade="all, delete-orphan")
     vocabulary = relationship("Vocabulary", back_populates="notebook", cascade="all, delete-orphan")
     vector_chunks = relationship("VectorChunk", back_populates="notebook", cascade="all, delete-orphan")
+    rag_messages = relationship("RAGMessage", back_populates="notebook", cascade="all, delete-orphan")
 
 class Session(Base):
     __tablename__ = "sessions"
@@ -56,6 +56,7 @@ class Session(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     notebook_id = Column(String(36), ForeignKey("notebooks.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(200), nullable=False)
+    summary = Column(Text, nullable=True)
     keywords = Column(JSON, default=[])
     duration = Column(String(20))
     status = Column(String(20), default="pending")
@@ -71,7 +72,7 @@ class Session(Base):
     tasks = relationship("Task", back_populates="session", cascade="all, delete-orphan")
     vector_chunks = relationship("VectorChunk", back_populates="session", cascade="all, delete-orphan")
     processing_states = relationship("SessionProcessingState", back_populates="session", cascade="all, delete-orphan")
-    workflows = relationship("AgentWorkflow", back_populates="session", cascade="all, delete-orphan")
+    rag_messages = relationship("RAGMessage", back_populates="session", cascade="all, delete-orphan")
 
 class Note(Base):
     __tablename__ = "notes"
@@ -84,6 +85,7 @@ class Note(Base):
     transcript = Column(JSON)
     ppt_images = Column(JSON)
     vocabulary = Column(JSON)
+    annotations = Column(JSON)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     session = relationship("Session", back_populates="notes")
 
@@ -134,7 +136,7 @@ class Task(Base):
     progress = Column(Float, default=0.0)
     error_message = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True)
     session = relationship("Session", back_populates="tasks")
 
 class Vocabulary(Base):
@@ -210,11 +212,23 @@ class AgentWorkflow(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     finished_at = Column(DateTime(timezone=True), nullable=True)
     last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
-    session = relationship("Session", back_populates="workflows")
-    user = relationship("User", back_populates="workflows")
 
 
-__all__ = [
-    "Base", "User", "Notebook", "Session", "Note", "File", "Task",
-    "Vocabulary", "VectorChunk", "SessionProcessingState", "AgentWorkflow",
-]
+class RAGMessage(Base):
+    __tablename__ = "rag_messages"
+    __table_args__ = (
+        Index("ix_rag_messages_session_id_created", "session_id", "created_at"),
+    )
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    notebook_id = Column(String(36), ForeignKey("notebooks.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    sources = Column(JSON, nullable=True)
+    is_summary = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    session = relationship("Session", back_populates="rag_messages")
+    notebook = relationship("Notebook", back_populates="rag_messages")
+
+
+__all__ = ["Base", "User", "Notebook", "Session", "Note", "File", "Task", "Vocabulary", "VectorChunk", "SessionProcessingState", "AgentWorkflow", "RAGMessage"]

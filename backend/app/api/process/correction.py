@@ -110,20 +110,29 @@ def correct_uncorrected_transcripts_from_data(
 
         base_for_display = full_text
         if corrected and corrected != full_text:
-            if corrector.preserves_source_content(full_text, corrected, min_ratio=0.70):
-                logger.info(
-                    "transcript_correction_llm_accepted session_id=%s source_chars=%s corrected_chars=%s",
-                    session_id,
-                    len(full_text),
-                    len(corrected),
+            try:
+                review = corrector.review_and_repair_candidate(
+                    full_text,
+                    corrected,
+                    protected_terms=keywords,
                 )
-                base_for_display = corrected
-            else:
+                logger.info(
+                    "transcript_correction_llm_accepted session_id=%s source_chars=%s corrected_chars=%s reviewed=%s repaired=%s",
+                    session_id,
+                    len(full_text),
+                    len(review["text"]),
+                    review["review_performed"],
+                    review["review_repaired"],
+                )
+                base_for_display = review["text"]
+            except Exception as exc:
                 logger.warning(
-                    "transcript_correction_llm_rejected session_id=%s source_chars=%s corrected_chars=%s",
+                    "transcript_correction_llm_rejected session_id=%s source_chars=%s corrected_chars=%s error=%s",
                     session_id,
                     len(full_text),
                     len(corrected),
+                    type(exc).__name__,
+                    exc_info=True,
                 )
 
         display_corrected = corrector.clean_transcript_for_display(base_for_display)

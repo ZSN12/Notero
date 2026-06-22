@@ -28,7 +28,8 @@ def upgrade() -> None:
         return
 
     try:
-        op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        with bind.begin_nested():
+            op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     except Exception as e:
         logger.warning("Could not create pgvector extension: %s", e)
         return

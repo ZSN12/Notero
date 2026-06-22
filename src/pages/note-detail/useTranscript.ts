@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchNote, updateNote as apiUpdateNote, insertPPTIntoTranscript, ContentBlock, Slide } from '@/services/api';
+import type { ParagraphTimeRange } from '@/services/api';
 import { contentBlocksFromLayout, layoutFromNoteParts, normalizeHtmlText, transcriptTextFromRawTranscript } from '@/lib/noteLayout';
 
 const CORRECTION_POLL_MS = 12000;
@@ -41,19 +42,26 @@ export function useTranscript(
   const [hasLocalChanges, setHasLocalChanges] = useState(false);
   const [partialText, setPartialText] = useState('');
   const [streamingFinals, setStreamingFinals] = useState<string[]>([]);
-  const [editorFocused, setEditorFocused] = useState(false);
   const prevTranscriptRef = useRef('');
   const userEditedRef = useRef(false);
   const hasLocalChangesRef = useRef(false);
   const streamChunksRef = useRef<Map<string, string>>(new Map());
-  const getCurrentNotesRef = useRef<(() => StudentNote[]) | null>(null);
-  const saveTimeoutRef = useRef<number | null>(null);
+  const getCurrentNotesRef = useRef<() => StudentNote[]>(() => []);
+  const scheduleSaveTimerRef = useRef<number | null>(null);
 
   const markLocalChanged = useCallback((isUserEdit = true) => {
     if (isUserEdit) userEditedRef.current = true;
     hasLocalChangesRef.current = true;
     setHasLocalChanges(true);
     setSaveStatus('idle');
+  }, []);
+
+  const markBackendSynced = useCallback(() => {
+    hasLocalChangesRef.current = false;
+    setHasLocalChanges(false);
+    setSaveStatus('saved');
+    setSaveError(null);
+    setLastSaveTime(Date.now());
   }, []);
 
   const normalizeEditableHtml = useCallback((s: string) => normalizeHtmlText(s), []);
@@ -131,37 +139,6 @@ export function useTranscript(
     setContentBlocks(blocks);
   }, [markLocalChanged]);
 
-  const updateContentBlockDraft = useCallback((index: number, content: string) => {
-    setContentBlocks((prev) => {
-      const block = prev[index];
-      if (!block || block.type !== 'text') return prev;
-      const next = [...prev];
-      next[index] = { ...block, content };
-      return next;
-    });
-    markLocalChanged(true);
-  }, [markLocalChanged]);
-
-  const commitContentBlockDraft = useCallback(() => {
-    // Draft is already committed to state on input; no extra sync needed.
-  }, []);
-
-  const updateTranscriptDraft = useCallback((value: string) => {
-    setTranscriptText(value);
-  }, []);
-
-  const commitTranscriptDraft = useCallback(() => {
-    // transcriptText already reflects the latest draft.
-  }, []);
-
-  const setGetCurrentNotes = useCallback((getter: () => StudentNote[]) => {
-    getCurrentNotesRef.current = getter;
-  }, []);
-
-  const clearPartialText = useCallback(() => {
-    setPartialText('');
-  }, []);
-
   const clearDerivedTranscriptViews = useCallback((keepPptBlocks = false) => {
     setSentencesWithTime([]);
     setActiveSentenceIndex(null);
@@ -233,11 +210,68 @@ export function useTranscript(
     setStreamingFinals([]);
   }, []);
 
-  const receiveAiText = useCallback((value: string, options?: { force?: boolean }) => {
+  const buildBlocksWithPreservedImages = useCallback((
+    textBlocks: ContentBlock[],
+    imageBlocks: ContentBlock[],
+    originalBlocks: ContentBlock[],
+  ): ContentBlock[] => {
+    if (imageBlocks.length === 0) return textBlocks;
+    const oldTextCount = originalBlocks.filter(block => block.type === 'text').length;
+    const result = [...textBlocks];
+    for (const imageBlock of imageBlocks) {
+      const originalIndex = originalBlocks.findIndex(block => block === imageBlock);
+      const precedingText = originalBlocks
+        .slice(0, originalIndex >= 0 ? originalIndex : 0)
+        .filter(block => block.type === 'text').length;
+      const ratio = oldTextCount > 0 ? precedingText / oldTextCount : 1;
+      const target = Math.min(result.length, Math.round(ratio * textBlocks.length));
+      result.splice(target, 0, imageBlock);
+    }
+    return result;
+  }, []);
+
+  const replaceTranscriptBlocks = useCallback((value: string) => {
+    const paragraphs = value.split(/\n{2,}/).map(part => part.trim()).filter(Boolean);
+    setContentBlocks(prev => {
+      const oldTextCount = prev.filter(block => block.type === 'text').length;
+      const images = prev
+        .map((block, index) => ({ block, index }))
+        .filter(item => item.block.type === 'image');
+
+      const textBlocks: ContentBlock[] = paragraphs.map(content => ({ type: 'text', content }));
+      if (images.length === 0) {
+        // No images: still create text blocks so the editor has content to render.
+        return textBlocks;
+      }
+
+      const result = [...textBlocks];
+      for (const { block, index } of images) {
+        const precedingText = prev.slice(0, index).filter(item => item.type === 'text').length;
+        const ratio = oldTextCount > 0 ? precedingText / oldTextCount : 1;
+        const target = Math.min(result.length, Math.round(ratio * textBlocks.length));
+        result.splice(target, 0, block);
+      }
+      return result;
+    });
+  }, []);
+
+  const receiveAiText = useCallback((value: string, options?: { force?: boolean; authoritative?: boolean }) => {
     const nextText = value.trim();
     if (!nextText) return;
+    // Only an explicit force may overwrite a user edit in progress.
+    // Authoritative backend text bypasses the 85% length gate but still
+    // respects user edit protection so the user can choose to apply or keep.
     if (userEditedRef.current && !options?.force) {
       setPendingAiText(nextText);
+      return;
+    }
+    if (options?.force || options?.authoritative) {
+      userEditedRef.current = false;
+      setTranscriptText(nextText);
+      replaceTranscriptBlocks(nextText);
+      setSentencesWithTime([]);
+      setActiveSentenceIndex(null);
+      markBackendSynced();
       return;
     }
     // Decide whether to replace UI text with corrected DB text.
@@ -248,7 +282,7 @@ export function useTranscript(
       const prevTrimmed = prev.trim();
       if (!prevTrimmed || options?.force) {
         clearDerivedTranscriptViews();
-        markLocalChanged(false);
+        markBackendSynced();
         return nextText;
       }
       // If lengths are close (within ±15%), it's a correction — accept.
@@ -257,13 +291,13 @@ export function useTranscript(
       if (nextText.length >= prevTrimmed.length * 0.85) {
         // Replace UI text but keep PPT image blocks alive
         clearDerivedTranscriptViews(true);
-        markLocalChanged(false);
+        markBackendSynced();
         return nextText;
       }
       // DB text is much shorter — stale snapshot, keep live UI text
       return prev;
     });
-  }, [clearDerivedTranscriptViews, markLocalChanged]);
+  }, [clearDerivedTranscriptViews, markBackendSynced, replaceTranscriptBlocks]);
 
   const parseSentencesWithTime = useCallback((note: any): SentenceWithTime[] => {
     if (!note?.transcript || !Array.isArray(note.transcript) || note.transcript.length === 0) return [];
@@ -343,10 +377,6 @@ export function useTranscript(
     return result;
   }, []);
 
-  const transcriptTextFromNote = useCallback((note: any) => {
-    return transcriptTextFromRawTranscript(note?.transcript);
-  }, []);
-
   const appendTranscriptText = useCallback((newText: string, skipDedup = false) => {
     markLocalChanged(false);
     setSentencesWithTime([]);
@@ -388,38 +418,38 @@ export function useTranscript(
       if (sessionId !== currentId) return; // ignore stale response
       if (note) {
         setLoadedNote(note); // Share with parent so it can skip its own fetch
-        // Restore transcript priority:
-        // 1. User-edited note.content (starts with the transcript marker).
-        //    This keeps manual edits/deletes and supports intentionally empty transcripts.
-        // 2. Legacy note.content without the marker.
-        // 3. Final backend transcript from ASR/AI finalization.
-        // 4. Other backend transcript entries.
+        // Final/user-edited transcript entries are authoritative. note.content
+        // can lag behind after an async AI finalization and must not override it.
         let transcriptRestored = false;
-        const backendTranscript = transcriptTextFromNote(note);
+        let restoredTranscriptText = '';
+        const backendTranscript = transcriptTextFromRawTranscript(note.transcript);
         const hasFinalTranscript = note.transcript?.some?.(
-          (chunk: any) => chunk.correction_stage === 'final',
+          (chunk: any) => chunk.correction_stage === 'final' || chunk.correction_stage === 'user_edited',
         );
-        if (typeof note.content === 'string' && note.content.startsWith('## 语音转文字\n\n')) {
+        if (hasFinalTranscript) {
+          // An explicitly empty user_edited display_text is a valid deletion and
+          // must not fall back to raw_text or older content.
+          restoredTranscriptText = cleanTranscriptText(backendTranscript);
+          setTranscriptText(restoredTranscriptText);
+          transcriptRestored = true;
+        } else if (typeof note.content === 'string' && note.content.startsWith('## 语音转文字\n\n')) {
           const match = note.content.match(/^## 语音转文字\n\n([\s\S]*?)(?:\n\n---\n\n[\s\S]*)?$/);
-          const contentTranscript = match ? cleanTranscriptText(match[1] || '') : '';
-          setTranscriptText(contentTranscript);
+          restoredTranscriptText = match ? cleanTranscriptText(match[1] || '') : '';
+          setTranscriptText(restoredTranscriptText);
           transcriptRestored = true;
         } else if (note.content) {
           // Fallback: content exists but doesn't match expected format
-          const fallbackText = cleanTranscriptText(note.content);
-          if (fallbackText) {
-            setTranscriptText(fallbackText);
+          restoredTranscriptText = cleanTranscriptText(note.content);
+          if (restoredTranscriptText) {
+            setTranscriptText(restoredTranscriptText);
             transcriptRestored = true;
           }
-        }
-        if (!transcriptRestored && hasFinalTranscript && backendTranscript) {
-          setTranscriptText(cleanTranscriptText(backendTranscript));
-          transcriptRestored = true;
         }
         if (!transcriptRestored && note.transcript && Array.isArray(note.transcript) && note.transcript.length > 0) {
           const fullTranscript = backendTranscript;
           if (fullTranscript) {
-            setTranscriptText(cleanTranscriptText(fullTranscript));
+            restoredTranscriptText = cleanTranscriptText(fullTranscript);
+            setTranscriptText(restoredTranscriptText);
           }
         }
         // Parse sentence-time mapping from transcript JSON (always needs note.transcript)
@@ -428,12 +458,27 @@ export function useTranscript(
           if (parsed.length > 0) setSentencesWithTime(parsed);
         }
         const restoredBlocks = contentBlocksFromLayout(note.layout_blocks);
-        if (restoredBlocks.length > 0) {
+        if (transcriptRestored) {
+          // Authoritative transcript (final/user_edited) is the source of truth.
+          // Rebuild blocks from it, preserving any PPT images from saved layout_blocks.
+          const imageBlocks = restoredBlocks.filter(block => block.type === 'image');
+          const textBlocks: ContentBlock[] = restoredTranscriptText
+            .split(/\n{2,}/)
+            .map(part => part.trim())
+            .filter(Boolean)
+            .map(content => ({ type: 'text', content }));
+          const mergedBlocks = imageBlocks.length > 0
+            ? buildBlocksWithPreservedImages(textBlocks, imageBlocks, restoredBlocks)
+            : textBlocks;
+          if (mergedBlocks.length > 0) {
+            updateContentBlocks(mergedBlocks, false, false);
+          }
+        } else if (restoredBlocks.length > 0) {
           updateContentBlocks(restoredBlocks, false);
           const layoutText = transcriptFromBlocks(restoredBlocks);
           // Only override transcriptText from layout_blocks if we haven't already
           // restored a final transcript, and the layout text is actually newer/non-empty.
-          if (layoutText && !transcriptRestored) {
+          if (layoutText) {
             setTranscriptText(cleanTranscriptText(layoutText));
           }
         } else if (note.ppt_images && note.ppt_images.length > 0) {
@@ -462,7 +507,7 @@ export function useTranscript(
       setHasLocalChanges(false);
       setIsLoaded(true);
     }
-  }, [cleanTranscriptText, sessionId, parseSentencesWithTime, transcriptFromBlocks, transcriptTextFromNote, updateContentBlocks]);
+  }, [cleanTranscriptText, sessionId, parseSentencesWithTime, transcriptFromBlocks, transcriptTextFromRawTranscript, updateContentBlocks, buildBlocksWithPreservedImages]);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
@@ -501,16 +546,52 @@ export function useTranscript(
     return true;
   }, [cleanTranscriptText, contentBlocks, getCurrentTranscript, normalizeEditableHtml, sessionId]);
 
-  const scheduleSave = useCallback((getCurrentNotes: () => StudentNote[], delay = 300) => {
-    getCurrentNotesRef.current = getCurrentNotes;
-    if (saveTimeoutRef.current) {
-      window.clearTimeout(saveTimeoutRef.current);
-      saveTimeoutRef.current = null;
-    }
-    saveTimeoutRef.current = window.setTimeout(() => {
-      saveContent(getCurrentNotes());
+  const setGetCurrentNotes = useCallback((fn: () => StudentNote[]) => {
+    getCurrentNotesRef.current = fn;
+  }, []);
+
+  const scheduleSave = useCallback((getNotes: () => StudentNote[], delay = 300) => {
+    if (scheduleSaveTimerRef.current) window.clearTimeout(scheduleSaveTimerRef.current);
+    scheduleSaveTimerRef.current = window.setTimeout(() => {
+      scheduleSaveTimerRef.current = null;
+      saveContent(getNotes(), false);
     }, delay);
   }, [saveContent]);
+
+  const updateTranscriptDraft = useCallback((text: string) => {
+    updateTranscriptText(text, true);
+  }, [updateTranscriptText]);
+
+  const commitTranscriptDraft = useCallback(() => {
+    // transcript text is already live
+  }, []);
+
+  const clearPartialText = useCallback(() => {
+    setPartialText('');
+  }, []);
+
+  const setEditorFocused = useCallback((_focused: boolean) => {
+    // placeholder for future focus tracking
+  }, []);
+
+  const updateContentBlockDraft = useCallback((index: number, content: string) => {
+    setContentBlocks((prev) => {
+      const updated = [...prev];
+      if (updated[index]) updated[index] = { ...updated[index], content };
+      return updated;
+    });
+    markLocalChanged(true);
+  }, [markLocalChanged]);
+
+  const commitContentBlockDraft = useCallback(() => {
+    // blocks are already live
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (scheduleSaveTimerRef.current) window.clearTimeout(scheduleSaveTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isRecording || !sessionId) return;
@@ -518,7 +599,7 @@ export function useTranscript(
       try {
         const note = await fetchNote(sessionId);
         if (note?.transcript && Array.isArray(note.transcript) && note.transcript.length > 0) {
-          const corrected = transcriptTextFromNote(note);
+          const corrected = transcriptTextFromRawTranscript(note.transcript);
           if (corrected.trim() && corrected.trim() !== transcriptText.trim()) {
             receiveAiText(corrected);
             setIsAiRestructuring(false);
@@ -531,7 +612,7 @@ export function useTranscript(
       } catch { /* ignore */ }
     }, CORRECTION_POLL_MS);
     return () => clearInterval(interval);
-  }, [isRecording, sessionId, transcriptText, parseSentencesWithTime, receiveAiText, transcriptTextFromNote]);
+  }, [isRecording, sessionId, transcriptText, parseSentencesWithTime, receiveAiText, transcriptTextFromRawTranscript]);
 
   useEffect(() => {
     if (!isRecording && sessionId && transcriptText) {
@@ -551,8 +632,9 @@ export function useTranscript(
       attempts += 1;
       try {
         const note = await fetchNote(sessionId);
-        const corrected = transcriptTextFromNote(note);
-        const hasFinalTranscript = note?.transcript?.some?.(
+        if (!note) return;
+        const corrected = transcriptTextFromRawTranscript(note.transcript);
+        const hasFinalTranscript = note.transcript?.some?.(
           (chunk: any) => chunk.correction_stage === 'final',
         );
 
@@ -581,7 +663,7 @@ export function useTranscript(
       stopped = true;
       clearInterval(interval);
     };
-  }, [isTranscribing, isRecording, sessionId, parseSentencesWithTime, receiveAiText, transcriptTextFromNote]);
+  }, [isTranscribing, isRecording, sessionId, parseSentencesWithTime, receiveAiText, transcriptTextFromRawTranscript]);
 
   useEffect(() => {
     if (!isTranscribing) return;
@@ -682,7 +764,7 @@ export function useTranscript(
       hasLocalChanges,
       partialText,
       streamingFinals,
-      editorFocused,
+      paragraphTimeRanges: [] as ParagraphTimeRange[],
     },
     actions: {
       setTranscriptText,
@@ -695,8 +777,6 @@ export function useTranscript(
       setIsTranscribing,
       setContentBlocks,
       updateContentBlocks,
-      updateContentBlockDraft,
-      commitContentBlockDraft,
       setActiveSentenceIndex,
       saveContent,
       parseSentencesWithTime,
@@ -706,12 +786,15 @@ export function useTranscript(
       receivePartial,
       receiveFinal,
       clearStreamingState,
-      clearPartialText,
-      updateTranscriptDraft,
-      commitTranscriptDraft,
-      setEditorFocused,
+      getCurrentTranscript,
       setGetCurrentNotes,
       scheduleSave,
+      updateTranscriptDraft,
+      commitTranscriptDraft,
+      clearPartialText,
+      setEditorFocused,
+      updateContentBlockDraft,
+      commitContentBlockDraft,
       markUserEdited: () => markLocalChanged(true),
       markLocalChanged: () => markLocalChanged(false),
       applyPendingAiText: () => {

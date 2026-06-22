@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.agents.transcript_agent import ParagraphRange, TranscriptOrganizerAgent
 from tests.harness.helpers import auth_headers, create_notebook_session_note
 
 
@@ -77,7 +78,7 @@ def test_transcript_agent_packages_finalized_content():
         assert "这是整理后的课堂内容" in organized[0]["data"]["plain_text"]
 
 
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_transcript_agent_restructures_raw_transcript(mock_openai_cls):
     """The agent can restructure a raw transcript when no finalized entry exists."""
     mock_client = MagicMock()
@@ -111,7 +112,7 @@ def test_transcript_agent_restructures_raw_transcript(mock_openai_cls):
         assert "整理后的课堂内容" in organized[0]["data"]["plain_text"]
 
 
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_downstream_agent_uses_organized_transcript(mock_openai_cls):
     """Mindmap agent should consume the organized transcript when available."""
     mock_client = MagicMock()
@@ -173,3 +174,47 @@ def test_downstream_agent_uses_organized_transcript(mock_openai_cls):
         ]
         assert len(mindmap_calls) == 1
         assert "整理后的课堂内容" in mindmap_calls[0].kwargs["messages"][1]["content"]
+
+
+def test_parse_marked_paragraphs_extracts_time_ranges():
+    raw = "[1200-5600] 这是第一段。\n\n[5600-8900] 这是第二段。"
+    ranges = TranscriptOrganizerAgent._parse_marked_paragraphs(raw)
+    assert len(ranges) == 2
+    assert ranges[0].text == "这是第一段。"
+    assert ranges[0].start_ms == 1200
+    assert ranges[0].end_ms == 5600
+    assert ranges[1].text == "这是第二段。"
+    assert ranges[1].start_ms == 5600
+    assert ranges[1].end_ms == 8900
+
+
+def test_parse_marked_paragraphs_handles_missing_markers():
+    raw = "没有标记的段落。\n\n[1000-2000] 有标记的段落。"
+    ranges = TranscriptOrganizerAgent._parse_marked_paragraphs(raw)
+    assert len(ranges) == 2
+    assert ranges[0].text == "没有标记的段落。"
+    assert ranges[0].start_ms == 0
+    assert ranges[0].end_ms == 0
+    assert ranges[1].text == "有标记的段落。"
+
+
+def test_build_timestamped_text_skips_empty_segments():
+    segments = [
+        {"text": "", "start_ms": 0, "end_ms": 100},
+        {"text": "有效文本", "start_ms": 100, "end_ms": 500},
+    ]
+    text = TranscriptOrganizerAgent._build_timestamped_text(segments)
+    assert "[100-500] 有效文本" in text
+    assert "[0-100]" not in text
+
+
+def test_restructure_text_joins_paragraph_texts():
+    with patch.object(TranscriptOrganizerAgent, "restructure_with_time", return_value=[
+        ParagraphRange(text="第一段。", start_ms=0, end_ms=1000),
+        ParagraphRange(text="第二段。", start_ms=1000, end_ms=2000),
+    ]):
+        result = TranscriptOrganizerAgent.restructure_text(
+            raw_text="raw",
+            course_title="",
+        )
+    assert result == "第一段。\n\n第二段。"

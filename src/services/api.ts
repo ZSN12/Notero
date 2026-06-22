@@ -30,6 +30,8 @@ export type {
   AgentTask,
   RAGSource,
   RAGCallbacks,
+  RAGMessage,
+  ParagraphTimeRange,
   ProcessingStage,
   ProcessingStatusValue,
   ProcessingStageState,
@@ -50,7 +52,6 @@ export {
   fetchSessionDetail,
   fetchSessionById,
   createSession,
-  updateSession,
   deleteSession,
   updateSessionDuration,
 } from './api/session';
@@ -112,6 +113,9 @@ export {
 
 export {
   askRAG,
+  fetchRAGMessages,
+  clearRAGMessages,
+  serializeRAGSources,
 } from './api/rag';
 
 export {

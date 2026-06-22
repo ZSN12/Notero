@@ -2,9 +2,11 @@
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.agents.base import AgentContext, AgentResult, BaseAgent
 from app.agents.normalizers import normalize_quiz_data
+from app.services.agent_state_service import set_agent_progress, set_agent_ready
 from app.services.vector_service import _compute_session_content_hash
 
 logger = logging.getLogger(__name__)
@@ -19,17 +21,33 @@ class QuizAgent(BaseAgent):
     prompt_name = "quiz"
 
     temperature = 0.4
-    max_tokens = 12000
+    max_tokens = 8000
+    timeout = 90.0
 
     # Number of questions per batch.
     BATCH1_COUNT = 15
     BATCH2_COUNT = 15
     MIN_TOTAL_QUESTIONS = 30
 
+    def _update_progress(self, ctx: AgentContext, progress: float, message: str) -> None:
+        if ctx.task:
+            set_agent_progress(
+                ctx.db,
+                ctx.session_id,
+                self.role,
+                progress,
+                message=message,
+                task_id=ctx.task.id,
+                user_id=ctx.user.id,
+            )
+
     def _call_batch(
         self,
         prompt_template,
-        ctx: AgentContext,
+        session_id: str,
+        title: str,
+        keywords: str,
+        content_text: str,
         count: int,
         focus: str,
         existing_questions: list[str] | None = None,
@@ -37,8 +55,12 @@ class QuizAgent(BaseAgent):
     ) -> list[dict]:
         """Generate a single batch of questions.
 
-        If the returned valid questions are fewer than ``count``,
-        retry once with a stronger instruction. If still insufficient, raise.
+        ``session_id``/``title``/``keywords``/``content_text`` must be plain
+        strings pre-computed in the caller thread; this method must NOT touch
+        ``AgentContext.db`` because it may run inside a ``ThreadPoolExecutor``.
+
+        Returns whatever valid questions the model produced; callers decide
+        whether to raise or continue with fewer questions.
         """
         focus_text = focus
         if existing_questions:
@@ -47,9 +69,9 @@ class QuizAgent(BaseAgent):
             )
 
         prompt = prompt_template.render(
-            title=ctx.session.title or "未命名课次",
-            keywords=ctx.get_keywords_text(),
-            content=ctx.get_content_text_for_agent(max_length=8000),
+            title=title,
+            keywords=keywords,
+            content=content_text,
             count=count,
             focus=focus_text,
         )
@@ -61,14 +83,14 @@ class QuizAgent(BaseAgent):
         if retry:
             logger.info(
                 "quiz_agent_batch_retry session_id=%s requested=%s actual=%s",
-                ctx.session_id,
+                session_id,
                 count,
                 len(questions),
             )
             retry_prompt = prompt_template.render(
-                title=ctx.session.title or "未命名课次",
-                keywords=ctx.get_keywords_text(),
-                content=ctx.get_content_text_for_agent(max_length=8000),
+                title=title,
+                keywords=keywords,
+                content=content_text,
                 count=count,
                 focus=focus_text
                 + f"\n\n注意：上一轮只返回了 {len(questions)} 道有效题目，"
@@ -78,10 +100,6 @@ class QuizAgent(BaseAgent):
             if len(retry_questions) >= len(questions):
                 questions = retry_questions
 
-        if len(questions) < count:
-            raise ValueError(
-                f"AI 返回的题目数量不足: 要求 {count} 道，实际仅 {len(questions)} 道有效题目"
-            )
         return questions[:count]
 
     def _try_generate(
@@ -116,43 +134,84 @@ class QuizAgent(BaseAgent):
         t = re.sub(r"[。？?！!，,、；;：:\"\"''（）()【】\[\]{}]+", "", t)
         return t.strip()
 
-    def _update_progress(self, ctx: AgentContext, progress: float) -> None:
-        if ctx.task:
-            ctx.task.progress = progress
-            ctx.db.commit()
-
     def run(self, ctx: AgentContext) -> AgentResult:
         started = time.monotonic()
+        warning_message: str | None = None
+
         try:
             content_text = ctx.get_content_text_for_agent(max_length=8000)
             if not content_text.strip():
                 return AgentResult(success=False, error_message="没有可用的索引内容")
 
             prompt_template = self.load_prompt_template()
+            self._update_progress(ctx, 0.10, "准备课程内容")
 
-            # Batch 1: easy questions (基础概念)
-            batch1 = self._call_batch(
-                prompt_template,
-                ctx,
-                count=self.BATCH1_COUNT,
-                focus="请生成基础概念题，侧重课程中最基础、最容易理解的知识点，难度为简单。",
-            )
-            self._update_progress(ctx, 0.45)
+            # Pre-compute all ORM-dependent values in the caller thread; the
+            # worker threads must not touch AgentContext.db (SQLAlchemy Session
+            # is not thread-safe).
+            session_id = ctx.session_id
+            title = ctx.session.title or "未命名课次"
+            keywords = ctx.get_keywords_text()
 
-            # Batch 2: medium/hard questions (细节与难点)
-            batch1_texts = [q["question"] for q in batch1]
-            batch2 = self._call_batch(
-                prompt_template,
-                ctx,
-                count=self.BATCH2_COUNT,
-                focus="请生成进阶题，侧重课程的细节、难点和深入理解，难度为中等或较难。",
-                existing_questions=batch1_texts,
-            )
-            self._update_progress(ctx, 0.85)
+            # The two independent difficulty bands are requested concurrently.
+            # They use distinct prompts; global deduplication and a bounded fill
+            # request below handle any overlap.
+            self._update_progress(ctx, 0.20, "题库生成中（0/30 题）")
+            batch_specs = {
+                "easy": (
+                    self.BATCH1_COUNT,
+                    "请生成基础概念题，侧重课程中最基础、最容易理解的知识点，难度为简单。",
+                ),
+                "advanced": (
+                    self.BATCH2_COUNT,
+                    "请生成进阶题，侧重课程的细节、难点和深入理解，难度为中等或较难。",
+                ),
+            }
+            batches: dict[str, list[dict]] = {"easy": [], "advanced": []}
+            completed = 0
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="quiz-batch") as executor:
+                futures = {
+                    executor.submit(
+                        self._call_batch,
+                        prompt_template,
+                        session_id,
+                        title,
+                        keywords,
+                        content_text,
+                        count,
+                        focus,
+                    ): name
+                    for name, (count, focus) in batch_specs.items()
+                }
+                for future in as_completed(futures):
+                    name = futures[future]
+                    try:
+                        batches[name] = future.result()
+                    except Exception as batch_error:
+                        logger.warning(
+                            "quiz_agent_batch_failed session_id=%s batch=%s error=%s",
+                            ctx.session_id,
+                            name,
+                            batch_error,
+                        )
+                    completed += 1
+                    generated = sum(len(items) for items in batches.values())
+                    progress = 0.20 + (0.55 * completed / len(batch_specs))
+                    self._update_progress(
+                        ctx,
+                        progress,
+                        f"题库生成中（{min(generated, 30)}/30 题）",
+                    )
+
+            batch1 = batches["easy"]
+            batch2 = batches["advanced"]
+            if not batch1 and not batch2:
+                raise ValueError("题库两批生成均失败，请稍后重试")
 
             all_questions = batch1 + batch2
 
             # Hard deduplication by normalized question text
+            self._update_progress(ctx, 0.85, "题目去重与补全")
             seen_normalized: set[str] = set()
             deduped: list[dict] = []
             for q in all_questions:
@@ -162,10 +221,39 @@ class QuizAgent(BaseAgent):
                     deduped.append(q)
             all_questions = deduped
 
+            self._update_progress(ctx, 0.90, "正在补充缺少题目")
+
+            # If we still lack questions, try a fill batch focused on remaining angles.
+            if 0 < len(all_questions) < self.MIN_TOTAL_QUESTIONS:
+                missing = self.MIN_TOTAL_QUESTIONS - len(all_questions)
+                existing_texts = [q["question"] for q in all_questions]
+                fill = self._call_batch(
+                    prompt_template,
+                    session_id,
+                    title,
+                    keywords,
+                    content_text,
+                    count=missing,
+                    focus=(
+                        "请补充生成与已有题目不重复的单选题，"
+                        "可从概念定义、应用场景、对比区别、步骤流程、易错点等角度扩展。"
+                    ),
+                    existing_questions=existing_texts,
+                    retry=False,
+                )
+                for q in fill:
+                    norm = self._normalize_question(q.get("question", ""))
+                    if norm and norm not in seen_normalized:
+                        seen_normalized.add(norm)
+                        deduped.append(q)
+                all_questions = deduped
+
             if len(all_questions) < self.MIN_TOTAL_QUESTIONS:
-                raise ValueError(
-                    f"题库题目数量不足: 去重后共 {len(all_questions)} 道，"
-                    f"至少需要 {self.MIN_TOTAL_QUESTIONS} 道"
+                warning_message = f"题量不足（仅生成 {len(all_questions)} 题）"
+                logger.warning(
+                    "quiz_agent_insufficient_questions session_id=%s total=%s",
+                    ctx.session_id,
+                    len(all_questions),
                 )
 
             for i, q in enumerate(all_questions, 1):
@@ -180,18 +268,34 @@ class QuizAgent(BaseAgent):
             self.save_to_vocabulary(
                 ctx,
                 bank_data,
-                extra={"content_hash": content_hash},
+                extra={"content_hash": content_hash, "message": warning_message},
             )
             ctx.db.commit()
 
+            if ctx.task:
+                set_agent_ready(
+                    ctx.db,
+                    ctx.session_id,
+                    self.role,
+                    ctx.task.id,
+                    content_hash=content_hash,
+                    message=warning_message or "完成",
+                    user_id=ctx.user.id,
+                )
+
             logger.info(
-                "quiz_agent_success session_id=%s user_id=%s elapsed_ms=%s",
+                "quiz_agent_success session_id=%s user_id=%s questions=%s warning=%s elapsed_ms=%s",
                 ctx.session_id,
                 ctx.user.id,
+                len(all_questions),
+                warning_message,
                 int((time.monotonic() - started) * 1000),
             )
-            return AgentResult(success=True, data=bank_data)
+            return AgentResult(success=True, data=bank_data, warning_message=warning_message)
         except Exception as e:
             logger.exception("quiz_agent_failed session_id=%s", ctx.session_id)
-            ctx.db.rollback()
+            try:
+                ctx.db.rollback()
+            except Exception:
+                logger.warning("suppressed_exception", exc_info=True)
             return AgentResult(success=False, error_message=str(e))

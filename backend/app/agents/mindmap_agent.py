@@ -5,6 +5,7 @@ import time
 
 from app.agents.base import AgentContext, AgentResult, BaseAgent
 from app.agents.normalizers import normalize_mind_map_data
+from app.services.agent_state_service import set_agent_progress, set_agent_ready
 from app.services.vector_service import _compute_session_content_hash
 
 logger = logging.getLogger(__name__)
@@ -19,12 +20,25 @@ class MindmapAgent(BaseAgent):
     prompt_name = "mindmap"
 
     temperature = 0.3
-    max_tokens = 4000
+    max_tokens = 5000
+    timeout = 90.0
+
+    def _update_progress(self, ctx: AgentContext, progress: float, message: str) -> None:
+        if ctx.task:
+            set_agent_progress(
+                ctx.db,
+                ctx.session_id,
+                self.role,
+                progress,
+                message=message,
+                task_id=ctx.task.id,
+                user_id=ctx.user.id,
+            )
 
     def run(self, ctx: AgentContext) -> AgentResult:
         started = time.monotonic()
         try:
-            content_text = ctx.get_content_text_for_agent(max_length=6000)
+            content_text = ctx.get_content_text_for_agent(max_length=12000)
             if not content_text.strip():
                 return AgentResult(success=False, error_message="没有可用的索引内容")
 
@@ -35,7 +49,12 @@ class MindmapAgent(BaseAgent):
                 content=content_text,
             )
 
+            self._update_progress(ctx, 0.10, "准备课程内容")
+            self._update_progress(ctx, 0.25, "调用 AI 模型生成导图")
+
             raw = self.call_llm(prompt_template, prompt)
+
+            self._update_progress(ctx, 0.80, "校验导图结构")
             mind_map_data = self.parse_json(raw, repair=True)
             mind_map_data = normalize_mind_map_data(mind_map_data)
 
@@ -45,7 +64,19 @@ class MindmapAgent(BaseAgent):
                 mind_map_data,
                 extra={"content_hash": content_hash},
             )
+            self._update_progress(ctx, 0.95, "保存知识导图")
             ctx.db.commit()
+
+            if ctx.task:
+                set_agent_ready(
+                    ctx.db,
+                    ctx.session_id,
+                    self.role,
+                    ctx.task.id,
+                    content_hash=content_hash,
+                    message="完成",
+                    user_id=ctx.user.id,
+                )
 
             logger.info(
                 "mindmap_agent_success session_id=%s user_id=%s elapsed_ms=%s",
@@ -56,5 +87,8 @@ class MindmapAgent(BaseAgent):
             return AgentResult(success=True, data=mind_map_data)
         except Exception as e:
             logger.exception("mindmap_agent_failed session_id=%s", ctx.session_id)
-            ctx.db.rollback()
+            try:
+                ctx.db.rollback()
+            except Exception:
+                logger.warning("suppressed_exception", exc_info=True)
             return AgentResult(success=False, error_message=str(e))

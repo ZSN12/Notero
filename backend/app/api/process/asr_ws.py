@@ -326,7 +326,7 @@ async def asr_websocket(
             payload = recognizer.finalize()
             _save_note_from_payload(session_id, payload)
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)
     except Exception as exc:
         logger.exception("asr_ws_error session_id=%s", session_id)
         try:
@@ -335,11 +335,11 @@ async def asr_websocket(
                 "detail": str(exc) or "内部错误",
             })
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)
     finally:
         recognizer.cleanup()
         manager.remove_recognizer(session_id)
         try:
             await websocket.close()
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)

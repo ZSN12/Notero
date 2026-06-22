@@ -7,7 +7,13 @@ export interface TranscriptChunk {
   display_text?: string;
   corrected_text?: string;
   correction_stage?: string;
-  timestamps?: Array<{ text: string; start: number; end: number }>;
+  timestamps?: Array<{ text: string; start_ms: number; end_ms: number; start?: number; end?: number }>;
+}
+
+export interface ParagraphTimeRange {
+  text: string;
+  start_ms: number;
+  end_ms: number;
 }
 
 export interface PPTSlide {
@@ -42,9 +48,21 @@ export interface BackendSession {
   id: string;
   notebook_id: string;
   title: string;
+  summary?: string;
   keywords: string[];
   status: string;
   created_at: string;
+}
+
+export interface StrokeAnnotation {
+  type: 'stroke';
+  color: string;
+  width: number;
+  points: { x: number; y: number }[];
+}
+
+export interface SessionAnnotations {
+  slides: Record<string, StrokeAnnotation[]>;
 }
 
 export interface BackendNote {
@@ -55,6 +73,7 @@ export interface BackendNote {
   ppt_images: PPTImageData[] | null;
   vocabulary: VocabularyItem[] | null;
   layout_blocks?: NoteLayoutBlock[] | null;
+  annotations?: SessionAnnotations | null;
   created_at: string;
 }
 
@@ -155,11 +174,12 @@ export interface MindMapData {
 
 export interface MindMapStatus {
   session_id: string;
-  status: 'empty' | 'not_generated' | 'generating' | 'ready' | 'stale' | 'error';
+  status: 'empty' | 'not_generated' | 'queued' | 'generating' | 'ready' | 'stale' | 'error';
   mind_map: MindMapData | null;
   generated_at?: string;
   task_id?: string;
   progress?: number;
+  message?: string | null;
   error?: string | null;
 }
 
@@ -184,10 +204,11 @@ export interface QuizQuestion {
 
 export interface QuizBankStatus {
   session_id: string;
-  status: 'empty' | 'not_generated' | 'generating' | 'ready' | 'stale' | 'error';
+  status: 'empty' | 'not_generated' | 'queued' | 'generating' | 'ready' | 'stale' | 'error';
   question_count: number;
   task_id?: string | null;
   progress?: number;
+  message?: string | null;
   error?: string | null;
 }
 
@@ -263,6 +284,16 @@ export interface RAGSource {
   metadata?: Record<string, unknown>;
 }
 
+export interface RAGMessage {
+  id: string;
+  session_id: string;
+  notebook_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  sources?: RAGSource[];
+  created_at: string;
+}
+
 export interface RAGCallbacks {
   onStatus: (message: string) => void;
   onChunk: (text: string) => void;
@@ -272,7 +303,7 @@ export interface RAGCallbacks {
 }
 
 export type ProcessingStage = 'upload_transcribe' | 'recording_finalize' | 'transcript_finalize' | 'transcript_organize' | 'vector_index' | 'mindmap' | 'quiz_bank';
-export type ProcessingStatusValue = 'idle' | 'running' | 'ready' | 'error' | 'stale' | 'fallback';
+export type ProcessingStatusValue = 'idle' | 'queued' | 'running' | 'ready' | 'partial' | 'error' | 'stale' | 'fallback';
 
 export interface ProcessingStageState {
   status: ProcessingStatusValue;
@@ -300,6 +331,7 @@ export interface SessionProcessingStatus {
   can_auto_generate: boolean;
   can_ask_rag: boolean;
   needs_user_action: boolean;
+  agent_timeout_seconds: number;
   latest_tasks: AgentTaskSummary[];
   vector_chunks_count: number;
 }

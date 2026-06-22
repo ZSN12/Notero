@@ -257,7 +257,7 @@ class StreamingRecognizer:
             try:
                 self._asr_session.finalize()
             except Exception:
-                pass
+                logger.warning("suppressed_exception", exc_info=True)
             self._asr_session = None
         self.audio_buffer = bytearray()
 
@@ -279,7 +279,7 @@ class StreamingRecognizer:
                     with wave.open(str(output_path), "rb") as wf:
                         existing_frames = bytearray(wf.readframes(wf.getnframes()))
                 except Exception:
-                    pass
+                    logger.warning("suppressed_exception", exc_info=True)
 
             combined = existing_frames + self.audio_buffer
 

@@ -175,6 +175,12 @@ class TestScheduleCorrection:
             schedule_correction("sid", "course", ["kw"], db, force=True)
             assert mock_thread.call_count == 1
 
+    def _wait_for_task_clear(self, timeout: float = 2.0) -> None:
+        import time
+        deadline = time.monotonic() + timeout
+        while "sid" in _correction_tasks and time.monotonic() < deadline:
+            time.sleep(0.05)
+
     def test_thread_runs_correction(self):
         import time
         mock_db = MagicMock()
@@ -186,30 +192,31 @@ class TestScheduleCorrection:
 
         with patch("app.core.database.SessionLocal", return_value=mock_db):
             with patch("app.api.process.correction.correct_uncorrected_transcripts_from_data") as mock_correct:
-                schedule_correction("sid", "course", ["kw"], None, force=True, delay_seconds=0.1)
-                time.sleep(0.3)
+                schedule_correction("sid", "course", ["kw"], None, force=True, delay_seconds=0.05)
+                deadline = time.monotonic() + 2.0
+                while not mock_correct.called and time.monotonic() < deadline:
+                    time.sleep(0.05)
                 mock_correct.assert_called_once()
                 # Task should be cleared after completion
+                self._wait_for_task_clear()
                 assert "sid" not in _correction_tasks
 
     def test_thread_skips_empty_note(self):
-        import time
         mock_db = MagicMock()
         mock_db.query().filter().first.return_value = None
 
         with patch("app.core.database.SessionLocal", return_value=mock_db):
-            schedule_correction("sid", "course", ["kw"], None, force=True, delay_seconds=0.1)
-            time.sleep(0.3)
+            schedule_correction("sid", "course", ["kw"], None, force=True, delay_seconds=0.05)
+            self._wait_for_task_clear()
             assert "sid" not in _correction_tasks
 
     def test_thread_skips_no_text(self):
-        import time
         mock_db = MagicMock()
         note = MagicMock()
         note.transcript = [{"chunk_index": 0, "text": ""}]
         mock_db.query().filter().first.return_value = note
 
         with patch("app.core.database.SessionLocal", return_value=mock_db):
-            schedule_correction("sid", "course", ["kw"], None, force=True, delay_seconds=0.1)
-            time.sleep(0.3)
+            schedule_correction("sid", "course", ["kw"], None, force=True, delay_seconds=0.05)
+            self._wait_for_task_clear()
             assert "sid" not in _correction_tasks

@@ -129,6 +129,7 @@ def export_notebook(
 
         bundle = {
             "title": sess.title,
+            "summary": sess.summary,
             "keywords": sess.keywords or [],
         }
 
@@ -173,7 +174,7 @@ def import_notebook(
     db.flush()
 
     for sess_data in data.sessions:
-        session = DBSession(notebook_id=notebook.id, title=sess_data.title, keywords=sess_data.keywords or [])
+        session = DBSession(notebook_id=notebook.id, title=sess_data.title, summary=sess_data.summary, keywords=sess_data.keywords or [])
         db.add(session)
         db.flush()
 

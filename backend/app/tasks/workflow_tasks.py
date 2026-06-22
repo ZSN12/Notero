@@ -14,6 +14,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models import AgentWorkflow
+from app.services.agent_state_service import INTERRUPTED_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ def _mark_stale_roles(
                 heartbeat_at,
             )
             workflow.role_states[role]["status"] = "error"
-            workflow.role_states[role]["error_message"] = "Task timed out (no heartbeat)"
+            workflow.role_states[role]["error_message"] = INTERRUPTED_MESSAGE
             workflow.role_states = dict(workflow.role_states)
             flag_modified(workflow, "role_states")
             changed = True

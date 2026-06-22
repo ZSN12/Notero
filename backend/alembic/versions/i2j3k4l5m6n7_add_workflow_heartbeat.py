@@ -8,6 +8,7 @@ Create Date: 2026-06-16 09:00:00.000000
 from typing import Sequence, Union
 
 from alembic import op
+from sqlalchemy import inspect
 import sqlalchemy as sa
 
 
@@ -19,6 +20,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    columns = {c["name"] for c in inspect(bind).get_columns("agent_workflows")}
+    if "last_heartbeat_at" in columns:
+        return
     op.add_column(
         "agent_workflows",
         sa.Column("last_heartbeat_at", sa.DateTime(timezone=True), nullable=True),

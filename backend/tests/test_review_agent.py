@@ -127,7 +127,7 @@ class TestRun:
     def test_run_empty_content(self):
         agent = ReviewPlannerAgent()
         ctx = MagicMock()
-        ctx.get_content_text.return_value = ""
+        ctx.get_content_text_for_agent.return_value = ""
         result = agent.run(ctx)
         assert result.success is False
         assert "没有可用的索引内容" in result.error_message

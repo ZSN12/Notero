@@ -7,8 +7,9 @@ import subprocess
 import tempfile
 import wave
 
-from fastapi import APIRouter, BackgroundTasks, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -20,7 +21,6 @@ from app.services.state_service import set_running, set_ready, set_error, set_fa
 from app.services.vector_service import build_session_index, _compute_session_content_hash
 from app.middleware.metrics import observe_asr_processing
 from app.config import AUDIO_DIR, DASHSCOPE_API_KEY
-from app.api.agents import auto_run_agents
 
 MAX_AUDIO_CHUNK_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_FULL_AUDIO_SIZE = 500 * 1024 * 1024  # 500MB
@@ -60,6 +60,12 @@ def _check_asr_available() -> bool:
     return _FUNASR_AVAILABLE or bool(DASHSCOPE_API_KEY)
 
 router = APIRouter()
+
+
+class FinalizeTranscriptRequest(BaseModel):
+    auto_generate: bool = True
+    force: bool = False
+    retry_failed_only: bool = False
 
 
 async def _correct_window_for_stream(
@@ -266,12 +272,12 @@ def _cleanup_temp_files(temp_path: str, wav_path: str | None) -> None:
         try:
             os.unlink(temp_path)
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)
     if wav_path and os.path.exists(wav_path):
         try:
             os.unlink(wav_path)
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)
 
 
 async def _generate_audio_sse(
@@ -554,7 +560,7 @@ def _find_ffmpeg() -> str | None:
         if p:
             candidates.append(p)
     except Exception:
-        pass
+        logger.warning("suppressed_exception", exc_info=True)
 
     for c in candidates:
         if shutil.which(c):
@@ -584,7 +590,7 @@ def concatenate_wav_files(wav_paths: list[str], output_path: str) -> None:
                     with wave.open(path, 'rb') as pf:
                         total_frames += pf.getnframes()
                 except Exception:
-                    pass
+                    logger.warning("suppressed_exception", exc_info=True)
     except Exception:
         logger.exception("audio_concat_read_header_failed")
         return
@@ -739,7 +745,7 @@ async def stream_audio_process(
             if os.path.exists(audio_path):
                 os.unlink(audio_path)
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)
 
 
 @router.post("/audio-finish")
@@ -747,14 +753,11 @@ async def finish_recording(
     session_id: str = "",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-    background_tasks: BackgroundTasks = None,
 ):
-    """Called when recording stops. Concatenates all saved chunks into a single WAV file.
+    """Concatenate recording chunks without running AI finalization.
 
-    This endpoint only handles audio concatenation and cleanup. It does NOT run AI
-    finalization automatically. After it returns "finished", the frontend can prompt
-    the user to click "AI 整理" which calls /api/process/transcript-finalize or
-    /api/process/session/{id}/restructure.
+    Real-time recording remains user-controlled: stopping saves audio and the
+    current transcript; the explicit AI organize action calls transcript-finalize.
     """
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
@@ -784,15 +787,14 @@ async def finish_recording(
             try:
                 chunk_file.unlink()
             except Exception:
-                pass
+                logger.warning("suppressed_exception", exc_info=True)
         try:
             chunk_dir.rmdir()
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)
 
         set_ready(db, session_id, "recording_finalize", commit=False)
         db.commit()
-
         return {"status": "finished", "audio_path": str(output_path), "note": None}
     except Exception as e:
         logger.exception("audio_finish_failed session_id=%s user_id=%s", session_id, current_user.id)
@@ -834,11 +836,11 @@ def delete_audio(
                 f.unlink()
                 deleted.append(str(f))
             except Exception:
-                pass
+                logger.warning("suppressed_exception", exc_info=True)
         try:
             chunk_dir.rmdir()
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)
 
     logger.info("audio_deleted session_id=%s user_id=%s files=%s", session_id, current_user.id, len(deleted))
     return {"status": "deleted", "files": len(deleted)}
@@ -997,25 +999,25 @@ async def process_audio_batch_stream(
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
         except Exception:
-            pass
+            logger.warning("suppressed_exception", exc_info=True)
         if wav_path and os.path.exists(wav_path):
             try:
                 os.unlink(wav_path)
             except Exception:
-                pass
+                logger.warning("suppressed_exception", exc_info=True)
         for sp in segment_paths:
             if sp != process_path and os.path.exists(sp):
                 try:
                     os.unlink(sp)
                 except Exception:
-                    pass
+                    logger.warning("suppressed_exception", exc_info=True)
         if segment_paths and segment_paths[0] != process_path:
             seg_dir = os.path.dirname(segment_paths[0])
             if seg_dir and os.path.exists(seg_dir) and "notero_segments_" in seg_dir:
                 try:
                     os.rmdir(seg_dir)
                 except Exception:
-                    pass
+                    logger.warning("suppressed_exception", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
 
 
@@ -1138,7 +1140,7 @@ async def finish_audio_chunk_upload(
             p.unlink()
         chunk_dir.rmdir()
     except Exception:
-        pass
+        logger.warning("suppressed_exception", exc_info=True)
 
     # Convert to WAV if needed
     wav_path = None
@@ -1161,7 +1163,7 @@ async def finish_audio_chunk_upload(
                         process_path = wav_path
                         converted = True
                 except Exception:
-                    pass
+                    logger.warning("suppressed_exception", exc_info=True)
             if not converted:
                 logger.warning("audio_chunk_finish_convert_failed session_id=%s", session_id)
                 process_path = temp_path
@@ -1197,7 +1199,7 @@ async def finish_audio_chunk_upload(
 @router.post("/transcript-finalize")
 def finalize_transcript(
     session_id: str = "",
-    body: dict | None = None,
+    body: FinalizeTranscriptRequest | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -1205,8 +1207,6 @@ def finalize_transcript(
 
     Delegates to the canonical finalize_session_transcript in transcript.py so
     upload, real-time stop, and manual restructure all share the same logic.
-    Returns `{ note: {...}, agents: {...} | null }` so the frontend can refresh
-    the transcript and show started agent tasks.
     """
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
@@ -1223,13 +1223,26 @@ def finalize_transcript(
     if not note or not note.transcript:
         raise HTTPException(status_code=404, detail="No transcript found for this session")
 
-    result = finalize_session_transcript(session_id, db, current_user)
+    request = body or FinalizeTranscriptRequest()
+    result = finalize_session_transcript(
+        session_id, db, current_user, retry_failed_only=request.retry_failed_only
+    )
     note_payload = result.get("note", result)
 
-    agents_result = None
-    auto_generate = bool(body.get("auto_generate", True)) if body else True
-    if auto_generate:
-        force = bool(body.get("force", False)) if body else False
-        agents_result = auto_run_agents(session_id, current_user.id, force=force)
+    agents = None
+    transcript = note_payload.get("transcript", []) if isinstance(note_payload, dict) else []
+    final_entry = transcript[-1] if transcript and isinstance(transcript[-1], dict) else {}
+    if request.auto_generate and final_entry.get("is_ai_corrected") is True:
+        # Import lazily to keep the process router independent from agent router
+        # initialization. auto_run_agents owns its DB session and deduplicates
+        # active/fresh work by task state and content hash.
+        from app.api.agents import auto_run_agents
 
-    return {"note": note_payload, "agents": agents_result}
+        agents = auto_run_agents(
+            session_id,
+            str(current_user.id),
+            roles=["mindmap", "quiz"],
+            force=request.force,
+        )
+
+    return {"note": note_payload, "agents": agents}

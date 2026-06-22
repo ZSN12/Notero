@@ -16,8 +16,9 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.core.database import SessionLocal
 from app.models import Note, User, SessionProcessingState
-from app.services.term_corrector import corrector
+from app.services.term_corrector import corrector, RestructureResult
 from app.services.state_service import get_state
+from app.agents.transcript_agent import ParagraphRange
 
 
 def auth_headers(client: TestClient) -> dict[str, str]:
@@ -110,50 +111,69 @@ def test_finalize_returns_local_on_deepseek_failure():
 # -- Integration: restructure endpoint --
 
 def test_restructure_endpoint_creates_corrected_text():
-    with patch("app.api.process.transcript.corrector._client", MagicMock()):
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content.strip.return_value = "今天我们学习了单例模式。"
-        from app.api.process import transcript as transcript_module
-        # Patch the corrector's restructure call
-        with patch.object(transcript_module.corrector, "restructure_transcript", return_value="今天我们学习了单例模式。"):
-            with patch.object(transcript_module.corrector, "preserves_source_content", return_value=True):
-                with TestClient(app) as client:
-                    headers = auth_headers(client)
-                    _, session_id = _create_notebook_session_note(client, headers, content="raw text")
+    from app.api.process import transcript as transcript_module
+    with patch.object(
+        transcript_module.corrector,
+        "restructure_transcript_chunked",
+        return_value=RestructureResult(
+            text="今天我们学习了单例模式。",
+            local_text="raw text",
+            is_ai_corrected=True,
+            chunks_total=1,
+            chunks_succeeded=1,
+            chunks_failed=0,
+        ),
+    ):
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            _, session_id = _create_notebook_session_note(client, headers, content="raw text")
 
-                    # Seed a transcript with raw_text
-                    db = SessionLocal()
-                    try:
-                        note = db.query(Note).filter(Note.session_id == session_id).first()
-                        note.transcript = [{
-                            "chunk_index": 0,
-                            "text": "raw text",
-                            "raw_text": "raw text from ASR",
-                            "display_text": "raw text",
-                            "correction_stage": "final",
-                            "is_ai_corrected": False,
-                        }]
-                        db.commit()
-                    finally:
-                        db.close()
+            # Seed a transcript with raw_text
+            db = SessionLocal()
+            try:
+                note = db.query(Note).filter(Note.session_id == session_id).first()
+                note.transcript = [{
+                    "chunk_index": 0,
+                    "text": "raw text",
+                    "raw_text": "raw text from ASR",
+                    "display_text": "raw text",
+                    "correction_stage": "final",
+                    "is_ai_corrected": False,
+                }]
+                db.commit()
+            finally:
+                db.close()
 
-                    resp = client.post(
-                        f"/api/process/session/{session_id}/restructure",
-                        json={"force": True},
-                        headers=headers,
-                    )
-                    assert resp.status_code == 200, resp.text
-                    body = resp.json()
-                    note_data = body["note"]
-                    assert note_data["transcript"][0]["raw_text"] == "raw text from ASR"
-                    assert note_data["transcript"][0]["corrected_text"] is not None
-                    assert note_data["transcript"][0]["is_ai_corrected"] is True
+            resp = client.post(
+                f"/api/process/session/{session_id}/restructure",
+                json={"force": True},
+                headers=headers,
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            note_data = body["note"]
+            assert note_data["transcript"][0]["raw_text"] == "raw text from ASR"
+            assert note_data["transcript"][0]["corrected_text"] is not None
+            assert note_data["transcript"][0]["is_ai_corrected"] is True
 
 
 def test_restructure_endpoint_fallback_on_failure():
     from app.api.process import transcript as transcript_module
-    with patch.object(transcript_module.corrector, "restructure_transcript", side_effect=RuntimeError("API down")):
+    with patch.object(
+        transcript_module.corrector,
+        "restructure_transcript_chunked",
+        return_value=RestructureResult(
+            text="raw text",
+            local_text="raw text",
+            is_ai_corrected=False,
+            error_code="timeout",
+            error="AI 整理超时",
+            retryable=True,
+            chunks_total=1,
+            chunks_succeeded=0,
+            chunks_failed=1,
+        ),
+    ):
         with TestClient(app) as client:
             headers = auth_headers(client)
             _, session_id = _create_notebook_session_note(client, headers, content="raw text")
@@ -184,7 +204,7 @@ def test_restructure_endpoint_fallback_on_failure():
             assert note_data["transcript"][0]["raw_text"] == "raw text from ASR"
             assert note_data["transcript"][0]["corrected_text"] is None
             assert note_data["transcript"][0]["is_ai_corrected"] is False
-            assert note_data["transcript"][0]["correction_error"] == "AI 整理失败，已使用本地整理稿"
+            assert note_data["transcript"][0]["correction_error_code"] == "timeout"
 
 
 # -- Integration: streaming ASR finalize saves three tiers --
@@ -234,7 +254,18 @@ def test_streaming_asr_finalize_local_no_failure():
 def test_restructure_sets_ready_state_on_ai_success():
     """When AI correction succeeds, transcript_finalize state should be 'ready'."""
     from app.api.process import transcript as transcript_module
-    with patch.object(transcript_module.corrector, "restructure_transcript", return_value="AI corrected text."):
+    with patch.object(
+        transcript_module.corrector,
+        "restructure_transcript_chunked",
+        return_value=RestructureResult(
+            text="AI corrected text.",
+            local_text="raw text",
+            is_ai_corrected=True,
+            chunks_total=1,
+            chunks_succeeded=1,
+            chunks_failed=0,
+        ),
+    ):
         with patch.object(transcript_module.corrector, "preserves_source_content", return_value=True):
             with TestClient(app) as client:
                 headers = auth_headers(client)
@@ -273,7 +304,21 @@ def test_restructure_sets_ready_state_on_ai_success():
 def test_restructure_sets_fallback_state_on_ai_failure():
     """When AI correction fails, transcript_finalize state should be 'fallback'."""
     from app.api.process import transcript as transcript_module
-    with patch.object(transcript_module.corrector, "restructure_transcript", side_effect=RuntimeError("API down")):
+    with patch.object(
+        transcript_module.corrector,
+        "restructure_transcript_chunked",
+        return_value=RestructureResult(
+            text="raw text",
+            local_text="raw text",
+            is_ai_corrected=False,
+            error_code="timeout",
+            error="AI 整理超时",
+            retryable=True,
+            chunks_total=1,
+            chunks_succeeded=0,
+            chunks_failed=1,
+        ),
+    ):
         with TestClient(app) as client:
             headers = auth_headers(client)
             _, session_id = _create_notebook_session_note(client, headers)
@@ -312,7 +357,18 @@ def test_restructure_sets_fallback_state_on_ai_failure():
 def test_restructure_auto_triggers_vector_index_state():
     """After successful finalize, vector_index state should transition to 'ready'."""
     from app.api.process import transcript as transcript_module
-    with patch.object(transcript_module.corrector, "restructure_transcript", return_value="AI corrected text."):
+    with patch.object(
+        transcript_module.corrector,
+        "restructure_transcript_chunked",
+        return_value=RestructureResult(
+            text="AI corrected text.",
+            local_text="raw text",
+            is_ai_corrected=True,
+            chunks_total=1,
+            chunks_succeeded=1,
+            chunks_failed=0,
+        ),
+    ):
         with patch.object(transcript_module.corrector, "preserves_source_content", return_value=True):
             with patch("app.api.process.transcript.build_session_index", return_value=3):
                 with TestClient(app) as client:

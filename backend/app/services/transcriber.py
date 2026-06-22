@@ -1,6 +1,7 @@
 import os
 import tempfile
 import logging
+from pathlib import Path
 from typing import List, Optional
 import numpy as np
 from app.config import DASHSCOPE_API_KEY, FUNASR_MODEL_DIR, FUNASR_MODEL_NAME, FUNASR_VAD_MODEL, FUNASR_PUNC_MODEL
@@ -37,6 +38,44 @@ class ASRSegment:
         }
 
 
+def _resolve_funasr_model(name: str) -> str:
+    """Return a local/cache path for a FunASR model id when available.
+
+    Priority:
+      1. <FUNASR_MODEL_DIR>/<name>
+      2. Standard ModelScope cache folder (~/.cache/modelscope/hub/models/iic/...)
+      3. The original model id (lets FunASR download if needed)
+    """
+    explicit = os.path.join(FUNASR_MODEL_DIR, name)
+    if os.path.exists(explicit):
+        return explicit
+
+    cache_root = Path.home() / ".cache" / "modelscope" / "hub" / "models" / "iic"
+    if not cache_root.exists():
+        return name
+
+    # Known FunASR default ids -> ModelScope cached folder names
+    mapping = {
+        "paraformer-zh": "speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        "fsmn-vad": "speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        "ct-punc": "punc_ct-transformer_cn-en-common-vocab471067-large",
+        "paraformer-zh-streaming": "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
+    }
+    cached_name = mapping.get(name)
+    if cached_name:
+        cached_path = cache_root / cached_name
+        if cached_path.exists():
+            return str(cached_path)
+
+    # Best-effort fallback: any cache folder whose name contains the tokenized id
+    token = name.replace("-", "_")
+    for candidate in cache_root.iterdir():
+        if candidate.is_dir() and token in candidate.name:
+            return str(candidate)
+
+    return name
+
+
 class Transcriber:
     """Speech-to-text service with FunASR fallback to DashScope cloud API."""
 
@@ -51,14 +90,10 @@ class Transcriber:
             return
         if _FUNASR_AVAILABLE:
             try:
-                model_path = os.path.join(FUNASR_MODEL_DIR, FUNASR_MODEL_NAME)
-                vad_model_path = os.path.join(FUNASR_MODEL_DIR, FUNASR_VAD_MODEL)
-                punc_model_path = os.path.join(FUNASR_MODEL_DIR, FUNASR_PUNC_MODEL)
-                
-                model_name = model_path if os.path.exists(model_path) else FUNASR_MODEL_NAME
-                vad_model_name = vad_model_path if os.path.exists(vad_model_path) else FUNASR_VAD_MODEL
-                punc_model_name = punc_model_path if os.path.exists(punc_model_path) else FUNASR_PUNC_MODEL
-                
+                model_name = _resolve_funasr_model(FUNASR_MODEL_NAME)
+                vad_model_name = _resolve_funasr_model(FUNASR_VAD_MODEL)
+                punc_model_name = _resolve_funasr_model(FUNASR_PUNC_MODEL)
+
                 self._model = AutoModel(
                     model=model_name,
                     vad_model=vad_model_name,
@@ -77,10 +112,8 @@ class Transcriber:
             return
         if _FUNASR_AVAILABLE:
             try:
-                streaming_model_name = "paraformer-zh-streaming"
-                streaming_model_path = os.path.join(FUNASR_MODEL_DIR, streaming_model_name)
-                model_name = streaming_model_path if os.path.exists(streaming_model_path) else streaming_model_name
-                
+                model_name = _resolve_funasr_model("paraformer-zh-streaming")
+
                 self._streaming_model = AutoModel(
                     model=model_name,
                     disable_update=True,

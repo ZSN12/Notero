@@ -6,7 +6,6 @@ Stores results in Note.vocabulary with kind="mind_map".
 
 import logging
 import os
-import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -14,37 +13,31 @@ from typing import Optional
 from app.agents import AgentContext, get_agent
 from app.agents.normalizers import normalize_mind_map_data
 from app.config import DEEPSEEK_API_KEY
-from openai import OpenAI  # noqa: F401  kept for test compatibility
 from app.core.database import SessionLocal
+from app.core.locks import get_session_task_lock
 from app.core.task_runner import run_agent_task, wait_for_agent_threads
 from app.models import Note, Session, Notebook, User, Task
 from sqlalchemy.orm import Session as DBSessionType
+from app.services.session_service import get_user_session as _get_session_by_user
 from app.services.vector_service import _compute_session_content_hash
-from app.services.state_service import set_running, set_ready, set_error, get_state
 from app.services.note_utils import get_canonical_note_text
+from app.services.state_service import get_state
+from app.services.agent_state_service import (
+    set_agent_running,
+    set_agent_ready,
+    set_agent_error,
+)
+from app.services.vocabulary_service import (
+    delete_vocabulary_entries,
+    get_vocabulary_entry,
+    save_vocabulary_entry,
+)
 
 
 logger = logging.getLogger(__name__)
 
 TASK_TYPE = "agent_mindmap"
 ACTIVE_TASK_STATUSES = {"pending", "running"}
-
-# Per-(session_id, task_type) lock to prevent races when checking for active
-# tasks and creating new ones.
-_START_LOCKS: dict[str, threading.Lock] = {}
-_START_LOCKS_GUARD = threading.Lock()
-
-
-def _get_start_lock(session_id: str, task_type: str) -> threading.Lock:
-    key = f"{session_id}:{task_type}"
-    lock = _START_LOCKS.get(key)
-    if lock is None:
-        with _START_LOCKS_GUARD:
-            lock = _START_LOCKS.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                _START_LOCKS[key] = lock
-    return lock
 
 
 # ── Mind map vocabulary helpers ──
@@ -59,57 +52,34 @@ def _get_mind_map_from_vocabulary(note: Note) -> Optional[dict]:
     return None
 
 
-def _set_mind_map_in_vocabulary(note: Note, data: dict, content_hash: str):
-    """Write mind_map entry to note.vocabulary, preserving other kinds."""
-    existing = note.vocabulary if isinstance(note.vocabulary, list) else []
-    next_items = [
-        item for item in existing
-        if not (isinstance(item, dict) and item.get("kind") == "mind_map")
-    ]
-    next_items.append({
+def _set_mind_map_in_vocabulary(
+    db: DBSessionType, note: Note, data: dict, content_hash: str
+):
+    """Write mind_map entry to note.vocabulary, preserving other kinds.
+
+    Uses ``SELECT ... FOR UPDATE`` so concurrent agents do not overwrite other
+    vocabulary entries.
+    """
+    entry = {
         "kind": "mind_map",
         "data": data,
         "content_hash": content_hash,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-    })
-    note.vocabulary = next_items
+    }
+    save_vocabulary_entry(db, note.id, entry)
 
 
-def _clear_mind_map_from_vocabulary(note: Note):
+def _clear_mind_map_from_vocabulary(db: DBSessionType, note: Note):
     """Remove mind_map entry from note.vocabulary."""
-    existing = note.vocabulary if isinstance(note.vocabulary, list) else []
-    next_items = [
-        item for item in existing
-        if not (isinstance(item, dict) and item.get("kind") == "mind_map")
-    ]
-    note.vocabulary = next_items
-
-
-# ── Content extraction ──
-
-def _extract_content_for_prompt(note: Note) -> str:
-    """Extract all note content into a single text for the AI prompt.
-
-    Uses the canonical note text (transcript + notes + PPT) so that user edits
-    and deletions are respected and the same source is used across agents.
-    """
-    text = get_canonical_note_text(note, include_ppt=True)
-    if text.strip():
-        return text.strip()
-
-    # Fallback: raw content if canonical extraction returned nothing.
-    if note.content:
-        return note.content.strip()
-
-    return ""
+    delete_vocabulary_entries(
+        db, note.id, lambda item: item.get("kind") == "mind_map"
+    )
 
 
 # ── Generation ──
 
 def _get_session_for_user(session_id: str, user: User, db: DBSessionType) -> Session | None:
-    return db.query(Session).filter(
-        Session.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == user.id).first()
+    return _get_session_by_user(db, session_id, user.id)
 
 
 def _get_latest_task(session_id: str, db: DBSessionType) -> Task | None:
@@ -154,7 +124,7 @@ def generate_mind_map(session_id: str, user: User, db: DBSessionType) -> dict:
     if not notebook:
         raise ValueError("Notebook not found")
 
-    content_text = _extract_content_for_prompt(note)
+    content_text = get_canonical_note_text(note, include_ppt=True)
     if not content_text.strip():
         raise ValueError("No indexable content in note")
 
@@ -183,12 +153,15 @@ def _run_mind_map_task(task_id: str, session_id: str, user_id: str):
         if not task or not user:
             return
 
-        task.status = "running"
-        task.progress = 0.1
-        task.error_message = None
-        db.commit()
-
-        set_running(db, session_id, "mindmap", progress=0.1)
+        set_agent_running(
+            db,
+            session_id,
+            "mindmap",
+            task_id,
+            progress=0.1,
+            message="准备内容",
+            user_id=user_id,
+        )
 
         generate_mind_map(session_id, user, db)
 
@@ -197,14 +170,16 @@ def _run_mind_map_task(task_id: str, session_id: str, user_id: str):
         if note:
             db.refresh(note)
 
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
-            task.status = "success"
-            task.progress = 1.0
-            task.error_message = None
-            current_hash = _compute_session_content_hash(note) if note else ""
-            set_ready(db, session_id, "mindmap", content_hash=current_hash)
-            db.commit()
+        current_hash = _compute_session_content_hash(note) if note else ""
+        set_agent_ready(
+            db,
+            session_id,
+            "mindmap",
+            task_id,
+            content_hash=current_hash,
+            message="完成",
+            user_id=user_id,
+        )
         logger.info(
             "mind_map_task_success task_id=%s session_id=%s user_id=%s elapsed_ms=%s",
             task_id,
@@ -214,13 +189,7 @@ def _run_mind_map_task(task_id: str, session_id: str, user_id: str):
         )
     except Exception as e:
         db.rollback()
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if task:
-            task.status = "error"
-            task.progress = 1.0
-            task.error_message = str(e)
-            db.commit()
-        set_error(db, session_id, "mindmap", error_message=str(e))
+        set_agent_error(db, session_id, "mindmap", task_id, str(e), user_id=user_id)
         logger.exception(
             "mind_map_task_failed task_id=%s session_id=%s user_id=%s",
             task_id,
@@ -247,11 +216,11 @@ def start_mind_map_generation(session_id: str, user: User, db: DBSessionType, fo
     note = db.query(Note).filter(Note.session_id == session_id).first()
     if not note:
         raise ValueError("No note content found")
-    content_text = _extract_content_for_prompt(note)
+    content_text = get_canonical_note_text(note, include_ppt=True)
     if not content_text.strip():
         raise ValueError("No indexable content in note")
 
-    with _get_start_lock(session_id, TASK_TYPE):
+    with get_session_task_lock(session_id, TASK_TYPE):
         # Re-check inside the lock to close the race window.
         db.expire_all()
         status = get_mind_map_status(session_id, user, db)
@@ -299,10 +268,10 @@ def get_mind_map_status(session_id: str, user: User, db: DBSessionType) -> dict:
         raise ValueError("Session not found or access denied")
 
     note = db.query(Note).filter(Note.session_id == session_id).first()
-    has_content = bool(note and (note.content or note.transcript or note.ppt_images or note.layout_blocks))
+    has_content = bool(note and get_canonical_note_text(note, include_ppt=True).strip())
 
     if not has_content:
-        return {"session_id": session_id, "status": "empty", "mind_map": None, "error": None}
+        return {"session_id": session_id, "status": "empty", "mind_map": None, "message": None, "error": None}
 
     mm_entry = _get_mind_map_from_vocabulary(note) if note else None
     active_task = _get_active_task(session_id, db)
@@ -319,6 +288,7 @@ def get_mind_map_status(session_id: str, user: User, db: DBSessionType) -> dict:
             "session_id": session_id,
             "status": "generating",
             "mind_map": _build_mind_map(mm_entry) if mm_entry else None,
+            "message": None,
             **_task_payload(active_task),
         }
 
@@ -329,9 +299,10 @@ def get_mind_map_status(session_id: str, user: User, db: DBSessionType) -> dict:
                 "session_id": session_id,
                 "status": "error",
                 "mind_map": None,
+                "message": None,
                 **_task_payload(latest_task),
             }
-        return {"session_id": session_id, "status": "not_generated", "mind_map": None, "error": None}
+        return {"session_id": session_id, "status": "not_generated", "mind_map": None, "message": None, "error": None}
 
     # Check stale
     current_hash = _compute_session_content_hash(note) if note else ""
@@ -339,25 +310,34 @@ def get_mind_map_status(session_id: str, user: User, db: DBSessionType) -> dict:
     is_stale = indexed_hash != current_hash
 
     if is_stale:
-        # Content changed since the mind map was generated. Keep the existing
-        # map visible and mark as stale so the user can choose to regenerate;
-        # don't treat an older failed attempt as a current error.
+        latest_task = _get_latest_task(session_id, db)
+        if latest_task and latest_task.status == "error":
+            return {
+                "session_id": session_id,
+                "status": "error",
+                "mind_map": _build_mind_map(mm_entry),
+                "message": None,
+                **_task_payload(latest_task),
+            }
         return {
             "session_id": session_id,
             "status": "stale",
             "mind_map": _build_mind_map(mm_entry),
+            "message": None,
             "error": None,
         }
 
-    current_state = get_state(db, session_id, "mindmap")
-    if current_state and current_state.status != "ready":
-        set_ready(db, session_id, "mindmap")
+    # Do not forcibly promote the state to ready here. The agent runner already
+    # transitions the state correctly, and get_session_processing_status() has
+    # a proper fresh-output healing path. Promoting unconditionally could mark
+    # a still-running agent as ready and confuse the UI.
 
     return {
         "session_id": session_id,
         "status": "ready",
         "mind_map": _build_mind_map(mm_entry),
         "generated_at": mm_entry.get("generated_at"),
+        "message": None,
         "error": None,
     }
 
@@ -372,8 +352,7 @@ def delete_mind_map(session_id: str, user: User, db: DBSessionType) -> dict:
 
     note = db.query(Note).filter(Note.session_id == session_id).first()
     if note:
-        _clear_mind_map_from_vocabulary(note)
-        db.commit()
+        _clear_mind_map_from_vocabulary(db, note)
 
     return {"session_id": session_id, "status": "deleted"}
 
@@ -392,20 +371,11 @@ def save_mind_map_positions(
     if not note:
         raise ValueError("No note found for session")
 
-    existing = note.vocabulary if isinstance(note.vocabulary, list) else []
-    next_items = []
-    mm_item = None
-    for item in existing:
-        if isinstance(item, dict) and item.get("kind") == "mind_map":
-            mm_item = dict(item)
-            mm_item["positions"] = positions
-            next_items.append(mm_item)
-        else:
-            next_items.append(item)
-
+    mm_item = get_vocabulary_entry(note, "mind_map")
     if not mm_item:
         raise ValueError("No mind map found for session")
 
-    note.vocabulary = next_items
-    db.commit()
+    updated = dict(mm_item)
+    updated["positions"] = positions
+    save_vocabulary_entry(db, note.id, updated)
     return {"session_id": session_id, "status": "saved"}

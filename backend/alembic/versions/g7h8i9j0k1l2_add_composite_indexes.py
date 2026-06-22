@@ -24,18 +24,20 @@ def upgrade() -> None:
     backward compatibility; these composite indexes optimize multi-column
     lookups and sorting.
     """
+    bind = op.get_bind()
+    dialect = bind.dialect.name
     # Notebook list queries filter by user_id and sort by created_at
-    op.create_index('ix_notebooks_user_id_created', 'notebooks', ['user_id', 'created_at'])
+    op.create_index('ix_notebooks_user_id_created', 'notebooks', ['user_id', 'created_at'], if_not_exists=(dialect == 'postgresql'))
 
     # Session list queries filter by notebook_id and sort by created_at
-    op.create_index('ix_sessions_notebook_id_created', 'sessions', ['notebook_id', 'created_at'])
+    op.create_index('ix_sessions_notebook_id_created', 'sessions', ['notebook_id', 'created_at'], if_not_exists=(dialect == 'postgresql'))
 
     # Task status polling filters by session_id and status
-    op.create_index('ix_tasks_session_id_status', 'tasks', ['session_id', 'status'])
+    op.create_index('ix_tasks_session_id_status', 'tasks', ['session_id', 'status'], if_not_exists=(dialect == 'postgresql'))
 
     # Processing state lookups by session and by active status
-    op.create_index('ix_sps_session_id', 'session_processing_states', ['session_id'])
-    op.create_index('ix_sps_status_updated', 'session_processing_states', ['status', 'updated_at'])
+    op.create_index('ix_sps_session_id', 'session_processing_states', ['session_id'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_sps_status_updated', 'session_processing_states', ['status', 'updated_at'], if_not_exists=(dialect == 'postgresql'))
 
 
 def downgrade() -> None:

@@ -90,7 +90,7 @@ def _wait_for_agent_status(
 # ── Tests ──
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_single_agent_returns_200_and_ready(mock_openai_cls, client, auth_headers):
     """Single agent run should return 200 with data, not 202."""
     mock_client = MagicMock()
@@ -107,7 +107,7 @@ def test_single_agent_returns_200_and_ready(mock_openai_cls, client, auth_header
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_single_agent_reuses_active_task(mock_openai_cls, client, auth_headers, db):
     """When an active task exists, the endpoint should reuse it."""
     mock_client = MagicMock()
@@ -144,7 +144,7 @@ def test_single_agent_reuses_active_task(mock_openai_cls, client, auth_headers, 
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_single_agent_stale_after_content_change(mock_openai_cls, client, auth_headers):
     """After content changes, existing agent output should be considered stale."""
     mock_client = MagicMock()
@@ -182,7 +182,7 @@ def test_single_agent_stale_after_content_change(mock_openai_cls, client, auth_h
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_truncate_finish_reason_raises_error(mock_openai_cls, client, auth_headers):
     """If DeepSeek returns finish_reason='length', the agent should fail."""
     mock_client = MagicMock()
@@ -205,7 +205,7 @@ def test_truncate_finish_reason_raises_error(mock_openai_cls, client, auth_heade
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_run_all_agents_reuses_active_tasks(mock_openai_cls, client, auth_headers):
     """run_all_agents should reuse active tasks instead of spawning duplicates."""
     mock_client = MagicMock()
@@ -252,3 +252,44 @@ def test_run_all_agents_reuses_active_tasks(mock_openai_cls, client, auth_header
     # (call_count == 1).  Both are acceptable as long as no duplicate active
     # tasks exist simultaneously.
     assert mock_client.chat.completions.create.call_count <= 2
+
+
+@pytest.mark.integration
+@patch("app.core.llm.OpenAI")
+def test_run_all_agents_force_regenerates(mock_openai_cls, client, auth_headers):
+    """force=true should ignore fresh cached output and start a new workflow."""
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_response_for_agent("mindmap")
+
+    _, session_id = create_notebook_session_note(client, auth_headers, content="测试内容")
+
+    # First run generates ready output.
+    first = client.post(f"/api/agents/session/{session_id}/run/mindmap", headers=auth_headers)
+    assert first.status_code == 200
+    assert first.json()["status"] == "ready"
+
+    # Non-force run_all should reuse the ready mindmap output (transcript
+    # dependency may still need to run, so it can return 202 with reused=True).
+    reused = client.post(
+        f"/api/agents/session/{session_id}/run",
+        json={"roles": ["mindmap"]},
+        headers=auth_headers,
+    )
+    assert reused.status_code in (200, 202)
+    assert reused.json().get("reused") is True
+
+    # Force run_all must start a real workflow. The transcript dependency is
+    # not forced, so it may be reported as reused, but mindmap itself must be
+    # regenerated (not returned as ready/reused).
+    forced = client.post(
+        f"/api/agents/session/{session_id}/run",
+        json={"roles": ["mindmap"], "force": True},
+        headers=auth_headers,
+    )
+    assert forced.status_code == 202
+    forced_data = forced.json()
+    assert forced_data["workflow_id"] != "reused"
+    mindmap_agent = next(a for a in forced_data["agents"] if a["role"] == "mindmap")
+    assert mindmap_agent["status"] in ("pending", "running", "success")
+    assert mindmap_agent["status"] != "ready"

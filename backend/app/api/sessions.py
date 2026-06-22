@@ -1,14 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import func as sql_func
+import logging
+
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.api.schemas import SessionCreate, SessionUpdate, SessionResponse
 from app.models import Session as DBSession, Notebook, User, VectorChunk
 from app.services.file_service import delete_session_files
+from app.services.session_service import get_user_session
 from app.services.state_service import get_session_processing_status
 import secrets
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -62,9 +67,7 @@ def get_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == current_user.id).first()
+    session = get_user_session(db, session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
@@ -77,9 +80,7 @@ def update_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == current_user.id).first()
+    session = get_user_session(db, session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     for key, value in data.model_dump(exclude_unset=True).items():
@@ -92,27 +93,53 @@ def update_session(
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_session(
     session_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == current_user.id).first()
+    session = get_user_session(db, session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    # Remove vector_chunks for this session to avoid FK constraint violations.
-    db.query(VectorChunk).filter(VectorChunk.session_id == session_id).delete(
-        synchronize_session=False
-    )
 
-    delete_session_files(session_id, delete_audio=False)
-    # Atomically decrement session_count
-    db.query(Notebook).filter(Notebook.id == session.notebook_id).update(
-        {"session_count": sql_func.greatest(Notebook.session_count - 1, 0)}
-    )
-    db.delete(session)
-    db.commit()
+    try:
+        # Remove vector_chunks for this session to avoid FK constraint violations.
+        db.query(VectorChunk).filter(VectorChunk.session_id == session_id).delete(
+            synchronize_session=False
+        )
+
+        # Atomically decrement session_count
+        db.query(Notebook).filter(Notebook.id == session.notebook_id).update(
+            {"session_count": sql_func.greatest(Notebook.session_count - 1, 0)}
+        )
+        db.delete(session)
+        db.commit()
+    except Exception:
+        logger.exception(
+            "delete_session_failed session_id=%s user_id=%s",
+            session_id,
+            current_user.id,
+        )
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="删除课次失败，请稍后重试",
+        )
+
+    # File cleanup runs after the DB transaction is committed so that
+    # filesystem errors never leave the database in an inconsistent state.
+    background_tasks.add_task(_cleanup_session_files, session_id)
     return None
+
+
+def _cleanup_session_files(session_id: str) -> None:
+    try:
+        delete_session_files(session_id, delete_audio=False)
+    except Exception:
+        logger.warning(
+            "delete_session_files_failed session_id=%s",
+            session_id,
+            exc_info=True,
+        )
 
 
 # ── Share endpoints ──
@@ -126,9 +153,7 @@ def enable_share(
     current_user: User = Depends(get_current_user),
 ):
     """Enable sharing for a session, generating a share token."""
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == current_user.id).first()
+    session = get_user_session(db, session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -136,8 +161,12 @@ def enable_share(
     session.share_enabled = True
     session.share_token = token
     session.share_view_count = 0
-    if expires_in_hours is not None and expires_in_hours > 0:
-        session.share_expires_at = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
+    if expires_in_hours is not None:
+        if expires_in_hours > 0:
+            session.share_expires_at = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
+        else:
+            # Non-positive duration means already expired (used for testing/invalidating shares).
+            session.share_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     else:
         session.share_expires_at = None
     if max_views is not None and max_views > 0:
@@ -159,9 +188,7 @@ def disable_share(
     current_user: User = Depends(get_current_user),
 ):
     """Disable sharing for a session."""
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == current_user.id).first()
+    session = get_user_session(db, session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -182,9 +209,7 @@ def get_share_status(
     current_user: User = Depends(get_current_user),
 ):
     """Get the current share status for a session."""
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == current_user.id).first()
+    session = get_user_session(db, session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -205,9 +230,7 @@ def get_processing_status(
     current_user: User = Depends(get_current_user),
 ):
     """Return unified processing status for all stages of a session."""
-    session = db.query(DBSession).filter(
-        DBSession.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == current_user.id).first()
+    session = get_user_session(db, session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 

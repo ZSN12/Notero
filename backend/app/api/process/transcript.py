@@ -1,66 +1,55 @@
 import json
-import threading
+import logging
+import uuid
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 from app.core.database import get_db
 from app.core.auth import get_current_user
-from app.models import Note, Session as DBSession, Notebook, User, SessionProcessingState
-from app.services.term_corrector import corrector
-from app.services.state_service import set_running, set_ready, set_error, set_fallback
+from app.models import Note, Session as DBSession, Notebook, User
+from app.config import DEEPSEEK_MODEL
+from app.core.llm import ChatMessage, get_default_chat_provider
+from app.services.prompt_loader import load_prompt
+from app.services.term_corrector import corrector, CORRECTION_ERROR_CODES, classify_correction_exception
+from app.services.state_service import set_running, set_ready, set_error, set_fallback, set_partial
 from app.services.vector_service import build_session_index, _compute_session_content_hash
-from app.services.note_utils import _dedupe_append
-from app.api.agents import auto_run_agents
+from app.services.vocabulary_service import save_vocabulary_entry
+
+# Agent integration
+from app.agents import AgentContext, get_agent
 
 router = APIRouter()
 
-_TRANSCRIPT_MARKER = "## 语音转文字"
-_NOTES_MARKER = "\n\n---\n\n"
 
-
-def _extract_transcript_from_content(content: str | None) -> str:
-    """Extract the transcript section from note.content (below marker, above notes)."""
-    content = (content or "").strip()
-    if not content.startswith(_TRANSCRIPT_MARKER):
+def generate_summary(transcript_text: str, course_title: str):
+    """Generate a summary for the session using the default chat provider."""
+    provider = get_default_chat_provider()
+    if not provider.available:
         return ""
-    body = content[len(_TRANSCRIPT_MARKER):]
-    body = body.lstrip()
-    if body.startswith("\n\n"):
-        body = body[2:]
-    if _NOTES_MARKER in body:
-        body = body.split(_NOTES_MARKER, 1)[0]
-    return body.strip()
 
+    prompt_template = load_prompt("summary")
+    prompt = prompt_template.render(
+        course_title=course_title,
+        text=transcript_text,
+    )
 
-def _strip_html(value: str | None) -> str:
-    """Remove HTML tags and decode entities."""
-    import html
-    import re
-    text = re.sub(r"<[^>]+>", "", value or "")
-    return html.unescape(text).strip()
-
-
-def _normalize_ws(value: str | None) -> str:
-    """Collapse whitespace for comparison."""
-    import re
-    return re.sub(r"\s+", " ", (value or "")).strip()
-
-
-# Per-session lock to prevent concurrent finalizations for the same session.
-_FINALIZE_LOCKS: dict[str, threading.Lock] = {}
-_FINALIZE_LOCKS_GUARD = threading.Lock()
-
-
-def _get_finalize_lock(session_id: str) -> threading.Lock:
-    lock = _FINALIZE_LOCKS.get(session_id)
-    if lock is None:
-        with _FINALIZE_LOCKS_GUARD:
-            lock = _FINALIZE_LOCKS.get(session_id)
-            if lock is None:
-                lock = threading.Lock()
-                _FINALIZE_LOCKS[session_id] = lock
-    return lock
+    try:
+        response = provider.chat(
+            messages=[
+                ChatMessage(role="system", content=prompt_template.system),
+                ChatMessage(role="user", content=prompt),
+            ],
+            model=DEEPSEEK_MODEL,
+            temperature=0.3,
+            max_tokens=300,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning("summary_generation_failed error=%s", e, exc_info=True)
+        return ""
 
 
 def get_transcript_text(note) -> str:
@@ -119,6 +108,67 @@ def update_transcript(
     return {"status": "success"}
 
 
+@router.post("/generate-summary")
+def generate_summary_endpoint(
+    session_id: str = "",
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Generate a summary for the session using DeepSeek AI and save it to the session."""
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    # Verify session exists
+    session = db.query(DBSession).filter(
+        DBSession.id == session_id
+    ).join(Notebook).filter(
+        Notebook.user_id == current_user.id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Get transcript text from note
+    note = db.query(Note).filter(Note.session_id == session_id).first()
+    if not note:
+        raise HTTPException(status_code=400, detail="No transcript available")
+    transcript_text = get_transcript_text(note)
+    if not transcript_text:
+        raise HTTPException(status_code=400, detail="No transcript available")
+
+    # Get course title
+    notebook = db.query(Notebook).filter(Notebook.id == session.notebook_id).first()
+    course_title = notebook.title if notebook else ""
+
+    # Try agent-based summary first; fall back to legacy function on failure.
+    summary = ""
+    try:
+        agent = get_agent("summary")
+        ctx = AgentContext(
+            session_id=session_id,
+            user=current_user,
+            db=db,
+            note=note,
+            session=session,
+            notebook=notebook,
+        )
+        result = agent.run(ctx)
+        if result.success and result.data:
+            summary = result.data.get("summary", "")
+        elif result.error_message:
+            logger.warning("summary_agent_failed error_message=%s", result.error_message)
+    except Exception as e:
+        logger.warning("summary_agent_exception error=%s", e, exc_info=True)
+
+    if not summary:
+        summary = generate_summary(transcript_text, course_title)
+
+    if summary:
+        session.summary = summary
+        db.commit()
+
+    return {"status": "success", "summary": summary}
+
+
 def _auto_build_vector_index_sync(session_id: str, user: User, db: Session) -> None:
     """Auto-trigger vector index build after transcript finalization."""
     try:
@@ -134,32 +184,62 @@ def _auto_build_vector_index_sync(session_id: str, user: User, db: Session) -> N
         db.commit()
 
 
+def _load_previous_chunk_results(note: Note) -> list[dict] | None:
+    """Return previously stored AI chunk results from note vocabulary, if any."""
+    if not note or not isinstance(note.vocabulary, list):
+        return None
+    for item in note.vocabulary:
+        if isinstance(item, dict) and item.get("kind") == "transcript_ai_chunks":
+            return item.get("data") or item.get("chunks")
+    return None
+
+
+def _save_chunk_results(db: Session, note: Note, chunk_results: list) -> None:
+    """Persist chunk results to note vocabulary for later retry-failed-only runs."""
+    serializable = []
+    for r in chunk_results:
+        if isinstance(r, dict):
+            serializable.append(r)
+        else:
+            serializable.append({
+                "index": r.index,
+                "input": r.input,
+                "output": r.output,
+                "success": r.success,
+                "error_code": r.error_code,
+                "error_message": r.error_message,
+                "retryable": r.retryable,
+                "elapsed": r.elapsed,
+                "finish_reason": r.finish_reason,
+                "input_length": r.input_length,
+                "review_performed": r.review_performed,
+                "review_repaired": r.review_repaired,
+                "missing_facts": r.missing_facts,
+                "review_error_code": r.review_error_code,
+                "review_error_message": r.review_error_message,
+            })
+    entry = {
+        "kind": "transcript_ai_chunks",
+        "chunks": serializable,
+    }
+    save_vocabulary_entry(db, note.id, entry)
+
+
 def finalize_session_transcript(
     session_id: str,
     db: Session,
     current_user: User,
+    retry_failed_only: bool = False,
 ) -> dict:
     """Run DeepSeek finalization on a session's transcript and return note payload.
 
     This is the shared finalization logic used by:
       - the manual "restructure" endpoint
-      - the upload-based audio processing endpoints
-      - the manual "transcript-finalize" endpoint after real-time recording stops
+      - the audio-finish endpoint after real-time recording stops
     """
-    # Prevent concurrent finalizations for the same session.
-    lock = _get_finalize_lock(session_id)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Transcript finalization is already in progress")
-
-    existing = db.query(SessionProcessingState).filter(
-        SessionProcessingState.session_id == session_id,
-        SessionProcessingState.stage == "transcript_finalize",
-    ).first()
-    if existing and existing.status == "running":
-        lock.release()
-        raise HTTPException(status_code=409, detail="Transcript finalization is already in progress")
-
-    set_running(db, session_id, "transcript_finalize", commit=False)
+    request_id = str(uuid.uuid4())
+    error_type: str | None = None
+    set_running(db, session_id, "transcript_finalize", progress=0.0, commit=False)
     try:
         session = db.query(DBSession).filter(
             DBSession.id == session_id
@@ -179,84 +259,28 @@ def finalize_session_transcript(
         course_title = notebook.title if notebook else ""
         keywords = session.keywords or []
 
-        # Sort entries by chunk_index for deterministic processing.
+        # Build full text from ALL entries (sorted by chunk_index)
         sorted_entries = sorted(
             note.transcript,
             key=lambda e: e.get("chunk_index", 0) if isinstance(e, dict) else 0,
         )
+        local_texts = [
+            (e.get("display_text") or e.get("text") or e.get("raw_text") or "").strip()
+            for e in sorted_entries
+            if isinstance(e, dict)
+        ]
+        full_local_text = "\n\n".join(t for t in local_texts if t)
 
-        # If the user has edited the transcript, note.transcript contains a
-        # 'user_edited' entry. Use the latest user_edited entry as the baseline
-        # and append any ASR entries that came after it (by sort order). This
-        # preserves user deletions while still incorporating new speech recorded
-        # after the edit.
-        latest_user_edited_idx = -1
-        for i, e in enumerate(sorted_entries):
-            if isinstance(e, dict) and e.get("correction_stage") == "user_edited":
-                latest_user_edited_idx = i
-
-        used_user_edit = False
-        if latest_user_edited_idx >= 0:
-            baseline_entry = sorted_entries[latest_user_edited_idx]
-            baseline_text = (baseline_entry.get("display_text") or baseline_entry.get("text") or "").strip()
-
-            post_texts = []
-            post_raw_texts = []
-            for e in sorted_entries[latest_user_edited_idx + 1:]:
-                if not isinstance(e, dict):
-                    continue
-                text = (e.get("display_text") or e.get("text") or e.get("raw_text") or "").strip()
-                raw = (e.get("raw_text") or e.get("text") or "").strip()
-                if text:
-                    post_texts.append(text)
-                if raw:
-                    post_raw_texts.append(raw)
-
-            full_local_text = baseline_text
-            for text in post_texts:
-                full_local_text = _dedupe_append(full_local_text, text)
-
-            # Preserve the old raw_text from the user_edited entry (if any) plus
-            # raw text from any subsequent ASR entries.
-            baseline_raw = (baseline_entry.get("raw_text") or baseline_entry.get("text") or "").strip()
-            raw_parts = ([baseline_raw] if baseline_raw else []) + post_raw_texts
-            full_raw_text = "\n\n".join(t for t in raw_parts if t)
-            used_user_edit = True
-        else:
-            local_texts = [
-                (e.get("display_text") or e.get("text") or e.get("raw_text") or "").strip()
-                for e in sorted_entries
-                if isinstance(e, dict)
-            ]
-            full_local_text = "\n\n".join(t for t in local_texts if t)
-
-            # Preserve original raw_text for audit
-            raw_texts = [
-                (e.get("raw_text") or e.get("text") or "").strip()
-                for e in sorted_entries
-                if isinstance(e, dict)
-            ]
-            full_raw_text = "\n\n".join(t for t in raw_texts if t)
-
-        # If the transcript is empty because the user intentionally cleared it, we
-        # still finalize to an empty transcript rather than raising an error or
-        # restoring deleted ASR text.
-        is_intentionally_empty = used_user_edit and not full_local_text
-        if not full_local_text and not is_intentionally_empty:
+        # Preserve original raw_text for audit
+        raw_texts = [
+            (e.get("raw_text") or e.get("text") or "").strip()
+            for e in sorted_entries
+            if isinstance(e, dict)
+        ]
+        full_raw_text = "\n\n".join(t for t in raw_texts if t)
+        if not full_local_text:
             set_error(db, session_id, "transcript_finalize", error_message="Transcript text is empty")
             raise HTTPException(status_code=400, detail="Transcript text is empty")
-
-        # Fallback: if content has a user-edited transcript that differs from the
-        # computed ASR text, prefer the user's version.
-        if not used_user_edit:
-            user_edited_transcript = _extract_transcript_from_content(note.content)
-            user_edited_plain = _strip_html(user_edited_transcript)
-            if user_edited_plain:
-                asr_normalized = _normalize_ws(full_local_text)
-                user_normalized = _normalize_ws(user_edited_plain)
-                if user_normalized and user_normalized != asr_normalized:
-                    full_local_text = user_edited_plain
-                    used_user_edit = True
 
         # Tier 2 — local deterministic cleanup
         try:
@@ -268,41 +292,107 @@ def finalize_session_transcript(
         corrected_text = None
         is_ai_corrected = False
         correction_error = None
+        correction_error_code: str | None = None
+        correction_retryable = False
+        ai_chunks_total = 0
+        ai_chunks_succeeded = 0
+        ai_chunks_failed = 0
+        chunk_results: list = []
 
-        # Tier 3 — DeepSeek enhancement (best-effort)
+        # Collect timestamps once for the final entry
+        all_timestamps = []
+        for e in sorted_entries:
+            if isinstance(e, dict):
+                ts = e.get("timestamps", [])
+                if ts:
+                    all_timestamps.extend(ts)
+
+        # Tier 3 — DeepSeek enhancement (best-effort, chunked for long transcripts)
         if not getattr(corrector, "has_llm", False):
-            correction_error = "AI 整理失败，已使用本地整理稿"
+            correction_error_code = "authentication"
+            correction_error = "未配置 DeepSeek API，已使用本地整理稿"
         else:
+            # Pre-compute chunks so we can persist ai_chunks_total before any request starts.
+            chunks = corrector._split_natural_chunks(local_display)
+            ai_chunks_total = len(chunks)
+
+            previous = _load_previous_chunk_results(note) if retry_failed_only else None
+
+            # If the caller asked to retry only failed chunks but we have no cached
+            # chunk results (e.g. a previous "unknown" failure that didn't save them),
+            # we must reprocess the whole transcript instead of doing nothing.
+            if retry_failed_only and not previous:
+                retry_failed_only = False
+                previous = None
+
+            # Persist the local-only baseline with ai_chunks_total up front.
+            # If anything fails below, the user still sees local text and a valid total.
+            preliminary_entry = {
+                "chunk_index": 0,
+                "text": local_display,
+                "raw_text": full_raw_text,
+                "display_text": local_display,
+                "corrected_text": None,
+                "timestamps": all_timestamps,
+                "is_corrected": local_display != full_local_text,
+                "is_ai_corrected": False,
+                "correction_error": None,
+                "correction_error_code": None,
+                "correction_error_type": None,
+                "correction_request_id": request_id,
+                "correction_retryable": False,
+                "ai_chunks_total": ai_chunks_total,
+                "ai_chunks_succeeded": 0,
+                "ai_chunks_failed": 0,
+                "is_restructured": False,
+                "correction_stage": "final",
+            }
+            note.transcript = [preliminary_entry]
+            _persist_display_content(note, local_display)
+            db.commit()
+
+            def on_chunk_complete(completed_count: int, total: int) -> None:
+                progress = round(completed_count / total, 2) if total else 1.0
+                set_running(
+                    db, session_id, "transcript_finalize",
+                    progress=progress,
+                    message=f"正在 AI 整理：{completed_count}/{total}",
+                    commit=True,
+                )
+
             try:
-                ai_text = corrector.restructure_transcript(
+                result = corrector.restructure_transcript_chunked(
                     local_display,
                     course_title,
                     keywords,
+                    note.ppt_images,
+                    previous_results=previous,
+                    retry_failed_only=retry_failed_only,
+                    on_chunk_complete=on_chunk_complete,
                 )
-                ai_text = (ai_text or "").strip()
-                if not ai_text:
-                    raise ValueError("DeepSeek returned empty text")
-
-                ai_display = corrector.clean_transcript_for_display(ai_text).strip() or ai_text
-                display_text = ai_display
-                corrected_text = ai_display
-                is_ai_corrected = True
-            except Exception:
-                correction_error = "AI 整理失败，已使用本地整理稿"
+                display_text = result.text
+                corrected_text = result.text if result.is_ai_corrected else None
+                is_ai_corrected = result.is_ai_corrected and result.chunks_failed == 0
+                correction_error = result.error
+                correction_error_code = result.error_code
+                correction_retryable = result.retryable
+                ai_chunks_total = result.chunks_total
+                ai_chunks_succeeded = result.chunks_succeeded
+                ai_chunks_failed = result.chunks_failed
+                chunk_results = result.chunk_results
+                _save_chunk_results(db, note, chunk_results)
+            except Exception as exc:
+                error_type = type(exc).__name__
+                code, message, retryable = classify_correction_exception(exc)
+                logger.exception(
+                    "finalize_session_transcript_chunked_failed session_id=%s request_id=%s error_type=%s",
+                    session_id, request_id, error_type,
+                )
+                correction_error_code = code
+                correction_error = message
+                correction_retryable = retryable
 
         # Build unified transcript entry
-        all_timestamps = []
-        if not used_user_edit:
-            # Timestamps from ASR only make sense when we are finalizing the raw
-            # ASR text. If the user has edited the transcript, word-level timings
-            # are no longer reliable, so we drop them to avoid misleading audio
-            # highlighting.
-            for e in sorted_entries:
-                if isinstance(e, dict):
-                    ts = e.get("timestamps", [])
-                    if ts:
-                        all_timestamps.extend(ts)
-
         updated_entry = {
             "chunk_index": 0,
             "text": display_text,
@@ -313,60 +403,47 @@ def finalize_session_transcript(
             "is_corrected": display_text != full_local_text,
             "is_ai_corrected": is_ai_corrected,
             "correction_error": correction_error,
+            "correction_error_code": correction_error_code,
+            "correction_error_type": error_type,
+            "correction_request_id": request_id,
+            "correction_retryable": correction_retryable,
+            "ai_chunks_total": ai_chunks_total,
+            "ai_chunks_succeeded": ai_chunks_succeeded,
+            "ai_chunks_failed": ai_chunks_failed,
             "is_restructured": False,
             "correction_stage": "final",
         }
 
         note.transcript = [updated_entry]
-
-        # Update content and layout_blocks
-        existing_content = (note.content or "").strip()
-        notes_content = ""
-        if existing_content.startswith("## 语音转文字"):
-            marker = "\n\n---\n\n"
-            if marker in existing_content:
-                notes_content = existing_content.split(marker, 1)[1].strip()
-
-        if notes_content:
-            note.content = f"## 语音转文字\n\n{display_text}\n\n---\n\n{notes_content}".strip()
-        else:
-            note.content = f"## 语音转文字\n\n{display_text}".strip()
-
-        # Preserve all non-transcript blocks (ppt, image, audio, note, etc.).
-        # Replace only the old transcript blocks in-place so that PPT images and
-        # user-inserted layouts are not lost during AI finalization.
-        existing_blocks = list(note.layout_blocks or [])
-        transcript_blocks = [
-            {
-                "id": f"transcript-{i + 1}",
-                "type": "transcript",
-                "content": part.strip(),
-            }
-            for i, part in enumerate(display_text.split("\n\n"))
-            if part.strip()
-        ]
-        new_blocks: list[dict] = []
-        replaced_transcript = False
-        for block in existing_blocks:
-            if isinstance(block, dict) and block.get("type") == "transcript":
-                if not replaced_transcript:
-                    new_blocks.extend(transcript_blocks)
-                    replaced_transcript = True
-                continue
-            new_blocks.append(block)
-        if not replaced_transcript:
-            new_blocks = transcript_blocks + new_blocks
-        note.layout_blocks = new_blocks
+        _persist_display_content(note, display_text)
 
         db.commit()
         db.refresh(note)
+        logger.info(
+            "finalize_session_transcript_saved session_id=%s request_id=%s note_id=%s ai_corrected=%s chunks=%s/%s",
+            session_id, request_id, note.id, is_ai_corrected, ai_chunks_succeeded, ai_chunks_total,
+        )
 
-        # Set state based on outcome
-        current_hash = _compute_session_content_hash(note)
+        # Set state based on outcome — success clears any previous fallback/error state.
         if is_ai_corrected:
-            set_ready(db, session_id, "transcript_finalize", content_hash=current_hash, commit=False)
+            set_ready(db, session_id, "transcript_finalize", commit=False)
+        elif ai_chunks_succeeded > 0 and ai_chunks_failed > 0:
+            set_partial(
+                db, session_id, "transcript_finalize",
+                message=correction_error or "AI 整理部分完成",
+                error_message=correction_error,
+                commit=False,
+            )
+        elif correction_error:
+            # All failed or no API key — surface as fallback so user can retry.
+            set_fallback(
+                db, session_id, "transcript_finalize",
+                message="已使用本地整理稿",
+                error_message=correction_error,
+                commit=False,
+            )
         else:
-            set_fallback(db, session_id, "transcript_finalize", message="已使用本地整理稿", error_message=correction_error, commit=False)
+            set_ready(db, session_id, "transcript_finalize", commit=False)
 
         # Auto-trigger vector index
         _auto_build_vector_index_sync(session_id, current_user, db)
@@ -385,11 +462,72 @@ def finalize_session_transcript(
         }
     except HTTPException:
         raise
-    except Exception as e:
-        set_error(db, session_id, "transcript_finalize", error_message=str(e))
+    except Exception as exc:
+        error_type = type(exc).__name__
+        code, message, _ = classify_correction_exception(exc)
+        logger.exception(
+            "finalize_session_transcript_unexpected session_id=%s request_id=%s error_type=%s",
+            session_id, request_id, error_type,
+        )
+        set_error(db, session_id, "transcript_finalize", error_message=f"[{request_id}] {message}")
         raise
-    finally:
-        lock.release()
+
+
+def _persist_display_content(note: Note, display_text: str) -> None:
+    """Update note.content and layout_blocks from the current display transcript.
+
+    Preserves manually inserted PPT pages and student notes by re-inserting
+    non-transcript blocks at their previous relative positions.
+    """
+    existing_content = (note.content or "").strip()
+    notes_content = ""
+    if existing_content.startswith("## 语音转文字"):
+        marker = "\n\n---\n\n"
+        if marker in existing_content:
+            notes_content = existing_content.split(marker, 1)[1].strip()
+
+    if notes_content:
+        note.content = f"## 语音转文字\n\n{display_text}\n\n---\n\n{notes_content}".strip()
+    else:
+        note.content = f"## 语音转文字\n\n{display_text}".strip()
+
+    old_blocks = [b for b in (note.layout_blocks or []) if isinstance(b, dict)]
+    old_transcript_count = sum(1 for b in old_blocks if b.get("type") == "transcript")
+
+    transcript_blocks = [
+        {
+            "id": f"transcript-{i + 1}",
+            "type": "transcript",
+            "content": part.strip(),
+        }
+        for i, part in enumerate(display_text.split("\n\n"))
+        if part.strip()
+    ]
+    new_transcript_count = len(transcript_blocks)
+
+    # Preserve PPT and note blocks, re-inserting PPT at approximately the same
+    # relative position among transcript blocks.
+    non_transcript_blocks = [b for b in old_blocks if b.get("type") in ("ppt", "note")]
+    ppt_blocks = [b for b in non_transcript_blocks if b.get("type") == "ppt"]
+    note_blocks = [b for b in non_transcript_blocks if b.get("type") == "note"]
+
+    result = list(transcript_blocks)
+    for ppt in ppt_blocks:
+        # Find where this PPT was in the old layout.
+        old_index = old_blocks.index(ppt)
+        preceding_transcripts = sum(
+            1 for b in old_blocks[:old_index] if b.get("type") == "transcript"
+        )
+        if old_transcript_count > 0 and new_transcript_count > 0:
+            ratio = preceding_transcripts / old_transcript_count
+            target = min(new_transcript_count, max(0, round(ratio * new_transcript_count)))
+        else:
+            target = 0
+        # Avoid inserting past the end; if there are no transcript blocks,
+        # PPTs are kept at the front.
+        result.insert(target, ppt)
+
+    note.layout_blocks = result + note_blocks
 
 
 @router.post("/session/{session_id}/restructure")
@@ -401,20 +539,11 @@ def restructure_transcript_endpoint(
 ):
     """Re-run DeepSeek restructure on a session's transcript.
 
-    Returns `{ note: {...}, agents: {...} | null }` so the frontend can refresh
-    the transcript and show started agent tasks. On failure, falls back to local
-    clean text and records the error.
+    Returns the updated note with corrected_text / is_ai_corrected / correction_error.
+    On failure, falls back to local clean text and records the error.
     """
     if not session_id:
         raise HTTPException(status_code=400, detail="session_id is required")
 
-    result = finalize_session_transcript(session_id, db, current_user)
-    note_payload = result.get("note", result)
-
-    agents_result = None
-    auto_generate = bool(body.get("auto_generate", True)) if body else True
-    if auto_generate:
-        force = bool(body.get("force", False)) if body else False
-        agents_result = auto_run_agents(session_id, current_user.id, force=force)
-
-    return {"note": note_payload, "agents": agents_result}
+    retry_failed_only = bool(body and body.get("retry_failed_only"))
+    return finalize_session_transcript(session_id, db, current_user, retry_failed_only=retry_failed_only)

@@ -7,6 +7,18 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Runtime / debug artifacts
+*.pid
+backend/*.pid
+debug_*.txt
+backend/debug_*.txt
+pytest_*.txt
+backend/pytest_*.txt
+test_finalize*.py
+test_audio*.py
+backend/test_ai_finalize.py
+backend/test_mindmap_perf.py
+
 node_modules
 dist
 dist-ssr
@@ -30,6 +42,7 @@ dist-ssr
 
 # Environment & secrets
 .env
+.env.test
 .env.local
 .env.*.local
 
@@ -68,12 +81,3 @@ models/
 .idea/
 .claude/
 .trae/
-
-# Temporary / test artifacts
-audio_upload_response.txt
-ppt_insert_result.json
-resume_content.txt
-test_audio.wav
-test_slide_*.png
-fix-stale-frontend.py
-ppt-portfolio/

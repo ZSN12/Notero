@@ -13,7 +13,7 @@ export default defineConfig(({ command }) => ({
           // Core vendor libraries that change infrequently
           'vendor-react': ['react', 'react-dom', 'react-router-dom'],
           // UI / styling
-          'vendor-ui': ['lucide-react'],
+          'vendor-ui': ['lucide-react', 'tailwindcss'],
           // State & data
           'vendor-state': ['zustand'],
           // Visualization (large)

@@ -47,11 +47,36 @@ async function authFetch(path: string, body: object): Promise<Response> {
   }
 }
 
+function formatErrorDetail(detail: unknown): string {
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    const msg = (detail as { msg?: string }).msg;
+    if (msg) return msg;
+    return JSON.stringify(detail);
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (item && typeof item === "object") {
+          const msg = (item as { msg?: string }).msg;
+          return typeof msg === "string" ? msg : JSON.stringify(item);
+        }
+        return String(item);
+      })
+      .filter(Boolean)
+      .map((msg) => msg.replace(/^Value error,\s*/i, ""));
+    return messages.join("；") || "请求失败";
+  }
+  return "请求失败";
+}
+
 export async function login(email: string, password: string): Promise<string> {
   const res = await authFetch("/api/auth/login", { email, password });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "登录失败" }));
-    throw new Error(err.detail || "登录失败");
+    throw new Error(formatErrorDetail(err.detail) || "登录失败");
   }
   const data = await res.json();
   setToken(data.access_token);
@@ -62,7 +87,7 @@ export async function register(username: string, email: string, password: string
   const res = await authFetch("/api/auth/register", { username, email, password });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "注册失败" }));
-    throw new Error(err.detail || "注册失败");
+    throw new Error(formatErrorDetail(err.detail) || "注册失败");
   }
 }
 

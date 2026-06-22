@@ -120,7 +120,7 @@ class TestRestructureTranscript:
                 assert resp.status_code == 200
                 data = resp.json()
                 assert "note" in data
-                assert data["note"]["transcript"][0]["correction_error"] == "AI 整理失败，已使用本地整理稿"
+                assert data["note"]["transcript"][0]["correction_error_code"] == "authentication"
 
     def test_restructure_empty_text(self):
         with TestClient(app) as client:
@@ -135,3 +135,95 @@ class TestRestructureTranscript:
 
             resp = client.post(f"/api/process/session/{sid}/restructure", headers=headers)
             assert resp.status_code == 400
+
+
+class TestFinalizeTranscript:
+    def test_finalize_returns_note_and_starts_learning_agents(self):
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+            db = SessionLocal()
+            try:
+                sid = _create_session_with_note(
+                    db,
+                    user_id,
+                    transcript=[{"text": "课程内容", "display_text": "课程内容"}],
+                )
+            finally:
+                db.close()
+
+            final_note = {
+                "id": "note-1",
+                "session_id": str(sid),
+                "transcript": [{
+                    "display_text": "整理后的课程内容",
+                    "correction_stage": "final",
+                    "is_ai_corrected": True,
+                }],
+            }
+            agent_result = {
+                "workflow_id": "workflow-1",
+                "session_id": str(sid),
+                "agents": [],
+            }
+            with (
+                patch(
+                    "app.api.process.audio.finalize_session_transcript",
+                    return_value={"note": final_note},
+                ),
+                patch("app.api.agents.auto_run_agents", return_value=agent_result) as run_agents,
+            ):
+                resp = client.post(
+                    "/api/process/transcript-finalize",
+                    params={"session_id": sid},
+                    json={"auto_generate": True, "force": False},
+                    headers=headers,
+                )
+
+            assert resp.status_code == 200
+            assert resp.json() == {"note": final_note, "agents": agent_result}
+            run_agents.assert_called_once_with(
+                str(sid), str(user_id), roles=["mindmap", "quiz"], force=False
+            )
+
+    def test_finalize_fallback_does_not_start_learning_agents(self):
+        with TestClient(app) as client:
+            headers = auth_headers(client)
+            user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+            db = SessionLocal()
+            try:
+                sid = _create_session_with_note(
+                    db,
+                    user_id,
+                    transcript=[{"text": "课程内容", "display_text": "课程内容"}],
+                )
+            finally:
+                db.close()
+
+            final_note = {
+                "id": "note-1",
+                "session_id": str(sid),
+                "transcript": [{
+                    "display_text": "本地整理稿",
+                    "correction_stage": "final",
+                    "is_ai_corrected": False,
+                    "correction_error": "AI 整理失败，已使用本地整理稿",
+                }],
+            }
+            with (
+                patch(
+                    "app.api.process.audio.finalize_session_transcript",
+                    return_value={"note": final_note},
+                ),
+                patch("app.api.agents.auto_run_agents") as run_agents,
+            ):
+                resp = client.post(
+                    "/api/process/transcript-finalize",
+                    params={"session_id": sid},
+                    json={"auto_generate": True},
+                    headers=headers,
+                )
+
+            assert resp.status_code == 200
+            assert resp.json()["agents"] is None
+            run_agents.assert_not_called()

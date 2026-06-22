@@ -1,14 +1,179 @@
-import logging
+import json
 import re
+import time
+import logging
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional, Callable, Any
 from app.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from app.services.prompt_loader import load_prompt
+
+# openai is imported lazily inside methods; import the module for error types.
+try:
+    import openai
+except Exception:  # pragma: no cover
+    openai = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 
 _REPEATED_COMMA = re.compile(r'(，\s*){2,}')
 _MULTI_SPACE = re.compile(r'\s{2,}')
+
+
+CORRECTION_ERROR_CODES = {
+    "timeout": "AI 整理超时",
+    "rate_limit": "AI 服务限流，请稍后重试",
+    "authentication": "AI 服务认证失败，请检查 API Key",
+    "network": "网络连接失败",
+    "empty_response": "AI 返回内容为空",
+    "truncated_response": "AI 返回内容不完整",
+    "invalid_response": "AI 返回格式异常",
+    "content_validation_failed": "AI 整理结果丢失关键内容，已回退本地稿",
+    "server_error": "AI 服务内部错误，请稍后重试",
+    "content_filter": "AI 服务拒绝处理该内容，请检查文本是否合规",
+    "unknown": "AI 整理发生内部异常，请查看后端日志或重新尝试",
+}
+
+
+def _classify_by_status_code(status_code) -> Optional[tuple[str, str, bool]]:
+    """Classify an OpenAI-compatible HTTP status code.
+
+    Returns None if the status code is not an integer or not recognized.
+    """
+    if not isinstance(status_code, int):
+        return None
+    if status_code == 400:
+        return "invalid_response", CORRECTION_ERROR_CODES["invalid_response"], False
+    if status_code in (401, 403):
+        return "authentication", CORRECTION_ERROR_CODES["authentication"], False
+    if status_code == 429:
+        return "rate_limit", CORRECTION_ERROR_CODES["rate_limit"], True
+    if 500 <= status_code < 600:
+        return "server_error", CORRECTION_ERROR_CODES["server_error"], True
+    return None
+
+
+def classify_correction_exception(exc: Exception) -> tuple[str, str, bool]:
+    """Map an arbitrary LLM/worker exception to a stable error code and user message.
+
+    Order of precedence:
+    1. CorrectionError wrapper.
+    2. HTTP status_code on OpenAI-compatible exceptions.
+    3. Specific exception classes (Authentication, RateLimit, BadRequest, ContentPolicy).
+    4. Generic APIStatusError / APIError as server-side errors.
+    5. Message heuristics.
+    """
+    if isinstance(exc, CorrectionError):
+        return exc.code, exc.message, exc.retryable
+    msg = str(exc).lower()
+    openai_module = openai
+    if openai_module:
+        # Safely resolve error classes that may not exist in older openai versions.
+        _get_exc = lambda name: getattr(openai_module, name, None)
+        AuthenticationError = _get_exc("AuthenticationError")
+        RateLimitError = _get_exc("RateLimitError")
+        APITimeoutError = _get_exc("APITimeoutError")
+        APIConnectionError = _get_exc("APIConnectionError")
+        BadRequestError = _get_exc("BadRequestError")
+        InternalServerError = _get_exc("InternalServerError")
+        APIError = _get_exc("APIError")
+        APIStatusError = _get_exc("APIStatusError")
+        ContentPolicyViolationError = _get_exc("ContentPolicyViolationError")
+
+        # Prefer HTTP status_code when available; fall back to isinstance checks.
+        status_code = getattr(exc, "status_code", None)
+        if status_code is not None:
+            classified = _classify_by_status_code(status_code)
+            if classified:
+                return classified
+
+        # Specific exception classes.  BadRequestError is a subclass of
+        # APIStatusError, so it must be checked before the generic parent.
+        if AuthenticationError and isinstance(exc, AuthenticationError):
+            return "authentication", CORRECTION_ERROR_CODES["authentication"], False
+        if RateLimitError and isinstance(exc, RateLimitError):
+            return "rate_limit", CORRECTION_ERROR_CODES["rate_limit"], True
+        if BadRequestError and isinstance(exc, BadRequestError):
+            return "invalid_response", CORRECTION_ERROR_CODES["invalid_response"], False
+        if ContentPolicyViolationError and isinstance(exc, ContentPolicyViolationError):
+            return "content_filter", CORRECTION_ERROR_CODES["content_filter"], False
+        if APITimeoutError and isinstance(exc, APITimeoutError):
+            return "timeout", CORRECTION_ERROR_CODES["timeout"], True
+        if APIConnectionError and isinstance(exc, APIConnectionError):
+            return "network", CORRECTION_ERROR_CODES["network"], True
+        # DeepSeek / OpenAI-compatible server-side errors (5xx, overloaded, etc.)
+        if (
+            (InternalServerError and isinstance(exc, InternalServerError))
+            or (APIError and isinstance(exc, APIError))
+            or (APIStatusError and isinstance(exc, APIStatusError))
+        ):
+            return "server_error", CORRECTION_ERROR_CODES["server_error"], True
+    if isinstance(exc, TimeoutError) or "timeout" in msg:
+        return "timeout", CORRECTION_ERROR_CODES["timeout"], True
+    if "connection" in msg or "network" in msg:
+        return "network", CORRECTION_ERROR_CODES["network"], True
+    if "rate limit" in msg or "too many requests" in msg:
+        return "rate_limit", CORRECTION_ERROR_CODES["rate_limit"], True
+    if "authentication" in msg or "api key" in msg:
+        return "authentication", CORRECTION_ERROR_CODES["authentication"], False
+    if "bad request" in msg or "model" in msg or "not found" in msg or "does not exist" in msg:
+        return "invalid_response", CORRECTION_ERROR_CODES["invalid_response"], False
+    if "content_policy" in msg or "content filter" in msg or "safety" in msg or "moderation" in msg or "inappropriate" in msg:
+        return "content_filter", CORRECTION_ERROR_CODES["content_filter"], False
+    if "server" in msg or "internal" in msg or "overloaded" in msg or "temporarily unavailable" in msg:
+        return "server_error", CORRECTION_ERROR_CODES["server_error"], True
+    if "empty" in msg:
+        return "empty_response", CORRECTION_ERROR_CODES["empty_response"], True
+    if "truncated" in msg:
+        return "truncated_response", CORRECTION_ERROR_CODES["truncated_response"], True
+    # Preserve the original exception message for truly unexpected errors.
+    return "unknown", msg or CORRECTION_ERROR_CODES["unknown"], False
+
+
+class CorrectionError(Exception):
+    """Structured error from a single correction chunk or whole correction."""
+
+    def __init__(self, code: str, message: str, retryable: bool = False, finish_reason: Optional[str] = None):
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.finish_reason = finish_reason
+        super().__init__(message)
+
+
+@dataclass
+class RestructureChunkResult:
+    index: int
+    input: str
+    output: str
+    success: bool
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    retryable: bool = False
+    elapsed: float = 0.0
+    finish_reason: Optional[str] = None
+    input_length: int = 0
+    review_performed: bool = False
+    review_repaired: bool = False
+    missing_facts: List[str] = field(default_factory=list)
+    review_error_code: Optional[str] = None
+    review_error_message: Optional[str] = None
+
+
+@dataclass
+class RestructureResult:
+    text: str
+    local_text: str
+    is_ai_corrected: bool
+    error_code: Optional[str] = None
+    error: Optional[str] = None
+    retryable: bool = False
+    chunks_total: int = 0
+    chunks_succeeded: int = 0
+    chunks_failed: int = 0
+    chunk_results: List[RestructureChunkResult] = field(default_factory=list)
 
 
 class TermCorrector:
@@ -114,23 +279,34 @@ class TermCorrector:
         keywords: Optional[List[str]] = None,
         ppt_slides: Optional[list] = None,
     ) -> str:
-        """LLM correction + reorder. Falls back to deterministic cleanup on error.
-
-        The LLM call is delegated to TranscriptOrganizerAgent so that the agent
-        owns the canonical restructuring logic while legacy callers can still use
-        this thin wrapper.
-        """
-        from app.agents.transcript_agent import TranscriptOrganizerAgent
-
+        """LLM correction + reorder. Falls back to deterministic cleanup on error."""
         if not self._client or not text or not text.strip():
             return text
 
-        result = TranscriptOrganizerAgent.restructure_text(
-            raw_text=text,
+        keyword_str = "、".join(keywords) if keywords else "无"
+        ppt_context = ""
+
+        if ppt_slides:
+            ppt_lines = ["## PPT 页面信息（按课堂顺序）"]
+            for s in ppt_slides:
+                page = s.get("page", "?")
+                title = s.get("title", "")
+                stext = s.get("text", "")[:200]
+                ppt_lines.append(f"第{page}页：{title} — {stext}")
+            ppt_context = "\n".join(ppt_lines)
+            prompt_template = load_prompt("asr_reorder")
+        else:
+            prompt_template = load_prompt("asr_correction")
+
+        prompt = prompt_template.render(
             course_title=course_title,
-            keywords=keywords,
-            ppt_slides=ppt_slides,
+            keywords=keyword_str,
+            text=text,
+            timestamped_text="（无）",
+            ppt_context=ppt_context,
         )
+
+        result = self._call_llm(prompt, prompt_template.system, temperature=0.2)
         if not result or not result.strip():
             logger.info("restructure_transcript_llm_empty_return course=%s text_len=%s", course_title, len(text))
             return text
@@ -700,22 +876,271 @@ class TermCorrector:
         return retained / len(source_kw)
 
     @classmethod
+    def extract_critical_tokens(cls, text: str) -> set[str]:
+        """Extract tokens whose loss would materially change the meaning.
+
+        Covers numbers / decimals / version strings and API/identifier-like
+        terms (e.g. ``requests.get``, ``OpenAI``, ``v2``, ``CPU``).
+        """
+        text = text or ""
+        tokens: set[str] = set()
+        # Numbers and version strings (e.g. 3.11, v2.0, 2024)
+        for m in re.finditer(r"\b(?:v?\d+(?:[.．]\d+)+|\d+[.．]\d+|\d+)\b", text):
+            tokens.add(m.group())
+        # Identifier-like terms containing dots, underscores, slashes or hyphens
+        for m in re.finditer(r"\b[a-zA-Z_][a-zA-Z0-9_./\-]*[./\-_][a-zA-Z0-9_./\-]*\b", text):
+            tokens.add(m.group())
+        # CamelCase / PascalCase identifiers (e.g. ClassName, methodName)
+        for m in re.finditer(r"\b[a-z]+(?:[A-Z][a-z]+)+\b|\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b", text):
+            tokens.add(m.group())
+        # Standalone acronyms / API names in all caps (2-8 chars)
+        for m in re.finditer(r"\b[A-Z]{2,8}\b", text):
+            tokens.add(m.group())
+        return tokens
+
+    @classmethod
+    def critical_token_retention_ratio(cls, source: str, candidate: str) -> float:
+        """Ratio of source critical tokens retained in candidate."""
+        source_tokens = cls.extract_critical_tokens(source)
+        if not source_tokens:
+            return 1.0
+        candidate_text = candidate or ""
+        retained = sum(1 for t in source_tokens if t in candidate_text)
+        return retained / len(source_tokens)
+
+    @classmethod
     def preserves_source_content(
         cls,
         raw_source: str,
         candidate: str,
         min_ratio: float = 0.55,
-        keyword_min_ratio: float = 0.65,
-        keyword_hard_min_ratio: float = 0.50,
+        length_min_ratio: float = 0.12,
+        length_max_ratio: float = 3.00,
     ) -> bool:
         """Check that candidate didn't delete real content vs raw_source.
 
-        Currently always accepts AI output; threshold validation is disabled
-        per user preference.  Summary detection is still active.
+        Validates critical tokens (numbers / API names) and extreme length
+        changes. Ordinary Chinese wording is intentionally not compared by
+        exact keyword retention because semantic correction and paragraph
+        restructuring legitimately rewrite those phrases.
         """
-        if cls.looks_like_summary(candidate, raw_source):
+        source = (raw_source or "").strip()
+        candidate = (candidate or "").strip()
+        if not source:
+            # No source content means nothing to preserve; accept any candidate.
+            return True
+        if not candidate:
             return False
+
+        if cls.looks_like_summary(candidate, source):
+            return False
+
+        source_len = len(source)
+        candidate_len = len(candidate)
+        if candidate_len < source_len * length_min_ratio:
+            logger.warning(
+                "termcorrector_preserve_reject reason=too_short source_len=%s candidate_len=%s",
+                source_len, candidate_len,
+            )
+            return False
+        if candidate_len > source_len * length_max_ratio:
+            logger.warning(
+                "termcorrector_preserve_reject reason=too_long source_len=%s candidate_len=%s",
+                source_len, candidate_len,
+            )
+            return False
+
+        critical_ratio = cls.critical_token_retention_ratio(source, candidate)
+        if critical_ratio < min_ratio:
+            logger.warning(
+                "termcorrector_preserve_reject reason=critical_tokens retained_ratio=%.2f",
+                critical_ratio,
+            )
+            return False
+
         return True
+
+    @classmethod
+    def _content_review_reasons(cls, source: str, candidate: str) -> List[str]:
+        """Return semantic-risk signals that justify one AI review pass."""
+        source = (source or "").strip()
+        candidate = (candidate or "").strip()
+        if not source or not candidate:
+            return []
+
+        reasons: List[str] = []
+        length_ratio = len(candidate) / max(len(source), 1)
+        if length_ratio < 0.65:
+            reasons.append("substantially_shorter")
+        if cls.looks_like_summary(candidate, source):
+            reasons.append("summary_style")
+        if cls.critical_token_retention_ratio(source, candidate) < 1.0:
+            reasons.append("critical_tokens_changed")
+        return reasons
+
+    @staticmethod
+    def _protected_term_retention_ratio(
+        protected_terms: Optional[List[str]], candidate: str,
+    ) -> float:
+        terms = {
+            str(term).strip() for term in (protected_terms or [])
+            if str(term).strip()
+        }
+        if not terms:
+            return 1.0
+        retained = sum(1 for term in terms if term in (candidate or ""))
+        return retained / len(terms)
+
+    @staticmethod
+    def _parse_review_json(content: str) -> dict[str, Any]:
+        """Parse a review response while tolerating a surrounding explanation."""
+        cleaned = (content or "").strip()
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start < 0 or end <= start:
+                raise CorrectionError(
+                    "invalid_response", CORRECTION_ERROR_CODES["invalid_response"], True
+                )
+            try:
+                payload = json.loads(cleaned[start:end + 1])
+            except json.JSONDecodeError as exc:
+                raise CorrectionError(
+                    "invalid_response", CORRECTION_ERROR_CODES["invalid_response"], True
+                ) from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("has_material_loss"), bool):
+            raise CorrectionError(
+                "invalid_response", CORRECTION_ERROR_CODES["invalid_response"], True
+            )
+        return payload
+
+    def review_and_repair_candidate(
+        self,
+        source: str,
+        candidate: str,
+        protected_terms: Optional[List[str]] = None,
+        timeout_seconds: float = 90.0,
+    ) -> dict[str, Any]:
+        """Accept a normal draft, or review and repair one that looks suspicious.
+
+        Exact Chinese phrase matching is deliberately avoided. Deterministic
+        checks only guard empty/extreme output and critical numbers or code
+        tokens; semantic coverage is decided by the review model.
+        """
+        source = (source or "").strip()
+        candidate = (candidate or "").strip()
+        if not source or not candidate:
+            raise CorrectionError(
+                "empty_response", CORRECTION_ERROR_CODES["empty_response"], True
+            )
+
+        length_ratio = len(candidate) / max(len(source), 1)
+        if length_ratio < 0.12 or length_ratio > 3.0:
+            logger.warning(
+                "termcorrector_candidate_reject reason=extreme_length source_len=%s candidate_len=%s",
+                len(source), len(candidate),
+            )
+            raise CorrectionError(
+                "content_validation_failed",
+                CORRECTION_ERROR_CODES["content_validation_failed"],
+                True,
+            )
+
+        reasons = self._content_review_reasons(source, candidate)
+        if self._protected_term_retention_ratio(protected_terms, candidate) < 1.0:
+            reasons.append("protected_terms_changed")
+        if not reasons:
+            return {
+                "text": candidate,
+                "review_performed": False,
+                "review_repaired": False,
+                "missing_facts": [],
+                "review_error_code": None,
+                "review_error_message": None,
+            }
+
+        template = load_prompt("asr_content_review")
+        prompt = template.render(
+            source_text=source,
+            candidate_text=candidate,
+            risk_reasons="、".join(reasons),
+        )
+        try:
+            review_response = self._call_llm_chunk(prompt, template.system, timeout_seconds)
+            payload = self._parse_review_json(review_response["content"])
+        except CorrectionError as exc:
+            # The first AI draft is already a valid non-empty response. Review
+            # is an enhancement and must not turn that draft into a failure.
+            logger.warning(
+                "termcorrector_candidate_review_failed code=%s message=%s using_first_draft=true",
+                exc.code, exc.message,
+            )
+            return {
+                "text": candidate,
+                "review_performed": True,
+                "review_repaired": False,
+                "missing_facts": [],
+                "review_error_code": exc.code,
+                "review_error_message": exc.message,
+            }
+        missing_facts = payload.get("missing_facts") or []
+        if not isinstance(missing_facts, list):
+            missing_facts = []
+        missing_facts = [str(item).strip() for item in missing_facts if str(item).strip()]
+
+        has_loss = payload["has_material_loss"]
+        repaired_text = str(payload.get("repaired_text") or "").strip()
+        selected = repaired_text if has_loss else candidate
+        if has_loss and not repaired_text:
+            logger.warning(
+                "termcorrector_candidate_review_missing_repair using_first_draft=true"
+            )
+            return {
+                "text": candidate,
+                "review_performed": True,
+                "review_repaired": False,
+                "missing_facts": missing_facts,
+                "review_error_code": "invalid_response",
+                "review_error_message": CORRECTION_ERROR_CODES["invalid_response"],
+            }
+
+        selected_ratio = len(selected) / max(len(source), 1)
+        if not selected or selected_ratio < 0.12 or selected_ratio > 3.0:
+            logger.warning(
+                "termcorrector_candidate_review_invalid_repair ratio=%.2f using_first_draft=true",
+                selected_ratio,
+            )
+            return {
+                "text": candidate,
+                "review_performed": True,
+                "review_repaired": False,
+                "missing_facts": missing_facts,
+                "review_error_code": "invalid_response",
+                "review_error_message": CORRECTION_ERROR_CODES["invalid_response"],
+            }
+
+        remaining_critical_ratio = self.critical_token_retention_ratio(source, selected)
+        remaining_term_ratio = self._protected_term_retention_ratio(protected_terms, selected)
+        if remaining_critical_ratio < 1.0 or remaining_term_ratio < 1.0:
+            logger.warning(
+                "termcorrector_candidate_review_remaining_changes critical_ratio=%.2f protected_ratio=%.2f accepted=true",
+                remaining_critical_ratio, remaining_term_ratio,
+            )
+
+        logger.info(
+            "termcorrector_candidate_reviewed reasons=%s material_loss=%s repaired=%s missing_count=%s",
+            reasons, has_loss, bool(has_loss and repaired_text), len(missing_facts),
+        )
+        return {
+            "text": selected,
+            "review_performed": True,
+            "review_repaired": bool(has_loss and repaired_text),
+            "missing_facts": missing_facts,
+            "review_error_code": None,
+            "review_error_message": None,
+        }
 
     @staticmethod
     def looks_like_summary(candidate: str, source: str = "") -> bool:
@@ -736,6 +1161,500 @@ class TermCorrector:
         source_first_person = len(re.findall(r"(我们|你们|大家|是不是|对吧|怎么)", source or ""))
         candidate_narration = len(re.findall(r"(老师|同学|本次|课程|课堂|讲解|提醒)", text))
         return candidate_narration >= 3 and candidate_narration > source_first_person
+
+    # ──────────────────────────────────────────────────────────────────
+    # LLM call
+    # ──────────────────────────────────────────────────────────────────
+
+    def _call_llm(
+        self,
+        prompt: str,
+        system_msg: str,
+        temperature: float = 0.2,
+        timeout_seconds: float = 60.0,
+    ) -> str:
+        import logging
+        _logger = logging.getLogger(__name__)
+        _logger.info(
+            "termcorrector_llm_call model=%s prompt_len=%s system_len=%s timeout=%s",
+            DEEPSEEK_MODEL, len(prompt), len(system_msg), timeout_seconds,
+        )
+        # DeepSeek V4 defaults to thinking mode, which is unnecessary for
+        # transcript cleanup and slows down the response. Disable it for V4.
+        extra_body = None
+        if DEEPSEEK_MODEL and "deepseek-v4" in DEEPSEEK_MODEL:
+            extra_body = {"thinking": {"type": "disabled"}}
+
+        t0 = time.time()
+        try:
+            response = self._client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+                timeout=timeout_seconds,
+                **({"extra_body": extra_body} if extra_body else {}),
+            )
+        except Exception as exc:
+            elapsed = time.time() - t0
+            code, message, _ = classify_correction_exception(exc)
+            _logger.warning(
+                "termcorrector_llm_exception elapsed=%.2fs code=%s exc_type=%s message=%s",
+                elapsed, code, type(exc).__name__, message,
+                exc_info=True,
+            )
+            raise CorrectionError(code, message, False)
+
+        elapsed = time.time() - t0
+        if not response.choices:
+            _logger.warning("termcorrector_llm_no_choices elapsed=%.2fs", elapsed)
+            raise CorrectionError("invalid_response", CORRECTION_ERROR_CODES["invalid_response"], False)
+        choice = response.choices[0]
+        content = (choice.message.content or "").strip()
+        content = re.sub(r'^```(?:\w+)?\n', '', content, flags=re.MULTILINE)
+        content = re.sub(r'\n?```\s*$', '', content, flags=re.MULTILINE)
+        _logger.info(
+            "termcorrector_llm_response elapsed=%.2fs content_len=%s content_preview=%r",
+            elapsed, len(content), content[:120],
+        )
+        return content.strip()
+
+    # ── chunked restructure ──
+
+    def _classify_exception(self, exc: Exception) -> tuple[str, str, bool]:
+        """Map an LLM client exception to a stable error code and user message."""
+        return classify_correction_exception(exc)
+
+    def _call_llm_chunk(
+        self,
+        prompt: str,
+        system_msg: str,
+        timeout_seconds: float = 90.0,
+    ) -> dict[str, Any]:
+        """Call the LLM for one chunk and validate the response.
+
+        Returns a dict with content, finish_reason and elapsed.  Raises
+        CorrectionError on any failure so the caller can decide whether to
+        retry or fall back to the local clean text for this chunk.
+        """
+        if not self._client:
+            raise CorrectionError(
+                "authentication", CORRECTION_ERROR_CODES["authentication"], False
+            )
+        logger.info(
+            "termcorrector_chunk_call model=%s prompt_len=%s system_len=%s timeout=%s",
+            DEEPSEEK_MODEL, len(prompt), len(system_msg), timeout_seconds,
+        )
+        # DeepSeek V4 defaults to thinking mode; disable it for cleanup speed.
+        extra_body = None
+        if DEEPSEEK_MODEL and "deepseek-v4" in DEEPSEEK_MODEL:
+            extra_body = {"thinking": {"type": "disabled"}}
+
+        t0 = time.perf_counter()
+        try:
+            response = self._client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                timeout=timeout_seconds,
+                **({"extra_body": extra_body} if extra_body else {}),
+            )
+        except Exception as exc:
+            elapsed = time.perf_counter() - t0
+            code, message, retryable = self._classify_exception(exc)
+            logger.warning(
+                "termcorrector_chunk_exception elapsed=%.2fs code=%s exc_type=%s message=%s",
+                elapsed, code, type(exc).__name__, message,
+                exc_info=True,
+            )
+            raise CorrectionError(code, message, retryable)
+
+        elapsed = time.perf_counter() - t0
+        if not response.choices:
+            raise CorrectionError(
+                "invalid_response", "AI 返回格式异常：无 choices", False, finish_reason=None
+            )
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None) or ""
+        content = (choice.message.content or "").strip()
+        content = re.sub(r'^```(?:\w+)?\n', '', content, flags=re.MULTILINE)
+        content = re.sub(r'\n?```\s*$', '', content, flags=re.MULTILINE)
+        content = content.strip()
+        logger.info(
+            "termcorrector_chunk_response elapsed=%.2fs finish_reason=%s content_len=%s",
+            elapsed, finish_reason, len(content),
+        )
+        if not content:
+            raise CorrectionError(
+                "empty_response", CORRECTION_ERROR_CODES["empty_response"], True, finish_reason
+            )
+        if finish_reason == "length":
+            raise CorrectionError(
+                "truncated_response", CORRECTION_ERROR_CODES["truncated_response"], True, finish_reason
+            )
+        return {"content": content, "finish_reason": finish_reason, "elapsed": elapsed}
+
+    def _build_restructure_prompt(
+        self,
+        text: str,
+        course_title: str,
+        keywords: Optional[List[str]],
+        ppt_slides: Optional[list],
+    ) -> tuple[str, str]:
+        keyword_str = "、".join(keywords) if keywords else "无"
+        ppt_context = ""
+        if ppt_slides:
+            ppt_lines = ["## PPT 页面信息（按课堂顺序）"]
+            for s in ppt_slides:
+                page = s.get("page", "?")
+                title = s.get("title", "")
+                stext = s.get("text", "")[:200]
+                ppt_lines.append(f"第{page}页：{title} — {stext}")
+            ppt_context = "\n".join(ppt_lines)
+            prompt_template = load_prompt("asr_reorder")
+        else:
+            prompt_template = load_prompt("asr_correction")
+        prompt = prompt_template.render(
+            course_title=course_title,
+            keywords=keyword_str,
+            text=text,
+            timestamped_text="（无）",
+            ppt_context=ppt_context,
+        )
+        return prompt, prompt_template.system
+
+    @classmethod
+    def _split_natural_chunks(
+        cls,
+        text: str,
+        max_chunk: int = 5000,
+        min_chunk: int = 3000,
+    ) -> List[str]:
+        """Split text into chunks at paragraph or sentence boundaries.
+
+        - 6000 chars or less is handled by the caller as a single chunk.
+        - Longer texts are split so each chunk is between min_chunk and
+          max_chunk characters where possible, never cutting a sentence in half.
+        """
+        text = text.strip()
+        if len(text) <= 6000:
+            return [text]
+
+        paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
+        chunks: List[str] = []
+        current = ""
+
+        def flush():
+            nonlocal current
+            if current:
+                chunks.append(current.strip())
+                current = ""
+
+        for para in paragraphs:
+            # A single paragraph that already exceeds the max must be sentence-split.
+            if len(para) > max_chunk:
+                flush()
+                sentences = cls._split_sentences(para)
+                buf = ""
+                for s in sentences:
+                    if buf and len(buf) + len(s) > max_chunk and len(buf) >= min_chunk:
+                        chunks.append(buf.strip())
+                        buf = s
+                    else:
+                        buf += s
+                    if len(buf) >= min_chunk:
+                        chunks.append(buf.strip())
+                        buf = ""
+                if buf:
+                    if current and len(current) + len(buf) <= max_chunk:
+                        current = (current + "\n\n" + buf).strip()
+                    else:
+                        flush()
+                        current = buf
+                continue
+
+            candidate = (current + "\n\n" + para).strip() if current else para
+            if len(candidate) <= max_chunk:
+                current = candidate
+            else:
+                # If current is already large enough, flush it and start new.
+                if len(current) >= min_chunk:
+                    chunks.append(current)
+                    current = para
+                else:
+                    # current is small but para pushes us over max; flush current
+                    # and put para on its own (it is <= max).
+                    flush()
+                    current = para
+        flush()
+
+        # Merge any trailing tiny chunk back into the previous chunk if size allows.
+        if len(chunks) >= 2 and len(chunks[-1]) < min_chunk:
+            last = chunks.pop()
+            prev = chunks.pop()
+            combined = (prev + "\n\n" + last).strip()
+            if len(combined) <= max_chunk:
+                chunks.append(combined)
+            else:
+                chunks.append(prev)
+                chunks.append(last)
+
+        return chunks or [text]
+
+    def _process_chunk(
+        self,
+        index: int,
+        text: str,
+        prompt: str,
+        system_msg: str,
+        protected_terms: Optional[List[str]] = None,
+        timeout_seconds: float = 90.0,
+    ) -> RestructureChunkResult:
+        """Process a single chunk, retrying once for retryable failures."""
+        local_clean = self.clean_transcript_for_display(text).strip() or text
+        last_error: Optional[CorrectionError] = None
+        elapsed = 0.0
+        finish_reason: Optional[str] = None
+        for attempt in range(2):
+            try:
+                # First attempt uses the requested timeout; retry gets up to 120s.
+                timeout = timeout_seconds if attempt == 0 else min(120.0, max(timeout_seconds + 30.0, 90.0))
+                result = self._call_llm_chunk(prompt, system_msg, timeout)
+                review = self.review_and_repair_candidate(
+                    local_clean,
+                    result["content"],
+                    protected_terms=protected_terms,
+                    timeout_seconds=timeout,
+                )
+                return RestructureChunkResult(
+                    index=index,
+                    input=text,
+                    output=review["text"],
+                    success=True,
+                    elapsed=result["elapsed"],
+                    finish_reason=result["finish_reason"],
+                    input_length=len(text),
+                    review_performed=review["review_performed"],
+                    review_repaired=review["review_repaired"],
+                    missing_facts=review["missing_facts"],
+                    review_error_code=review["review_error_code"],
+                    review_error_message=review["review_error_message"],
+                )
+            except CorrectionError as exc:
+                last_error = exc
+                finish_reason = exc.finish_reason
+                logger.warning(
+                    "termcorrector_chunk_failed index=%s attempt=%s code=%s retryable=%s message=%s",
+                    index, attempt, exc.code, exc.retryable, exc.message,
+                )
+                if not exc.retryable or attempt == 1:
+                    break
+        return RestructureChunkResult(
+            index=index,
+            input=text,
+            output=local_clean,
+            success=False,
+            error_code=last_error.code if last_error else "unknown",
+            error_message=last_error.message if last_error else CORRECTION_ERROR_CODES["unknown"],
+            retryable=last_error.retryable if last_error else False,
+            elapsed=elapsed,
+            finish_reason=finish_reason,
+            input_length=len(text),
+        )
+
+    def restructure_transcript_chunked(
+        self,
+        text: str,
+        course_title: str,
+        keywords: Optional[List[str]] = None,
+        ppt_slides: Optional[list] = None,
+        previous_results: Optional[List[RestructureChunkResult]] = None,
+        retry_failed_only: bool = False,
+        on_chunk_complete: Optional[Callable[[int, int], None]] = None,
+    ) -> RestructureResult:
+        """Restructure transcript in natural chunks with per-chunk fallback.
+
+        Args:
+            text: full local-clean transcript to restructure.
+            previous_results: optional prior chunk results (used for retry).
+            retry_failed_only: when True and previous_results provided, only
+                reprocess chunks that failed previously; successful chunks are
+                reused so content is never lost.
+            on_chunk_complete: optional callback(index, total) invoked each time
+                a chunk finishes (success or failure).
+        """
+        local_text = self.clean_transcript_for_display(text).strip() or text
+        if not self._client or not text or not text.strip():
+            code = "authentication" if not self._client else None
+            message = CORRECTION_ERROR_CODES["authentication"] if not self._client else None
+            return RestructureResult(
+                text=local_text,
+                local_text=local_text,
+                is_ai_corrected=False,
+                error_code=code,
+                error=message,
+                retryable=False,
+                chunks_total=0,
+                chunks_succeeded=0,
+                chunks_failed=0,
+            )
+
+        chunks = self._split_natural_chunks(text)
+        total = len(chunks)
+
+        # Map previous results by index for reuse.
+        prev_by_index: dict[int, RestructureChunkResult] = {}
+        if previous_results:
+            for r in previous_results:
+                if isinstance(r, dict):
+                    r = RestructureChunkResult(**r)
+                prev_by_index[r.index] = r
+
+        # Build prompt/system once; per-chunk prompts substitute the chunk text.
+        _, system_msg = self._build_restructure_prompt(
+            "{text}", course_title, keywords, ppt_slides
+        )
+
+        def make_prompt(chunk_text: str) -> str:
+            prompt, _ = self._build_restructure_prompt(
+                chunk_text, course_title, keywords, ppt_slides
+            )
+            return prompt
+
+        chunk_results: List[RestructureChunkResult] = [None] * total  # type: ignore[list-item]
+
+        def run_chunk(i: int, chunk_text: str) -> RestructureChunkResult:
+            if retry_failed_only and i in prev_by_index and prev_by_index[i].success:
+                return prev_by_index[i]
+            prompt = make_prompt(chunk_text)
+            return self._process_chunk(
+                i,
+                chunk_text,
+                prompt,
+                system_msg,
+                protected_terms=keywords,
+                timeout_seconds=90.0,
+            )
+
+        completed_count = 0
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_to_index = {
+                executor.submit(run_chunk, i, chunk): i for i, chunk in enumerate(chunks)
+            }
+            for future in as_completed(future_to_index):
+                i = future_to_index[future]
+                chunk_text = chunks[i]
+                local_clean = self.clean_transcript_for_display(chunk_text).strip() or chunk_text
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    code, message, retryable = classify_correction_exception(exc)
+                    logger.warning(
+                        "termcorrector_future_exception index=%s code=%s message=%s",
+                        i, code, message,
+                        exc_info=True,
+                    )
+                    result = RestructureChunkResult(
+                        index=i,
+                        input=chunk_text,
+                        output=local_clean,
+                        success=False,
+                        error_code=code,
+                        error_message=message,
+                        retryable=retryable,
+                        input_length=len(chunk_text),
+                    )
+                chunk_results[i] = result
+                completed_count += 1
+                if on_chunk_complete:
+                    try:
+                        on_chunk_complete(completed_count, total)
+                    except Exception:
+                        logger.exception("termcorrector_chunk_callback_failed")
+
+        # Defensive: fill any missing slots with local clean text.
+        for i, chunk_text in enumerate(chunks):
+            if chunk_results[i] is None:
+                local_clean = self.clean_transcript_for_display(chunk_text).strip() or chunk_text
+                chunk_results[i] = RestructureChunkResult(
+                    index=i,
+                    input=chunk_text,
+                    output=local_clean,
+                    success=False,
+                    error_code="unknown",
+                    error_message=CORRECTION_ERROR_CODES["unknown"],
+                    input_length=len(chunk_text),
+                )
+
+        combined = "\n\n".join(r.output for r in chunk_results)
+        display_text = self.clean_transcript_for_display(combined).strip() or combined
+
+        succeeded = sum(1 for r in chunk_results if r.success)
+        failed = total - succeeded
+
+        error_code: Optional[str] = None
+        error_message: Optional[str] = None
+        retryable = False
+        if failed > 0:
+            failed_results = [r for r in chunk_results if not r.success]
+            retryable = any(r.retryable for r in failed_results)
+            if succeeded == 0:
+                # All failed: surface the first error.
+                first = failed_results[0]
+                error_code = first.error_code
+                error_message = first.error_message
+            else:
+                # Partial failure: include counts in the message.
+                dominant = max(
+                    set(r.error_code for r in failed_results),
+                    key=lambda code: sum(1 for r in failed_results if r.error_code == code),
+                )
+                error_code = dominant
+                base = CORRECTION_ERROR_CODES.get(dominant, "AI 整理部分失败")
+                error_message = f"{base}：长转写共 {total} 段，成功 {succeeded} 段、失败 {failed} 段"
+
+        return RestructureResult(
+            text=display_text,
+            local_text=local_text,
+            is_ai_corrected=(succeeded == total and total > 0),
+            error_code=error_code,
+            error=error_message,
+            retryable=retryable,
+            chunks_total=total,
+            chunks_succeeded=succeeded,
+            chunks_failed=failed,
+            chunk_results=chunk_results,
+        )
+
+    def restructure_transcript(
+        self,
+        text: str,
+        course_title: str,
+        keywords: Optional[List[str]] = None,
+        ppt_slides: Optional[list] = None,
+    ) -> str:
+        """Backward-compatible wrapper that returns the corrected text or raises.
+
+        When there is no LLM client or the input text is empty, return the
+        original text immediately without raising.
+        """
+        if not self._client or not text or not text.strip():
+            return text
+        result = self.restructure_transcript_chunked(text, course_title, keywords, ppt_slides)
+        if result.is_ai_corrected:
+            return result.text
+        # Preserve previous behaviour: callers expect an exception when AI fails.
+        raise CorrectionError(
+            result.error_code or "unknown",
+            result.error or CORRECTION_ERROR_CODES["unknown"],
+            result.retryable,
+        )
+
 
 # Singleton
 corrector = TermCorrector()

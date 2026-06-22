@@ -65,6 +65,7 @@ def get_shared_session(
             "id": session.id,
             "notebook_id": session.notebook_id,
             "title": session.title,
+            "summary": session.summary,
             "keywords": session.keywords or [],
             "duration": session.duration,
             "status": session.status,

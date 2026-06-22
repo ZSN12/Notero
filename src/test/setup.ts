@@ -27,6 +27,7 @@ Object.defineProperty(window, 'location', {
   writable: true,
   value: {
     href: 'http://localhost:5173/',
+    origin: 'http://localhost:5173',
     protocol: 'http:',
     hostname: 'localhost',
     port: '5173',
@@ -35,3 +36,26 @@ Object.defineProperty(window, 'location', {
 
 // Mock fetch globally
 global.fetch = vi.fn()
+
+// Mock HTMLCanvasElement 2D context for jsdom (canvas drawing tests)
+HTMLCanvasElement.prototype.getContext = vi.fn(function (this: HTMLCanvasElement, contextId: string) {
+  if (contextId !== '2d') return null;
+  return {
+    canvas: this,
+    clearRect: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    quadraticCurveTo: vi.fn(),
+    stroke: vi.fn(),
+    setTransform: vi.fn(),
+    scale: vi.fn(),
+  };
+}) as any;
+
+// Mock ResizeObserver for component tests that use it
+global.ResizeObserver = vi.fn(function (this: any) {
+  this.observe = vi.fn();
+  this.unobserve = vi.fn();
+  this.disconnect = vi.fn();
+}) as any;

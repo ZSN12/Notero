@@ -8,6 +8,7 @@ Create Date: 2026-06-15 09:00:00.000000
 from typing import Sequence, Union
 
 from alembic import op
+from sqlalchemy import inspect
 import sqlalchemy as sa
 
 
@@ -19,6 +20,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if inspect(bind).has_table("agent_workflows"):
+        return
     op.create_table(
         "agent_workflows",
         sa.Column("id", sa.String(36), primary_key=True),

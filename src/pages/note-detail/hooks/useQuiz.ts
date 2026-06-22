@@ -1,4 +1,31 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+
+function useElapsedTimer(running: boolean) {
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (running) {
+      if (!timerRef.current) {
+        timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+      }
+    } else {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      setElapsed(0);
+    }
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [running]);
+
+  return elapsed;
+}
 import {
   getSessionQuizzes, generateSessionQuiz, getQuizDetail,
   submitQuizAnswers, deleteQuiz, rebuildQuizBank, getQuizBankStatus,
@@ -23,6 +50,7 @@ function deriveBankStatus(
     status,
     question_count: 0,
     progress: stage.progress,
+    message: stage.message,
     error: stage.error_message,
   };
 }
@@ -48,9 +76,13 @@ export function useQuiz(
         ...actualBankStatus,
         status: derivedBankStatus?.status === 'generating' ? derivedBankStatus.status : actualBankStatus.status,
         progress: derivedBankStatus?.status === 'generating' ? derivedBankStatus.progress : actualBankStatus.progress,
+        message: derivedBankStatus?.status === 'generating' ? derivedBankStatus.message : actualBankStatus.message,
         error: derivedBankStatus?.status === 'generating' ? derivedBankStatus.error : actualBankStatus.error,
       }
     : derivedBankStatus;
+
+  const isGenerating = isRebuildingBank || bankStatus?.status === 'generating';
+  const generatingElapsed = useElapsedTimer(isGenerating);
 
   const loadQuizList = async () => {
     if (!sessionId) return;
@@ -85,27 +117,6 @@ export function useQuiz(
     loadBankStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, showQuiz, processingStatus?.stages.quiz_bank?.status]);
-
-  useEffect(() => {
-    if (!sessionId || !showQuiz) return;
-    const stage = processingStatus?.stages.quiz_bank;
-    if (!stage) return;
-    if (stage.status === 'idle') {
-      handleRebuildBank();
-    } else if (stage.status === 'error') {
-      loadBankStatus();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, showQuiz, processingStatus?.stages.quiz_bank?.status]);
-
-  // Auto-generate quiz when drawer opens and bank is ready but no quiz exists
-  useEffect(() => {
-    if (!sessionId || !showQuiz) return;
-    if (bankStatus?.status === 'ready' && quizList.length === 0 && !activeQuiz && !isGeneratingQuiz) {
-      handleGenerateQuiz();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, showQuiz, bankStatus?.status, quizList.length, activeQuiz, isGeneratingQuiz]);
 
   const handleRebuildBank = async () => {
     if (!sessionId) return;
@@ -195,7 +206,7 @@ export function useQuiz(
   };
 
   return {
-    state: { showQuiz, showQuizQA, quizList, activeQuiz, isGeneratingQuiz, quizAnswers, quizSubmitted, quizError, bankStatus, isRebuildingBank },
+    state: { showQuiz, showQuizQA, quizList, activeQuiz, isGeneratingQuiz, quizAnswers, quizSubmitted, quizError, bankStatus, isRebuildingBank, generatingElapsed },
     actions: { setShowQuiz, setShowQuizQA, setActiveQuiz, setQuizAnswers, setQuizSubmitted, setQuizError, handleRebuildBank, handleGenerateQuiz, handleOpenQuiz, handleSubmitQuiz, handleDeleteQuiz },
   };
 }

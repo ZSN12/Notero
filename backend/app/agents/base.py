@@ -10,17 +10,19 @@ import json
 import logging
 import re
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from openai import OpenAI
 from sqlalchemy.orm import Session as DBSession
 
-from app.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from app.core.exceptions import LLMTimeoutError
+from app.core.llm import ChatMessage, get_default_chat_provider
 from app.models import Notebook, Note, Session as DBSessionModel, Task, User
 from app.services.prompt_loader import load_prompt
+from app.services.vocabulary_service import build_entry, save_vocabulary_entry
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,8 @@ class AgentResult:
     data: Optional[dict[str, Any]] = None
     error_message: Optional[str] = None
     skipped: bool = False
+    warning_message: Optional[str] = None
+    warning_message: Optional[str] = None
 
 
 @dataclass
@@ -134,6 +138,7 @@ class BaseAgent(ABC):
     # Default LLM parameters; subclasses may override.
     temperature: float = 0.3
     max_tokens: int = 4000
+    timeout: float = 120.0
 
     def __init__(self) -> None:
         if not all([self.role, self.task_type, self.output_kind, self.prompt_name]):
@@ -164,31 +169,46 @@ class BaseAgent(ABC):
         user_content: str,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> str:
-        """Call DeepSeek with the agent's prompt and return raw text."""
-        if not DEEPSEEK_API_KEY:
-            raise ValueError("未配置 DEEPSEEK_API_KEY，无法运行 Agent")
+        """Call the default chat provider with the agent's prompt and return raw text."""
+        provider = get_default_chat_provider()
+        if not provider.available:
+            raise ValueError(f"未配置可用的 AI Provider，无法运行 Agent '{self.role}'")
 
-        client = OpenAI(
-            api_key=DEEPSEEK_API_KEY,
-            base_url=DEEPSEEK_BASE_URL,
-            timeout=120.0,
-        )
+        messages = [
+            ChatMessage(role="system", content=prompt_template.system),
+            ChatMessage(role="user", content=user_content),
+        ]
+
+        # DeepSeek V4 defaults to thinking mode, which slows down structured-output
+        # agents (mindmap/quiz) and is unnecessary for them. Disable it when the
+        # configured model is a V4 variant.
+        kwargs: dict[str, Any] = {"response_format": {"type": "json_object"}}
+        if provider.__class__.__name__ == "DeepSeekProvider":
+            from app.config import DEEPSEEK_MODEL
+            if DEEPSEEK_MODEL and "deepseek-v4" in DEEPSEEK_MODEL:
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+        started = time.monotonic()
         try:
-            response = client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
-                messages=[
-                    {"role": "system", "content": prompt_template.system},
-                    {"role": "user", "content": user_content},
-                ],
+            response = provider.chat(
+                messages=messages,
                 temperature=temperature if temperature is not None else self.temperature,
                 max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+                timeout=timeout if timeout is not None else self.timeout,
+                **kwargs,
             )
         except Exception as e:
+            logger.warning(
+                "agent_llm_request_failed role=%s elapsed_ms=%s",
+                self.role,
+                int((time.monotonic() - started) * 1000),
+            )
             error_msg = str(e)
             if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                raise ValueError(f"Agent '{self.role}' 请求 DeepSeek 超时，请稍后重试")
-            raise ValueError(f"Agent '{self.role}' 调用 DeepSeek 失败: {error_msg}")
+                raise ValueError(f"Agent '{self.role}' 请求 LLM 超时，请稍后重试")
+            raise ValueError(f"Agent '{self.role}' 调用 LLM 失败: {error_msg}")
 
         choice = response.choices[0]
         if choice.finish_reason == "length":
@@ -197,7 +217,14 @@ class BaseAgent(ABC):
                 f"请减少输入长度或增加 max_tokens"
             )
 
-        return choice.message.content.strip()
+        content = choice.message.content.strip()
+        logger.info(
+            "agent_llm_request_success role=%s elapsed_ms=%s output_chars=%s",
+            self.role,
+            int((time.monotonic() - started) * 1000),
+            len(content),
+        )
+        return content
 
     def parse_json(self, raw: str, repair: bool = True) -> dict:
         """Parse LLM JSON output, stripping markdown fences and optionally repairing."""
@@ -221,37 +248,15 @@ class BaseAgent(ABC):
     ) -> None:
         """Persist agent output into Note.vocabulary as an entry with this agent's kind.
 
-        **Thread-safety:** takes a per-note lock and re-reads Note.vocabulary from
-        DB inside a fresh query so parallel agents do not overwrite each other's
-        entries (read-modify-write race on the JSON column).
+        **Concurrency:** agents may run in parallel Celery workers, so the write
+        uses a database-level ``SELECT ... FOR UPDATE`` row lock.  The per-process
+        ``threading.Lock`` is kept as an in-process belt-and-suspenders guard.
         """
         note_id = ctx.note.id
+        entry = build_entry(self.output_kind, data, extra)
         lock = _get_vocabulary_lock(note_id)
         with lock:
-            # Expire any cached Note object in this session so the next query
-            # hits the DB and sees concurrent commits from other threads.
-            ctx.db.expire_all()
-
-            # Re-read the note row to get the latest vocabulary state.
-            note = ctx.db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise ValueError(f"Note {note_id} not found during save_to_vocabulary")
-
-            existing = note.vocabulary if isinstance(note.vocabulary, list) else []
-            next_items = [
-                item for item in existing
-                if not (isinstance(item, dict) and item.get("kind") == self.output_kind)
-            ]
-            entry: dict[str, Any] = {
-                "kind": self.output_kind,
-                "data": data,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-            }
-            if extra:
-                entry.update(extra)
-            next_items.append(entry)
-            note.vocabulary = next_items
-            ctx.db.commit()
+            save_vocabulary_entry(ctx.db, note_id, entry)
 
     def get_existing_output(self, ctx: AgentContext) -> Optional[dict[str, Any]]:
         """Return any existing vocabulary entry for this agent's kind, or None."""
@@ -274,11 +279,16 @@ class BaseAgent(ABC):
 
     @staticmethod
     def _repair_json(text: str) -> str:
-        """Best-effort JSON repair: close strings and balance brackets."""
-        repaired = text.rstrip()
-        while repaired and repaired[-1] == "\\":
+        """Best-effort JSON repair: close strings and balance brackets.
+
+        With ``response_format={"type": "json_object"}`` this should rarely be
+        triggered; it is kept only as a last-resort fallback.
+        """
+        repaired = text.strip()
+        while repaired.endswith("\\"):
             repaired = repaired[:-1]
 
+        # Close an unterminated string.
         in_string = False
         escape = False
         for ch in repaired:
@@ -293,6 +303,7 @@ class BaseAgent(ABC):
         if in_string:
             repaired += '"'
 
+        # Balance brackets, ignoring content inside strings.
         stack: list[str] = []
         in_string = False
         escape = False
@@ -310,39 +321,11 @@ class BaseAgent(ABC):
                 continue
             if ch in "{[":
                 stack.append(ch)
-            elif ch in "}]":
-                if stack:
-                    stack.pop()
+            elif ch in "}]" and stack:
+                stack.pop()
 
         pairs = {"{": "}", "[": "]"}
         while stack:
             repaired += pairs[stack.pop()]
-
-        repaired = repaired.rstrip()
-        if repaired.endswith(","):
-            repaired = repaired[:-1]
-            # Re-close after removing trailing comma
-            stack = []
-            in_string = False
-            escape = False
-            for ch in repaired:
-                if escape:
-                    escape = False
-                    continue
-                if ch == "\\":
-                    escape = True
-                    continue
-                if ch == '"':
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if ch in "{[":
-                    stack.append(ch)
-                elif ch in "}]":
-                    if stack:
-                        stack.pop()
-            while stack:
-                repaired += pairs[stack.pop()]
 
         return repaired

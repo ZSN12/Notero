@@ -24,10 +24,10 @@ VALID_STAGES = {
     "quiz_bank",
 }
 
-VALID_STATUSES = {"idle", "running", "ready", "error", "stale", "fallback"}
+VALID_STATUSES = {"idle", "queued", "running", "ready", "partial", "error", "stale", "fallback"}
 
 
-_HEALABLE_STATUSES = {"error", "stale", "idle", "fallback"}
+_HEALABLE_STATUSES = {"error", "stale", "idle", "fallback", "queued"}
 
 
 def _get_stored_output_hash(note: Note, stage: str) -> str | None:
@@ -153,6 +153,26 @@ def set_running(
     return state
 
 
+def set_queued(
+    db: Session,
+    session_id: str,
+    stage: str,
+    message: Optional[str] = None,
+    commit: bool = True,
+) -> SessionProcessingState:
+    state = _get_or_create_state(db, session_id, stage)
+    state.status = "queued"
+    state.progress = 0.0
+    state.message = message
+    state.error_message = None
+    state.started_at = None
+    state.finished_at = None
+    if commit:
+        db.commit()
+    logger.info("state_queued session_id=%s stage=%s", session_id, stage)
+    return state
+
+
 def set_ready(
     db: Session,
     session_id: str,
@@ -189,6 +209,26 @@ def set_error(
     if commit:
         db.commit()
     logger.info("state_error session_id=%s stage=%s error=%s", session_id, stage, error_message)
+    return state
+
+
+def set_partial(
+    db: Session,
+    session_id: str,
+    stage: str,
+    message: Optional[str] = None,
+    error_message: Optional[str] = None,
+    commit: bool = True,
+) -> SessionProcessingState:
+    state = _get_or_create_state(db, session_id, stage)
+    state.status = "partial"
+    state.progress = 1.0
+    state.message = message
+    state.error_message = error_message
+    state.finished_at = datetime.now(timezone.utc)
+    if commit:
+        db.commit()
+    logger.info("state_partial session_id=%s stage=%s", session_id, stage)
     return state
 
 
@@ -299,8 +339,16 @@ def get_session_processing_status(db: Session, session_id: str) -> dict:
             "can_auto_generate": bool,
             "can_ask_rag": bool,
             "needs_user_action": bool,
+            "agent_timeout_seconds": int,
         }
     """
+    from app.services.agent_state_service import heal_stuck_agent_states
+    from app.config import AGENT_TIMEOUT_SECONDS
+
+    # Heal any stuck tasks/states/workflows before returning status so the UI
+    # never shows a dead (e.g. pre-restart daemon thread) task as running.
+    heal_stuck_agent_states(db, session_id=session_id)
+
     states = (
         db.query(SessionProcessingState)
         .filter(SessionProcessingState.session_id == session_id)
@@ -333,6 +381,8 @@ def get_session_processing_status(db: Session, session_id: str) -> dict:
     if not stage_map or all(s == "idle" for s in all_statuses):
         overall_status = "idle"
     elif any(s == "running" for s in all_statuses):
+        overall_status = "running"
+    elif any(s == "queued" for s in all_statuses):
         overall_status = "running"
     elif any(s == "error" for s in all_statuses):
         overall_status = "error"
@@ -384,6 +434,7 @@ def get_session_processing_status(db: Session, session_id: str) -> dict:
         "can_auto_generate": can_auto_generate,
         "can_ask_rag": can_ask_rag,
         "needs_user_action": needs_user_action,
+        "agent_timeout_seconds": AGENT_TIMEOUT_SECONDS,
         "latest_tasks": [
             {
                 "id": t.id,

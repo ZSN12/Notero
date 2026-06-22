@@ -1,9 +1,12 @@
 """Distributed login failure tracker backed by Redis (with in-memory fallback)."""
 
 import json
+import logging
 import time
 import threading
 from app.core.redis_client import get_redis, redis_available
+
+logger = logging.getLogger(__name__)
 
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_DURATION = 15 * 60  # 15 minutes
@@ -29,7 +32,7 @@ def get_attempts(email: str) -> dict | None:
                 if data:
                     return json.loads(data)
             except Exception:
-                pass
+                logger.warning("suppressed_exception", exc_info=True)
     with _memory_lock:
         return _memory_attempts.get(email)
 
@@ -61,7 +64,7 @@ def record_failure(email: str) -> tuple[int, bool]:
                     return int(locked_until - now), True
                 return 0, False
             except Exception:
-                pass  # fallthrough to memory
+                logger.warning("suppressed_exception", exc_info=True)  # fallthrough to memory
 
     with _memory_lock:
         current = _memory_attempts.get(email, {"count": 0, "locked_until": 0})
@@ -83,7 +86,7 @@ def clear_attempts(email: str) -> None:
                 r.delete(_redis_key(email))
                 return
             except Exception:
-                pass
+                logger.warning("suppressed_exception", exc_info=True)
     with _memory_lock:
         _memory_attempts.pop(email, None)
 

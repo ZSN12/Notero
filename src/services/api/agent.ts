@@ -6,10 +6,14 @@ export interface RestructureTranscriptResult {
   agents: { session_id: string; agents?: Array<{ role: string; task_id: string; status: string }>; reused?: boolean } | null;
 }
 
-export async function runAllAgents(sessionId: string, roles?: string[]): Promise<{ workflow_id: string; session_id: string; agents: Array<{ role: string; task_id: string; status: string; progress: number; error: string | null }>; reused?: boolean }> {
+export async function runAllAgents(
+  sessionId: string,
+  roles?: string[],
+  force = false,
+): Promise<{ workflow_id: string; session_id: string; agents: Array<{ role: string; task_id: string; status: string; progress: number; error: string | null }>; reused?: boolean }> {
   return request(`/api/agents/session/${sessionId}/run`, {
     method: 'POST',
-    body: JSON.stringify({ roles }),
+    body: JSON.stringify({ roles, force }),
     timeoutMs: 15000,
   });
 }

@@ -98,6 +98,7 @@ class NotebookResponse(BaseModel):
 # Session Schemas
 class SessionCreate(BaseModel):
     title: str
+    summary: Optional[str] = None
     keywords: Optional[list[str]] = None
 
     @field_validator("title")
@@ -109,6 +110,7 @@ class SessionCreate(BaseModel):
 
 class SessionUpdate(BaseModel):
     title: Optional[str] = None
+    summary: Optional[str] = None
     keywords: Optional[list[str]] = None
     duration: Optional[str] = None
 
@@ -117,6 +119,7 @@ class SessionResponse(BaseModel):
     id: str
     notebook_id: str
     title: str
+    summary: Optional[str] = None
     keywords: list[str] = []
     duration: Optional[str] = None
     status: str = "pending"
@@ -202,6 +205,7 @@ class NoteCreate(BaseModel):
 class NoteUpdate(BaseModel):
     content: Optional[str] = None
     layout_blocks: Optional[list[LayoutBlock]] = None
+    annotations: Optional[dict] = None
 
     @field_validator("layout_blocks")
     @classmethod
@@ -219,6 +223,7 @@ class NoteResponse(BaseModel):
     ppt_images: Optional[list[PPTImageData]] = None
     vocabulary: Optional[list[VocabularyItem]] = None
     layout_blocks: Optional[list[LayoutBlock]] = None
+    annotations: Optional[dict] = None
     created_at: datetime
 
 # File Schemas
@@ -321,6 +326,7 @@ class PasswordChange(BaseModel):
 
 class SessionNoteBundle(BaseModel):
     title: str
+    summary: Optional[str] = None
     keywords: Optional[list[str]] = None
     content: Optional[str] = None
     transcript: Optional[list] = None

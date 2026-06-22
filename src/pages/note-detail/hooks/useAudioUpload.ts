@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
 import { uploadAudio, finalizeTranscript } from '@/services/api';
 import type { BackendNote } from '@/services/api';
+import { buildCorrectionStatus, type CorrectionStatus } from './useRestructure';
 
 export interface AudioUploadCallbacks {
   clearDerivedTranscriptViews: () => void;
   clearStreamingTranscriptChunks: () => void;
   updateTranscriptText: (text: string, append: boolean) => void;
   appendTranscriptText: (text: string, skipDedup?: boolean) => void;
-  receiveAiText: (text: string, options?: { force?: boolean }) => void;
+  receiveAiText: (text: string, options?: { force?: boolean; authoritative?: boolean }) => void;
   clearStreamingTranscriptChunksFinal: () => void;
   clearContentBlocks: () => void;
   scrollToBottom: () => void;
@@ -64,7 +65,7 @@ export function useAudioUpload(
   const handleAudioUpload = async (
     files: File | File[],
     callbacks: AudioUploadCallbacks,
-    onCorrectionStatus: (status: { type: 'idle' | 'processing' | 'corrected' | 'local' | 'error'; message?: string }) => void,
+    onCorrectionStatus: (status: CorrectionStatus) => void,
     onTranscriptReady?: (note: BackendNote) => void | Promise<void>,
   ) => {
     if (!sessionId) return;
@@ -125,14 +126,8 @@ export function useAudioUpload(
                 const sorted = Array.isArray(note.transcript)
                   ? [...note.transcript].sort((a: { chunk_index?: number }, b: { chunk_index?: number }) => (a.chunk_index || 0) - (b.chunk_index || 0))
                   : [];
-                const lastEntry = sorted[sorted.length - 1] as { is_ai_corrected?: boolean; correction_error?: string } | undefined;
-                if (lastEntry?.is_ai_corrected) {
-                  onCorrectionStatus({ type: 'corrected' });
-                } else if (lastEntry?.correction_error && !isPendingCorrectionMessage(lastEntry.correction_error)) {
-                  onCorrectionStatus({ type: 'error', message: lastEntry.correction_error });
-                } else {
-                  onCorrectionStatus({ type: 'local' });
-                }
+                const lastEntry = sorted[sorted.length - 1] as Record<string, unknown> | undefined;
+                onCorrectionStatus(buildCorrectionStatus(lastEntry));
               }
               resolve();
             },
@@ -181,16 +176,10 @@ export function useAudioUpload(
           if (dbText) {
             // Respect user edits made during upload: receiveAiText will queue the
             // AI-restructured version as pending instead of overwriting local changes.
-            callbacks.receiveAiText(dbText);
+            callbacks.receiveAiText(dbText, { authoritative: true });
           }
-          const lastEntry = finalNote.transcript[finalNote.transcript.length - 1] as any;
-          if (lastEntry?.is_ai_corrected) {
-            onCorrectionStatus({ type: 'corrected' });
-          } else if (lastEntry?.correction_error && !isPendingCorrectionMessage(lastEntry.correction_error)) {
-            onCorrectionStatus({ type: 'error', message: lastEntry.correction_error });
-          } else {
-            onCorrectionStatus({ type: 'local' });
-          }
+          const lastEntry = finalNote.transcript[finalNote.transcript.length - 1] as Record<string, unknown> | undefined;
+          onCorrectionStatus(buildCorrectionStatus(lastEntry));
         }
         await onTranscriptReady?.(finalNote);
         options?.onFinalize?.();

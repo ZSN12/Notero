@@ -9,7 +9,6 @@ Stores results in Note.vocabulary with kind="quiz_bank" and kind="quiz".
 
 import logging
 import random
-import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -18,14 +17,20 @@ from typing import Optional
 from app.agents import AgentContext, get_agent
 from app.agents.normalizers import normalize_quiz_data
 from app.config import DEEPSEEK_API_KEY
-from openai import OpenAI  # noqa: F401  kept for test compatibility
 from app.models import Note, Session, Notebook, User, Task
 from sqlalchemy.orm import Session as DBSessionType
 from app.core.database import SessionLocal
+from app.core.locks import get_session_task_lock
 from app.core.task_runner import run_agent_task
+from app.services.session_service import get_user_session as _get_session_by_user
 from app.services.vector_service import _compute_session_content_hash
-from app.services.state_service import set_running, set_ready, set_error, get_state
 from app.services.note_utils import get_canonical_note_text
+from app.services.state_service import set_running, set_ready, set_error, get_state
+from app.services.vocabulary_service import (
+    append_vocabulary_entry,
+    delete_vocabulary_entries,
+    save_vocabulary_entry,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -33,23 +38,6 @@ logger = logging.getLogger(__name__)
 TASK_TYPE = "agent_quiz"
 ACTIVE_TASK_STATUSES = {"pending", "running"}
 QUESTIONS_PER_QUIZ = 10
-
-# Per-(session_id, task_type) lock to prevent races when checking for active
-# tasks and creating new ones.
-_START_LOCKS: dict[str, threading.Lock] = {}
-_START_LOCKS_GUARD = threading.Lock()
-
-
-def _get_start_lock(session_id: str, task_type: str) -> threading.Lock:
-    key = f"{session_id}:{task_type}"
-    lock = _START_LOCKS.get(key)
-    if lock is None:
-        with _START_LOCKS_GUARD:
-            lock = _START_LOCKS.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                _START_LOCKS[key] = lock
-    return lock
 
 
 # ── Vocabulary helpers: quiz_bank ──
@@ -77,17 +65,21 @@ def _get_quiz_bank_from_vocabulary(note: Note) -> Optional[dict]:
     return None
 
 
-def _set_quiz_bank_in_vocabulary(note: Note, bank_data: dict, content_hash: str):
-    """Set or replace the quiz_bank entry in note.vocabulary."""
-    existing = note.vocabulary if isinstance(note.vocabulary, list) else []
-    next_items = [item for item in existing if not (isinstance(item, dict) and item.get("kind") == "quiz_bank")]
-    next_items.append({
+def _set_quiz_bank_in_vocabulary(
+    db: DBSessionType, note: Note, bank_data: dict, content_hash: str
+):
+    """Set or replace the quiz_bank entry in note.vocabulary.
+
+    Uses ``SELECT ... FOR UPDATE`` so concurrent agents do not overwrite other
+    vocabulary entries.
+    """
+    entry = {
         "kind": "quiz_bank",
         "content_hash": content_hash,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "questions": bank_data["questions"],
-    })
-    note.vocabulary = next_items
+    }
+    save_vocabulary_entry(db, note.id, entry)
 
 
 # ── Vocabulary helpers: quiz attempts ──
@@ -102,22 +94,18 @@ def _get_quizzes_from_vocabulary(note: Note) -> list[dict]:
     ]
 
 
-def _add_quiz_to_vocabulary(note: Note, quiz_entry: dict):
+def _add_quiz_to_vocabulary(db: DBSessionType, note: Note, quiz_entry: dict):
     """Add a quiz attempt entry to note.vocabulary."""
-    existing = note.vocabulary if isinstance(note.vocabulary, list) else []
-    next_items = list(existing)
-    next_items.append(quiz_entry)
-    note.vocabulary = next_items
+    append_vocabulary_entry(db, note.id, quiz_entry)
 
 
-def _remove_quiz_from_vocabulary(note: Note, quiz_id: str):
+def _remove_quiz_from_vocabulary(db: DBSessionType, note: Note, quiz_id: str):
     """Remove a specific quiz attempt from note.vocabulary by quiz_id."""
-    existing = note.vocabulary if isinstance(note.vocabulary, list) else []
-    next_items = [
-        item for item in existing
-        if not (isinstance(item, dict) and item.get("kind") == "quiz" and item.get("quiz_id") == quiz_id)
-    ]
-    note.vocabulary = next_items
+    delete_vocabulary_entries(
+        db,
+        note.id,
+        lambda item: item.get("kind") == "quiz" and item.get("quiz_id") == quiz_id,
+    )
 
 
 def _get_quiz_from_vocabulary(note: Note, quiz_id: str) -> Optional[dict]:
@@ -130,16 +118,18 @@ def _get_quiz_from_vocabulary(note: Note, quiz_id: str) -> Optional[dict]:
     return None
 
 
-def _update_quiz_in_vocabulary(note: Note, quiz_id: str, updated_entry: dict):
+def _update_quiz_in_vocabulary(
+    db: DBSessionType, note: Note, quiz_id: str, updated_entry: dict
+):
     """Replace a quiz entry in vocabulary (for saving submissions)."""
-    existing = note.vocabulary if isinstance(note.vocabulary, list) else []
-    next_items = []
-    for item in existing:
-        if isinstance(item, dict) and item.get("kind") == "quiz" and item.get("quiz_id") == quiz_id:
-            next_items.append(updated_entry)
-        else:
-            next_items.append(item)
-    note.vocabulary = next_items
+    save_vocabulary_entry(
+        db,
+        note.id,
+        updated_entry,
+        replace_predicate=lambda item: (
+            item.get("kind") == "quiz" and item.get("quiz_id") == quiz_id
+        ),
+    )
 
 
 def _sample_questions_for_attempt(all_questions: list[dict], quizzes: list[dict], count: int) -> list[dict]:
@@ -189,31 +179,10 @@ def _sample_questions_for_attempt(all_questions: list[dict], quizzes: list[dict]
     return selected
 
 
-# ── Content extraction ──
-
-def _extract_content_for_prompt(note: Note) -> str:
-    """Extract all note content into a single text for the AI prompt.
-
-    Uses the canonical note text (transcript + notes + PPT) so that user edits
-    and deletions are respected and the same source is used across agents.
-    """
-    text = get_canonical_note_text(note, include_ppt=True)
-    if text.strip():
-        return text.strip()
-
-    # Fallback: raw content if canonical extraction returned nothing.
-    if note.content:
-        return note.content.strip()
-
-    return ""
-
-
 # ── Session ownership ──
 
 def _get_session_for_user(session_id: str, user: User, db: DBSessionType) -> Session | None:
-    return db.query(Session).filter(
-        Session.id == session_id
-    ).join(Notebook).filter(Notebook.user_id == user.id).first()
+    return _get_session_by_user(db, session_id, user.id)
 
 
 # ── Async task helpers ──
@@ -262,7 +231,7 @@ def _generate_question_bank_sync(session_id: str, user: User, db: DBSessionType,
     if not notebook:
         raise ValueError("Notebook not found")
 
-    content_text = _extract_content_for_prompt(note)
+    content_text = get_canonical_note_text(note, include_ppt=True)
     if not content_text.strip():
         raise ValueError("No indexable content in note")
 
@@ -346,7 +315,7 @@ def get_bank_status(session_id: str, user: User, db: DBSessionType) -> dict:
         raise ValueError("Session not found or access denied")
 
     note = db.query(Note).filter(Note.session_id == session_id).first()
-    has_content = bool(note and (note.content or note.transcript or note.ppt_images or note.layout_blocks))
+    has_content = bool(note and get_canonical_note_text(note, include_ppt=True).strip())
 
     if not has_content:
         return {"session_id": session_id, "status": "empty", "question_count": 0, "task_id": None, "progress": 0, "error": None}
@@ -419,11 +388,11 @@ def start_bank_generation(session_id: str, user: User, db: DBSessionType, force:
     note = db.query(Note).filter(Note.session_id == session_id).first()
     if not note:
         raise ValueError("No note content found")
-    content_text = _extract_content_for_prompt(note)
+    content_text = get_canonical_note_text(note, include_ppt=True)
     if not content_text.strip():
         raise ValueError("No indexable content in note")
 
-    with _get_start_lock(session_id, TASK_TYPE):
+    with get_session_task_lock(session_id, TASK_TYPE):
         # Re-check inside the lock to close the race window.
         db.expire_all()
 
@@ -517,8 +486,7 @@ def generate_quiz(session_id: str, user: User, db: DBSessionType) -> dict:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "submission": None,
     }
-    _add_quiz_to_vocabulary(note, quiz_entry)
-    db.commit()
+    _add_quiz_to_vocabulary(db, note, quiz_entry)
 
     # Return questions WITHOUT answers for the taking-quiz view
     safe_questions = []
@@ -691,8 +659,7 @@ def submit_quiz_answers(session_id: str, quiz_id: str, user: User, db: DBSession
         "results": results,
         "submitted_at": datetime.now(timezone.utc).isoformat(),
     }
-    _update_quiz_in_vocabulary(note, quiz_id, updated_entry)
-    db.commit()
+    _update_quiz_in_vocabulary(db, note, quiz_id, updated_entry)
 
     return {
         "score": correct_count,
@@ -712,7 +679,6 @@ def delete_quiz(session_id: str, quiz_id: str, user: User, db: DBSessionType) ->
 
     note = db.query(Note).filter(Note.session_id == session_id).first()
     if note:
-        _remove_quiz_from_vocabulary(note, quiz_id)
-        db.commit()
+        _remove_quiz_from_vocabulary(db, note, quiz_id)
 
     return {"session_id": session_id, "quiz_id": quiz_id, "status": "deleted"}

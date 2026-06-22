@@ -197,7 +197,7 @@ export function useRecording(
     setIsPaused(false);
   }, [_startTimerOnly]);
 
-  const stopRecording = useCallback(async (onTranscriptUpdate: (text: string) => void): Promise<{ note?: any; status?: string } | undefined> => {
+  const stopRecording = useCallback(async (onTranscriptUpdate: (text: string, options?: { force?: boolean; authoritative?: boolean }) => void): Promise<{ note?: any; status?: string } | undefined> => {
     // 1. Cleanup audio
     if (streamRef.current) { streamRef.current.getTracks().forEach((track) => track.stop()); streamRef.current = null; }
     if (audioContextRef.current) { await audioContextRef.current.close(); audioContextRef.current = null; }
@@ -221,26 +221,40 @@ export function useRecording(
         await updateSessionDuration(sessionId, Date.now() - startTimeRef.current - pausedDurationRef.current);
       }
 
-      // 4. Call audio-finish: concatenates audio, flushes the final chunk, and saves
-      // the local transcript. AI finalization is intentionally manual after real-time
-      // recording; the user must click "AI 整理" to generate mindmap / quiz / Q&A.
+      // 4. Call audio-finish: concatenate and persist audio only. AI organization
+      // remains an explicit user action for real-time recordings.
+      let finalNote: any = undefined;
       let finishStatus: string | undefined = undefined;
       if (sessionId) {
         const finishResult = await finishRecording(sessionId);
         finishStatus = finishResult.status;
+        finalNote = finishResult.note;
         if (finishResult.status === 'error') {
           setIsError(true);
           setErrorMessage('录音保存失败，请稍后重试');
-        } else if (finishResult.status === 'no_audio' || finishResult.status === 'no_chunks') {
-          setIsError(true);
-          setErrorMessage('未检测到录音内容');
-        } else if (finishResult.status === 'finished') {
-          // Local transcript is saved; tell the UI to prompt for manual AI finalize.
+        } else {
+          // Refresh processing status so the UI can offer the AI organize action.
           options?.onFinalize?.();
+          if (finalNote?.transcript && finalNote.transcript.length > 0) {
+            const sorted = [...finalNote.transcript].sort(
+              (a: any, b: any) => (a.chunk_index || 0) - (b.chunk_index || 0)
+            );
+            const hasFinalTranscript = sorted.some((c: any) => c.correction_stage === 'final');
+            if (hasFinalTranscript) {
+              const dbText = sorted
+                .map((c: any) => c.display_text || c.corrected_text || c.text || c.raw_text || '')
+                .filter(Boolean)
+                .join('\n\n')
+                .trim();
+              if (dbText && dbText.length > 0) {
+                onTranscriptUpdate(dbText, { authoritative: true });
+              }
+            }
+          }
         }
         setAudioPlaybackUrl(getAudioUrl(sessionId));
       }
-      return { status: finishStatus };
+      return { note: finalNote, status: finishStatus };
     } catch (error: any) {
       console.error('Failed to finish recording:', error);
       setIsError(true);

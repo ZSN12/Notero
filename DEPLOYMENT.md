@@ -115,7 +115,7 @@ redis-cli ping  # 应返回 PONG
 ```bash
 cd backend
 pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload --reload-dir app --reload-exclude tests
 ```
 
 ### 4.2 生产模式（多 worker）

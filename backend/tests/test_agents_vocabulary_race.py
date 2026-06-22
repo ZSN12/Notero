@@ -5,6 +5,7 @@ Two agents saving concurrently should each preserve their entry.
 
 import os
 import sys
+import uuid
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -16,6 +17,8 @@ from app.core.database import SessionLocal, engine
 from app.models import Base, Notebook, Note, Session as DBSession, User
 from app.core.auth import hash_password
 from app.agents.base import AgentContext, BaseAgent, AgentResult
+from app.services.mindmap_service import _set_mind_map_in_vocabulary
+from app.services.quiz_service import _set_quiz_bank_in_vocabulary
 from sqlalchemy.orm import Session as ORMSession
 
 
@@ -49,7 +52,7 @@ def _setup():
     try:
         user = User(
             username="race_test",
-            email="race@test.com",
+            email=f"race_{uuid.uuid4().hex[:8]}@test.com",
             password_hash=hash_password("race12345"),
         )
         db.add(user)
@@ -118,5 +121,53 @@ def test_save_to_vocabulary_is_thread_safe():
         kinds = {item.get("kind") for item in vocab if isinstance(item, dict)}
         assert "alpha_output" in kinds, f"Missing alpha_output in {kinds}"
         assert "beta_output" in kinds, f"Missing beta_output in {kinds}"
+    finally:
+        db.close()
+
+
+def test_concurrent_mind_map_and_quiz_bank_preserve_both():
+    """Two independent DB sessions saving mind_map and quiz_bank concurrently.
+
+    Each write must preserve the other kind; the final row must contain both
+    entries.  This exercises the ``SELECT ... FOR UPDATE`` row lock across
+    separate sessions.
+    """
+    user_id, _, session_id, note_id = _setup()
+    import threading
+
+    def save_mind_map():
+        db = SessionLocal()
+        try:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            _set_mind_map_in_vocabulary(
+                db, note, {"nodes": [{"id": "n1"}]}, "mindmap_hash"
+            )
+        finally:
+            db.close()
+
+    def save_quiz_bank():
+        db = SessionLocal()
+        try:
+            note = db.query(Note).filter(Note.id == note_id).first()
+            _set_quiz_bank_in_vocabulary(
+                db, note, {"questions": [{"id": "q1"}]}, "quiz_hash"
+            )
+        finally:
+            db.close()
+
+    t1 = threading.Thread(target=save_mind_map)
+    t2 = threading.Thread(target=save_quiz_bank)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    db = SessionLocal()
+    try:
+        note = db.query(Note).filter(Note.id == note_id).first()
+        vocab = note.vocabulary if isinstance(note.vocabulary, list) else []
+        kinds = {item.get("kind") for item in vocab if isinstance(item, dict)}
+        assert "mind_map" in kinds, f"Missing mind_map in {kinds}"
+        assert "quiz_bank" in kinds, f"Missing quiz_bank in {kinds}"
     finally:
         db.close()

@@ -13,7 +13,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 os.environ["DEEPSEEK_API_KEY"] = "test-key"
 os.environ["DEEPSEEK_BASE_URL"] = "https://api.example.com"
 
-from app.services.term_corrector import TermCorrector, corrector
+from app.services.term_corrector import TermCorrector, corrector, RestructureResult, RestructureChunkResult, CorrectionError, CORRECTION_ERROR_CODES
 
 
 class TestHasLLM:
@@ -251,8 +251,8 @@ class TestNormKey:
 
 class TestPreservesSourceContent:
     def test_empty_source(self):
+        # Empty source has nothing to preserve.
         assert corrector.preserves_source_content("", "") is True
-        # Threshold validation is disabled; only summary detection rejects
         assert corrector.preserves_source_content("", "some") is True
 
     def test_content_preserved(self):
@@ -260,16 +260,100 @@ class TestPreservesSourceContent:
         candidate = "单例模式确保一个类只有一个实例。工厂模式用于创建对象。"
         assert corrector.preserves_source_content(raw, candidate) is True
 
-    def test_content_deleted(self):
+    def test_semantic_rewrite_does_not_require_exact_chinese_keywords(self):
+        raw = "操作系统通过调度器选择就绪进程运行，并在时间片结束后切换到其他进程。"
+        candidate = "调度程序会从就绪队列选出任务执行；其时间配额用完后，系统再切换执行对象。"
+        assert corrector.preserves_source_content(raw, candidate) is True
+
+    def test_shorter_content_is_sent_to_ai_review_not_hard_rejected(self):
         raw = "单例模式确保一个类只有一个实例。工厂模式用于创建对象。观察者模式用于事件通知。"
         candidate = "单例模式确保一个类只有一个实例。"
-        # Threshold validation is disabled; only summary detection rejects
         assert corrector.preserves_source_content(raw, candidate) is True
+        assert "substantially_shorter" in corrector._content_review_reasons(raw, candidate)
 
     def test_looks_like_summary_rejected(self):
         raw = "今天我们学习单例模式和工厂模式。"
         candidate = "本节课讲了单例模式和工厂模式。"
         assert corrector.preserves_source_content(raw, candidate) is False
+
+    def test_missing_keywords_and_numbers_rejected(self):
+        raw = "今天我们学习 requests 库，版本是 2.28，调用 requests.get 方法。"
+        candidate = "今天我们学习 Python 编程。"
+        assert corrector.preserves_source_content(raw, candidate) is False
+
+
+class TestAiContentReview:
+    def test_normal_draft_is_accepted_without_second_call(self):
+        c = TermCorrector()
+        c._client = MagicMock()
+        source = "进程通过调度器获得处理器时间，时间片结束后切换任务。"
+        result = c.review_and_repair_candidate(source, source)
+        assert result["text"] == source
+        assert result["review_performed"] is False
+        c._client.chat.completions.create.assert_not_called()
+
+    def test_suspicious_draft_is_repaired_by_review(self):
+        c = TermCorrector()
+        c._client = MagicMock()
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].finish_reason = "stop"
+        response.choices[0].message.content = (
+            '{"has_material_loss":true,'
+            '"missing_facts":["时间片结束后切换任务"],'
+            '"repaired_text":"进程通过调度器获得处理器时间，时间片结束后切换任务。"}'
+        )
+        c._client.chat.completions.create.return_value = response
+
+        source = "进程通过调度器获得处理器时间，时间片结束后切换任务。"
+        result = c.review_and_repair_candidate(source, "进程由调度器分配处理器。")
+
+        assert result["review_performed"] is True
+        assert result["review_repaired"] is True
+        assert "时间片结束" in result["text"]
+        assert result["missing_facts"] == ["时间片结束后切换任务"]
+
+    def test_known_course_terms_trigger_review(self):
+        c = TermCorrector()
+        c._client = MagicMock()
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].finish_reason = "stop"
+        response.choices[0].message.content = (
+            '{"has_material_loss":true,'
+            '"missing_facts":["临界区"],'
+            '"repaired_text":"互斥锁用于保护临界区，避免多个线程同时修改共享数据。"}'
+        )
+        c._client.chat.completions.create.return_value = response
+
+        source = "互斥锁用于保护临界区，避免多个线程同时修改共享数据。"
+        result = c.review_and_repair_candidate(
+            source,
+            "互斥锁可以避免多个线程同时修改共享数据。",
+            protected_terms=["互斥锁", "临界区"],
+        )
+        assert result["review_repaired"] is True
+        assert "临界区" in result["text"]
+
+    def test_invalid_review_keeps_first_ai_draft(self):
+        c = TermCorrector()
+        c._client = MagicMock()
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].finish_reason = "stop"
+        response.choices[0].message.content = "not-json"
+        c._client.chat.completions.create.return_value = response
+
+        source = "进程通过调度器获得处理器时间，时间片结束后切换任务。"
+        draft = "进程由调度器分配处理器，之后系统切换任务。"
+        result = c.review_and_repair_candidate(
+            source, draft, protected_terms=["时间片"]
+        )
+
+        assert result["text"] == draft
+        assert result["review_performed"] is True
+        assert result["review_repaired"] is False
+        assert result["review_error_code"] == "invalid_response"
 
 
 class TestLooksLikeSummary:
@@ -340,31 +424,165 @@ class TestRestructureTranscript:
         assert c.restructure_transcript("", "test") == ""
         assert c.restructure_transcript("   ", "test") == "   "
 
-    @patch("app.agents.transcript_agent.TranscriptOrganizerAgent.restructure_text")
-    def test_llm_success(self, mock_restructure):
-        mock_restructure.return_value = "cleaned text"
+    def test_short_text_single_chunk_success(self):
         c = TermCorrector()
         c._client = MagicMock()
-        result = c.restructure_transcript("raw", "course", keywords=["kw"])
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.choices[0].message.content = "cleaned text"
+        c._client.chat.completions.create.return_value = mock_response
+
+        # Use a source long enough that a modest rewrite is not rejected by the
+        # content-preservation guard, and do not pass protected keywords that the
+        # mock output does not contain (otherwise a review pass is triggered).
+        result = c.restructure_transcript("raw text input", "course")
         assert result == "cleaned text"
-        mock_restructure.assert_called_once_with(
-            raw_text="raw", course_title="course", keywords=["kw"], ppt_slides=None
+        c._client.chat.completions.create.assert_called_once()
+
+    def test_chunked_long_text_splits(self):
+        c = TermCorrector()
+        c._client = MagicMock()
+        calls: list[str] = []
+
+        def fake_create(**kwargs):
+            messages = kwargs.get("messages", [])
+            content = messages[-1]["content"] if messages else ""
+            calls.append(content)
+            response = MagicMock()
+            response.choices = [MagicMock()]
+            response.choices[0].finish_reason = "stop"
+            # Return a marker plus enough real-looking text so the content-
+            # preservation guard accepts the rewrite (>= 65% of source length).
+            marker = f"[{len(calls)}]"
+            response.choices[0].message.content = marker + " content continues" * 500
+            return response
+
+        c._client.chat.completions.create.side_effect = fake_create
+        # Build two long paragraphs without sentence punctuation.  This keeps the
+        # local-clean step from collapsing the source to a tiny deduplicated stub.
+        # Use plain lowercase tokens so none are treated as critical tokens.
+        para1 = "chunkone " + "tokenone " * 1000
+        para2 = "chunktwo " + "tokentwo " * 1000
+        result = c.restructure_transcript_chunked(para1 + "\n\n" + para2, "course")
+        assert result.chunks_total > 1
+        assert result.chunks_succeeded == result.chunks_total
+        assert "[1]" in result.text
+        assert "[2]" in result.text
+
+    def test_partial_failure_keeps_success_chunks(self):
+        c = TermCorrector()
+        c._client = MagicMock()
+
+        def fake_create(**kwargs):
+            messages = kwargs.get("messages", [])
+            content = messages[-1]["content"] if messages else ""
+            response = MagicMock()
+            response.choices = [MagicMock()]
+            if "sectionone" in content:
+                response.choices[0].finish_reason = "stop"
+                # Include enough text so the content-preservation guard accepts it.
+                response.choices[0].message.content = "成功段：" + "revisedtoken " * 600
+            else:
+                response.choices[0].finish_reason = "length"
+                response.choices[0].message.content = "truncated"
+            return response
+
+        c._client.chat.completions.create.side_effect = fake_create
+        # Long paragraphs without sentence punctuation prevent aggressive dedupe.
+        first_para = "sectionone " + "alphaone " * 1000
+        second_para = "sectiontwo " + "betaone " * 1000
+        result = c.restructure_transcript_chunked(first_para + "\n\n" + second_para, "course")
+        assert result.chunks_total >= 2
+        assert result.chunks_succeeded >= 1
+        assert result.chunks_failed >= 1
+        assert "成功段" in result.text
+        # Failed chunks fall back to their local clean text, so no content is lost.
+        assert len(result.text) >= len("成功段")
+
+    def test_retry_failed_only_reuses_success_results(self):
+        c = TermCorrector()
+        c._client = MagicMock()
+
+        # Build two long paragraphs without sentence punctuation so the splitter
+        # produces two chunks and the local-clean step does not collapse them.
+        first_para = "reusemarker " + "firstone " * 600
+        second_para = "retrymarker " + "secondone " * 600
+        previous = [
+            RestructureChunkResult(index=0, input=first_para, output="成功段已保留。", success=True, input_length=len(first_para)),
+            RestructureChunkResult(index=1, input=second_para, output="失败段", success=False, error_code="timeout", error_message="超时", retryable=True, input_length=len(second_para)),
+        ]
+
+        call_count = [0]
+
+        def fake_create(**kwargs):
+            call_count[0] += 1
+            response = MagicMock()
+            response.choices = [MagicMock()]
+            response.choices[0].finish_reason = "stop"
+            # Return a long enough rewrite so the content-preservation guard accepts it.
+            response.choices[0].message.content = "重试成功：" + "retriedtoken " * 350
+            return response
+
+        c._client.chat.completions.create.side_effect = fake_create
+        result = c.restructure_transcript_chunked(
+            first_para + "\n\n" + second_para,
+            "course",
+            previous_results=previous,
+            retry_failed_only=True,
         )
+        assert result.chunks_succeeded == result.chunks_total
+        assert call_count[0] == 1  # only the failed chunk was sent to the LLM
+        assert "成功段" in result.text
+        assert "重试成功" in result.text
 
-    @patch("app.agents.transcript_agent.TranscriptOrganizerAgent.restructure_text")
-    def test_llm_empty_returns_original(self, mock_restructure):
-        mock_restructure.return_value = ""
+    def test_error_classification_timeout(self):
+        c = TermCorrector()
+        code, message, retryable = c._classify_exception(TimeoutError("timeout"))
+        assert code == "timeout"
+        assert retryable is True
+
+    def test_error_classification_authentication(self):
+        c = TermCorrector()
+        try:
+            import openai
+        except Exception:
+            pytest.skip("openai not installed")
+        code, message, retryable = c._classify_exception(openai.AuthenticationError("auth failed", response=MagicMock(), body=None))
+        assert code == "authentication"
+        assert retryable is False
+
+    def test_llm_empty_response_returns_error(self):
         c = TermCorrector()
         c._client = MagicMock()
-        result = c.restructure_transcript("raw", "course")
-        assert result == "raw"
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.choices[0].message.content = ""
+        c._client.chat.completions.create.return_value = mock_response
 
-    @patch("app.agents.transcript_agent.TranscriptOrganizerAgent.restructure_text")
-    def test_llm_exception_propagates(self, mock_restructure):
-        mock_restructure.side_effect = Exception("boom")
+        result = c.restructure_transcript_chunked("raw", "course")
+        assert result.is_ai_corrected is False
+        assert result.error_code == "empty_response"
+
+    def test_llm_truncated_response_returns_error(self):
         c = TermCorrector()
         c._client = MagicMock()
-        with pytest.raises(Exception, match="boom"):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].finish_reason = "length"
+        mock_response.choices[0].message.content = "truncated"
+        c._client.chat.completions.create.return_value = mock_response
+
+        result = c.restructure_transcript_chunked("raw", "course")
+        assert result.is_ai_corrected is False
+        assert result.error_code == "truncated_response"
+
+    def test_llm_exception_propagates_via_result(self):
+        c = TermCorrector()
+        c._client = MagicMock()
+        c._client.chat.completions.create.side_effect = RuntimeError("boom")
+        with pytest.raises(CorrectionError, match="boom"):
             c.restructure_transcript("raw", "course")
 
     def test_correct_segments_delegation(self):

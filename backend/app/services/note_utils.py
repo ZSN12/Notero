@@ -151,6 +151,50 @@ def _latest_authoritative_transcript_entry(transcript: list) -> dict | None:
     return latest
 
 
+def _extract_segments_from_entry(entry: dict) -> list[dict]:
+    """Return ASR timestamp segments from a transcript entry.
+
+    Each segment is a dict with ``text``, ``start_ms`` and ``end_ms``.
+    If no timestamps are recorded, a single zero-time segment covering the
+    raw text is returned so callers always have a usable list.
+    """
+    timestamps = entry.get("timestamps") or []
+    if timestamps and isinstance(timestamps, list):
+        segments = []
+        for ts in timestamps:
+            if not isinstance(ts, dict):
+                continue
+            text = str(ts.get("text") or ts.get("word") or "").strip()
+            if not text:
+                continue
+            start_ms = ts.get("start_ms")
+            if start_ms is None and "start" in ts:
+                start_ms = ts.get("start")
+            end_ms = ts.get("end_ms")
+            if end_ms is None and "end" in ts:
+                end_ms = ts.get("end")
+            segments.append(
+                {
+                    "text": text,
+                    "start_ms": int(start_ms or 0),
+                    "end_ms": int(end_ms or 0),
+                }
+            )
+        if segments:
+            return segments
+
+    raw_text = (
+        entry.get("raw_text")
+        or entry.get("text")
+        or entry.get("display_text")
+        or entry.get("corrected_text")
+        or ""
+    ).strip()
+    if raw_text:
+        return [{"text": raw_text, "start_ms": 0, "end_ms": 0}]
+    return []
+
+
 def get_canonical_transcript_text(note: "Note") -> str:
     """Return the canonical transcript text for a note.
 
@@ -165,22 +209,33 @@ def get_canonical_transcript_text(note: "Note") -> str:
     Only the latest authoritative entry is used so that a user_edited deletion
     cannot be resurrected by joining it with older final/local entries.
     """
+    text, _ = get_canonical_transcript_segments(note)
+    return text
+
+
+def get_canonical_transcript_segments(note: "Note") -> tuple[str, list[dict]]:
+    """Return the canonical transcript text plus its ASR timestamp segments.
+
+    The segments are taken from the same source as :func:`get_canonical_transcript_text`
+    so that callers can align paragraphs with audio timings.
+    """
     # 1. Latest authoritative transcript entry (single source of truth).
     transcript = getattr(note, "transcript", None)
     latest = _latest_authoritative_transcript_entry(transcript)
     if latest is not None:
-        # Empty string is intentional when the user cleared the transcript, so
-        # we check key membership and only fall back to raw_text when no
-        # authoritative text field was provided.
         for key in ("display_text", "corrected_text", "text"):
             if key in latest:
-                return str(latest[key] or "").strip()
-        return str(latest.get("raw_text") or "").strip()
+                return str(latest[key] or "").strip(), _extract_segments_from_entry(latest)
+        return str(latest.get("raw_text") or "").strip(), _extract_segments_from_entry(latest)
 
     # 2. Any non-superseded transcript entry (fallback when no authoritative entry exists).
     if transcript and isinstance(transcript, list):
-        texts = []
-        for seg in sorted(transcript, key=lambda x: x.get("chunk_index", 0) if isinstance(x, dict) else 0):
+        texts: list[str] = []
+        segments: list[dict] = []
+        for seg in sorted(
+            transcript,
+            key=lambda x: x.get("chunk_index", 0) if isinstance(x, dict) else 0,
+        ):
             if not isinstance(seg, dict):
                 continue
             if seg.get("correction_stage") == "superseded":
@@ -188,20 +243,21 @@ def get_canonical_transcript_text(note: "Note") -> str:
             text = _transcript_chunk_text(seg)
             if text:
                 texts.append(text)
+                segments.extend(_extract_segments_from_entry(seg))
         if texts:
-            return "\n\n".join(texts)
+            return "\n\n".join(texts), segments
 
     # 3. Content transcript area.
     content = getattr(note, "content", None)
     from_content = _extract_transcript_from_content(content)
     if from_content:
-        return _strip_html(from_content)
+        return _strip_html(from_content), []
 
     # 4. Full content.
     if content and str(content).strip():
-        return _strip_html(content)
+        return _strip_html(content), []
 
-    return ""
+    return "", []
 
 
 def get_canonical_note_text(note: "Note", include_ppt: bool = True) -> str:

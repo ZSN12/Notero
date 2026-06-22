@@ -8,6 +8,7 @@ const mockSession = {
   id: 's-1',
   notebookId: 'nb-1',
   title: 'Test Session',
+  summary: '',
   keywords: [],
   icon: 'FileText',
   date: '2026-06-01',
@@ -50,40 +51,6 @@ describe('SessionCard', () => {
       </MemoryRouter>
     )
     expect(screen.getByText('Test Session')).toBeInTheDocument()
-  })
-
-  it('calls openDialog when edit button clicked', () => {
-    const openDialogMock = vi.fn()
-    vi.mocked(store.useStore).mockImplementation((selector?) => {
-      const state = {
-        notebooks: [],
-        sessions: [],
-        dialog: { isOpen: false, type: null },
-        loading: false,
-        error: null,
-        openDialog: openDialogMock,
-        closeDialog: vi.fn(),
-        loadNotebooks: vi.fn(),
-        loadSessions: vi.fn(),
-        createNotebook: vi.fn(),
-        updateNotebook: vi.fn(),
-        createSession: vi.fn(),
-        updateSession: vi.fn(),
-        removeNotebook: vi.fn(),
-        removeSession: vi.fn(),
-      }
-      return selector ? selector(state) : state
-    })
-
-    render(
-      <MemoryRouter>
-        <SessionCard session={mockSession} notebookId="nb-1" />
-      </MemoryRouter>
-    )
-
-    const editBtn = screen.getByTitle('编辑课次')
-    fireEvent.click(editBtn)
-    expect(openDialogMock).toHaveBeenCalledWith('session', 'nb-1', undefined, mockSession)
   })
 
   it('calls removeSession when delete is confirmed', async () => {

@@ -30,6 +30,56 @@ def test_expand_roles_no_duplicates():
     assert expanded.count("transcript") == 1
 
 
+@pytest.mark.integration
+def test_dependency_failure_blocks_downstream(db, note_factory):
+    """When an upstream role fails, pending downstream roles are blocked and the workflow ends in error."""
+    note = note_factory(content="课堂内容")
+    db.commit()
+    session = note.session
+
+    orchestrator = AgentWorkflowOrchestrator.create(
+        str(session.id),
+        str(session.notebook.user_id),
+        ["mindmap", "quiz"],
+        dependencies=AGENT_DEPENDENCIES,
+        role_states={
+            "transcript": {"status": "pending"},
+            "mindmap": {"status": "pending"},
+            "quiz": {"status": "pending"},
+        },
+        db=db,
+    )
+    from app.models import AgentWorkflow
+    workflow = db.query(AgentWorkflow).filter(AgentWorkflow.id == orchestrator.workflow_id).first()
+    workflow.status = "running"
+    db.commit()
+
+    assert workflow.role_states["transcript"]["status"] == "pending"
+    assert workflow.role_states["mindmap"]["status"] == "pending"
+    assert workflow.role_states["quiz"]["status"] == "pending"
+
+    orchestrator.on_agent_completed("transcript", success=False, error_message="transcript crashed", db=db)
+    db.refresh(workflow)
+
+    assert workflow.status == "error"
+    assert workflow.role_states["transcript"]["status"] == "error"
+    assert workflow.role_states["mindmap"]["status"] == "error"
+    assert workflow.role_states["quiz"]["status"] == "error"
+    assert "transcript 失败" in workflow.role_states["mindmap"]["error_message"]
+    assert "transcript 失败" in workflow.role_states["quiz"]["error_message"]
+
+    # SessionProcessingState should also reflect the blocked downstream roles.
+    from app.services.state_service import get_state
+    mindmap_state = get_state(db, str(session.id), "mindmap")
+    quiz_state = get_state(db, str(session.id), "quiz_bank")
+    assert mindmap_state is not None
+    assert mindmap_state.status == "error"
+    assert "transcript 失败" in mindmap_state.error_message
+    assert quiz_state is not None
+    assert quiz_state.status == "error"
+    assert "transcript 失败" in quiz_state.error_message
+
+
 def _set_final_transcript(note):
     """Seed a finalized transcript so TranscriptOrganizerAgent skips the LLM."""
     note.transcript = [{
@@ -42,7 +92,7 @@ def _set_final_transcript(note):
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_workflow_dispatches_dependencies_first(mock_openai_cls, db, note_factory):
     """When mindmap is requested, transcript runs first and then mindmap."""
     mock_client = MagicMock()
@@ -83,7 +133,7 @@ def test_workflow_dispatches_dependencies_first(mock_openai_cls, db, note_factor
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_workflow_reuses_active_task(mock_openai_cls, db, note_factory):
     """An already-running dependency task should be reused, not duplicated."""
     mock_client = MagicMock()
@@ -131,7 +181,7 @@ def test_workflow_reuses_active_task(mock_openai_cls, db, note_factory):
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_workflow_marks_error_when_agent_fails(mock_openai_cls, db, note_factory):
     """A failing downstream role should leave the workflow in error status."""
     mock_client = MagicMock()
@@ -171,7 +221,7 @@ def test_workflow_marks_error_when_agent_fails(mock_openai_cls, db, note_factory
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_workflow_heartbeat_updates_and_sweep_detects_stale(
     mock_openai_cls, db, note_factory
 ):
@@ -224,7 +274,7 @@ def test_workflow_heartbeat_updates_and_sweep_detects_stale(
 
 
 @pytest.mark.integration
-@patch("app.agents.base.OpenAI")
+@patch("app.core.llm.OpenAI")
 def test_workflow_heartbeat_refresh_via_helper(mock_openai_cls, db, note_factory):
     """on_agent_heartbeat updates role heartbeat and workflow heartbeat."""
     note = note_factory(content="课堂内容")

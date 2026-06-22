@@ -29,7 +29,7 @@ docker run -d --name notero-postgres \
 
 # 5. 启动后端
 cd backend
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --reload-dir app --reload-exclude tests --port 8000
 
 # 6. 启动前端
 npm run dev

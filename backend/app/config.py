@@ -1,13 +1,55 @@
+import logging
+
+logger = logging.getLogger(__name__)
 import os
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ROOT_DIR = BASE_DIR.parent
 
-# Load repo-level .env first; keep backend/.env as a local override option.
-load_dotenv(ROOT_DIR / ".env")
-load_dotenv(BASE_DIR / ".env", override=True)
+# Load backend/.env first, then repo-level .env. Both use override=False so
+# explicit environment variables (e.g. TEST_DATABASE_URL set by pytest, or
+# deployment DATABASE_URL) always win. Loading backend/.env first keeps it as
+# the local override over the repo-level defaults for normal development runs.
+# NEVER override existing environment variables.
+load_dotenv(BASE_DIR / ".env", override=False)
+load_dotenv(ROOT_DIR / ".env", override=False)
+
+# Prevent Windows system proxy (e.g. Clash/V2Ray on 127.0.0.1:7890) from breaking
+# HTTPS API calls.  httpx/requests honour NO_PROXY even when the proxy itself
+# comes from the Windows registry.
+_no_proxy = os.environ.get("NO_PROXY", "")
+for host in ("api.deepseek.com", "localhost", "127.0.0.1"):
+    if host not in _no_proxy:
+        _no_proxy = f"{_no_proxy},{host}" if _no_proxy else host
+os.environ["NO_PROXY"] = _no_proxy
+
+# Ensure ffmpeg is available on PATH for audio.py conversion and FunASR internal loading.
+# imageio_ffmpeg bundles a binary deep in site-packages, not on PATH by default.
+# We add its directory to PATH and create a 'ffmpeg.exe' alias so subprocess.run(['ffmpeg', ...])
+# works everywhere without hard-coding the bundled path.
+_ffmpeg_alias_created = False
+try:
+    import imageio_ffmpeg
+    _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    if _ffmpeg_exe and os.path.isfile(_ffmpeg_exe):
+        _ffmpeg_dir = os.path.dirname(_ffmpeg_exe)
+        # Add bundled binary dir to PATH
+        _path = os.environ.get("PATH", "")
+        if _ffmpeg_dir not in _path.split(os.pathsep):
+            os.environ["PATH"] = f"{_ffmpeg_dir}{os.pathsep}{_path}"
+        # Create ffmpeg.exe alias if bundled name is different (e.g. ffmpeg-win-x86_64-v7.1.exe)
+        _ffmpeg_alias = os.path.join(_ffmpeg_dir, "ffmpeg.exe")
+        if not os.path.exists(_ffmpeg_alias) and os.path.basename(_ffmpeg_exe) != "ffmpeg.exe":
+            try:
+                shutil.copy2(_ffmpeg_exe, _ffmpeg_alias)
+                _ffmpeg_alias_created = True
+            except Exception:
+                logger.warning("suppressed_exception", exc_info=True)  # binary may be in use; alias is best-effort
+except Exception:
+    logger.warning("suppressed_exception", exc_info=True)
 
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -54,7 +96,7 @@ if not SECRET_KEY:
         )
     import secrets as secrets_mod
     SECRET_KEY = secrets_mod.token_hex(32)
-    print("[WARN] SECRET_KEY not set; using a random dev key. Do not use this in production!")
+    logger.warning("SECRET_KEY not set; using a random dev key. Do not use this in production!")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60  # 60 minutes
 REFRESH_TOKEN_EXPIRE_DAYS = 7  # 7 days
@@ -72,3 +114,30 @@ FUNASR_MODEL_DIR = os.getenv("FUNASR_MODEL_DIR", ROOT_DIR / "models")
 FUNASR_MODEL_NAME = os.getenv("FUNASR_MODEL_NAME", "paraformer-zh")
 FUNASR_VAD_MODEL = os.getenv("FUNASR_VAD_MODEL", "fsmn-vad")
 FUNASR_PUNC_MODEL = os.getenv("FUNASR_PUNC_MODEL", "ct-punc")
+
+# Agent stale-task / heartbeat thresholds
+AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS") or 600)
+AGENT_HEARTBEAT_SECONDS = int(os.getenv("AGENT_HEARTBEAT_SECONDS") or 60)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+# PPT insertion matching strategy
+# PPT_LLM_MATCHER=1  -> use DeepSeek to generate slide placement anchors (default)
+# PPT_LLM_MATCHER=0  -> use the legacy SlideAligner keyword matching only
+PPT_LLM_MATCHER = _bool_env("PPT_LLM_MATCHER", True)
+
+# Agent execution mode
+# AGENTS_USE_CELERY=1  -> dispatch agent tasks to Celery workers (production must set explicitly)
+# AGENTS_USE_CELERY=0  -> run agents in daemon threads (local dev default)
+# AGENTS_SYNC=1        -> run agents synchronously inline (tests only)
+AGENTS_USE_CELERY = _bool_env("AGENTS_USE_CELERY", False)
+AGENTS_SYNC = _bool_env("AGENTS_SYNC", False)
+AGENTS_DISPATCH_MODE = "celery" if AGENTS_USE_CELERY else "thread"

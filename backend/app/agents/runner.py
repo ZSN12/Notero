@@ -2,7 +2,7 @@
 
 Provides a unified runner around ``BaseAgent.run()`` that handles:
 - context loading and validation
-- task / processing-state lifecycle
+- task / processing-state / workflow lifecycle
 - configurable retries with exponential backoff
 - per-role concurrency limiting
 - execution-time metrics and structured logging
@@ -18,20 +18,26 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session as DBSession
 
 from app.agents import AgentContext, AgentResult, get_agent
 from app.agents.base import BaseAgent
+from app.config import AGENTS_SYNC
 from app.core.exceptions import LLMTimeoutError, LLMUnavailableError
 from app.middleware.metrics import observe_agent_error, observe_agent_execution
 from app.models import Notebook, Note, Session as DBSessionModel, Task, User
-from app.services.state_service import (
-    set_error as set_state_error,
-    set_ready as set_state_ready,
-    set_running as set_state_running,
+from app.services.agent_state_service import (
+    INTERRUPTED_MESSAGE,
+    set_agent_error,
+    set_agent_progress,
+    set_agent_ready,
+    set_agent_running,
+    update_state_heartbeat,
+    update_task_heartbeat,
+    update_workflow_heartbeat,
 )
 from app.services.vector_service import _compute_session_content_hash
 
@@ -52,15 +58,6 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
-
-
-def _role_to_stage(role: str) -> str:
-    """Map agent role to its processing-state stage name."""
-    if role == "quiz":
-        return "quiz_bank"
-    if role == "transcript":
-        return "transcript_organize"
-    return role
 
 
 @dataclass
@@ -112,13 +109,14 @@ class AgentRunner:
     def _classify_error(self, exc: Exception) -> str:
         """Classify an exception for metrics/logging."""
         msg = str(exc).lower()
-        if isinstance(exc, LLMTimeoutError) or "timeout" in msg or "timed out" in msg:
+        raw = str(exc)
+        if isinstance(exc, LLMTimeoutError) or "timeout" in msg or "timed out" in msg or "超时" in raw:
             return "timeout"
         if isinstance(exc, LLMUnavailableError) or "unavailable" in msg:
             return "unavailable"
-        if "截断" in str(exc) or "finish_reason=length" in msg or "length" in msg:
+        if "截断" in raw or "finish_reason=length" in msg or "length" in msg:
             return "truncation"
-        if "json" in msg or "格式无效" in str(exc):
+        if "json" in msg or "格式无效" in raw:
             return "invalid_output"
         return "unknown"
 
@@ -190,15 +188,34 @@ class AgentRunner:
             task=task,
         )
 
-    def _initialize_task(self, ctx: AgentContext, role: str) -> None:
-        """Set task and processing state to running."""
-        stage = _role_to_stage(role)
-        ctx.task.status = "running"
-        ctx.task.progress = 0.1
-        ctx.task.error_message = None
-        set_state_running(ctx.db, ctx.session_id, stage, progress=0.1, commit=False)
-        ctx.db.commit()
-        self._update_workflow_heartbeat(ctx, role)
+    def _start_keepalive_heartbeat(
+        self,
+        task_id: str,
+        session_id: str,
+        role: str,
+        user_id: str,
+    ) -> tuple[threading.Event, threading.Thread]:
+        """Start a background heartbeat that only keeps the task/state alive.
+
+        The heartbeat runs in its own SQLAlchemy session so it never interferes
+        with the main agent thread's transaction.
+        """
+        stop_event = threading.Event()
+        stage = role
+        if role == "quiz":
+            stage = "quiz_bank"
+        elif role == "transcript":
+            stage = "transcript_organize"
+
+        def _heartbeat():
+            while not stop_event.wait(5.0):
+                update_task_heartbeat(task_id)
+                update_state_heartbeat(session_id, stage)
+                update_workflow_heartbeat(session_id, user_id, role)
+
+        thread = threading.Thread(target=_heartbeat, daemon=True)
+        thread.start()
+        return stop_event, thread
 
     def _check_idempotency(
         self,
@@ -247,66 +264,12 @@ class AgentRunner:
 
         return None
 
-    def _update_workflow_heartbeat(self, ctx: AgentContext, role: str) -> None:
-        """Notify the workflow orchestrator that this role is alive."""
-        try:
-            from app.agents.orchestrator import on_agent_heartbeat
-            on_agent_heartbeat(ctx.session_id, ctx.user.id, role, db=ctx.db)
-        except Exception:
-            logger.exception(
-                "agent_runner_heartbeat_failed session_id=%s role=%s task_id=%s",
-                ctx.session_id, role, ctx.task.id,
-            )
-
-    def _finalize_success(
-        self,
-        ctx: AgentContext,
-        role: str,
-        result: AgentResult,
-    ) -> AgentResult:
-        """Persist success state and return the result."""
-        stage = _role_to_stage(role)
-        ctx.task.status = "success"
-        ctx.task.progress = 1.0
-        ctx.task.error_message = None
-        current_hash = _compute_session_content_hash(ctx.note)
-        set_state_ready(
-            ctx.db,
-            ctx.session_id,
-            stage,
-            content_hash=current_hash,
-            commit=False,
-        )
-        ctx.db.commit()
-        self._update_workflow_heartbeat(ctx, role)
-        return result
-
-    def _finalize_error(
-        self,
-        ctx: AgentContext,
-        role: str,
-        error_message: str,
-    ) -> AgentResult:
-        """Persist error state and return a failure result."""
-        stage = _role_to_stage(role)
-        ctx.task.status = "error"
-        ctx.task.progress = 1.0
-        ctx.task.error_message = error_message
-        set_state_error(
-            ctx.db,
-            ctx.session_id,
-            stage,
-            error_message=error_message,
-            commit=False,
-        )
-        ctx.db.commit()
-        self._update_workflow_heartbeat(ctx, role)
-        return AgentResult(success=False, error_message=error_message)
-
     def _execute_once(self, ctx: AgentContext, role: str, force: bool) -> AgentResult:
         """Invoke the agent once inside an optional concurrency limit."""
         agent = get_agent(role)
         ctx.force = force
+        # Pass the per-LLM timeout down to the agent instance.
+        agent.timeout = self.config.per_llm_timeout
         sem = self._get_semaphore(role)
         if sem is None:
             return agent.run(ctx)
@@ -327,7 +290,6 @@ class AgentRunner:
         The caller is responsible for opening/closing ``db``.
         """
         started = time.monotonic()
-        stage = _role_to_stage(role)
         ctx = self._load_context(db, session_id, user_id, task_id)
         if ctx is None:
             return AgentResult(
@@ -339,7 +301,31 @@ class AgentRunner:
         if idempotent is not None:
             return idempotent
 
-        self._initialize_task(ctx, role)
+        set_agent_running(
+            db,
+            session_id,
+            role,
+            task_id,
+            progress=0.1,
+            message="准备内容",
+            user_id=user_id,
+        )
+
+        # Keep-alive heartbeat so a long LLM call is not marked stale.
+        # Disabled in synchronous/test mode where the caller shares a transaction.
+        heartbeat_stop: Optional[threading.Event] = None
+        heartbeat_thread: Optional[threading.Thread] = None
+        if not AGENTS_SYNC:
+            heartbeat_stop, heartbeat_thread = self._start_keepalive_heartbeat(
+                task_id, session_id, role, user_id
+            )
+
+        def _stop_heartbeat():
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1.0)
+
         last_error = "Unknown error"
         error_type = "unknown"
         attempt = 0
@@ -347,6 +333,23 @@ class AgentRunner:
         try:
             while attempt <= self.config.max_retries:
                 attempt += 1
+
+                # Enforce the global wall-clock timeout before each attempt.
+                if (
+                    self.config.max_total_timeout is not None
+                    and (time.monotonic() - started) > self.config.max_total_timeout
+                ):
+                    last_error = INTERRUPTED_MESSAGE
+                    error_type = "timeout"
+                    logger.warning(
+                        "agent_runner_total_timeout session_id=%s role=%s task_id=%s elapsed=%s",
+                        session_id,
+                        role,
+                        task_id,
+                        int(time.monotonic() - started),
+                    )
+                    break
+
                 try:
                     result = self._execute_once(ctx, role, force)
                     if result.success:
@@ -365,7 +368,16 @@ class AgentRunner:
                             attempt,
                             int((time.monotonic() - started) * 1000),
                         )
-                        return self._finalize_success(ctx, role, result)
+                        set_agent_ready(
+                            db,
+                            session_id,
+                            role,
+                            task_id,
+                            content_hash=_compute_session_content_hash(ctx.note),
+                            message=result.warning_message or "完成",
+                            user_id=user_id,
+                        )
+                        return result
 
                     # Agent returned failure without raising.
                     last_error = result.error_message or "Agent returned failure"
@@ -427,7 +439,8 @@ class AgentRunner:
                 error_type,
                 last_error,
             )
-            return self._finalize_error(ctx, role, last_error)
+            set_agent_error(db, session_id, role, task_id, last_error, user_id=user_id)
+            return AgentResult(success=False, error_message=last_error)
 
         except Exception as exc:
             # Safety net for unexpected runner-internal errors.
@@ -445,6 +458,9 @@ class AgentRunner:
                 retries=attempt - 1,
             )
             try:
-                return self._finalize_error(ctx, role, f"Runner error: {exc}")
+                set_agent_error(db, session_id, role, task_id, f"Runner error: {exc}", user_id=user_id)
+                return AgentResult(success=False, error_message=f"Runner error: {exc}")
             except Exception:
                 return AgentResult(success=False, error_message=f"Runner error: {exc}")
+        finally:
+            _stop_heartbeat()

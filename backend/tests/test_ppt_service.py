@@ -51,7 +51,6 @@ def _make_mock_slide_with_table(cell_texts):
     slide = MagicMock()
     table_shape = MagicMock()
     table_shape.has_text_frame = False
-    table_shape.table = True
 
     rows = []
     for row_texts in cell_texts:
@@ -64,7 +63,10 @@ def _make_mock_slide_with_table(cell_texts):
         row.cells = cells
         rows.append(row)
 
-    table_shape.table.rows = rows
+    table = MagicMock()
+    table.rows = rows
+    table.columns = [MagicMock() for _ in range(max(len(r) for r in cell_texts) if cell_texts else 0)]
+    table_shape.table = table
     slide.shapes = [table_shape]
     slide.has_notes_slide = False
     return slide
@@ -102,12 +104,14 @@ class TestExtractTextFromSlide:
         slide = _make_mock_slide(["Slide title"])
         table_shape = MagicMock()
         table_shape.has_text_frame = False
-        table_shape.table = True
+        table = MagicMock()
         row = MagicMock()
         cell = MagicMock()
         cell.text = "Table cell"
         row.cells = [cell]
-        table_shape.table.rows = [row]
+        table.rows = [row]
+        table.columns = [MagicMock()]
+        table_shape.table = table
         slide.shapes.append(table_shape)
         result = extract_text_from_slide(slide)
         assert "Slide title" in result
@@ -117,7 +121,7 @@ class TestExtractTextFromSlide:
 class TestExtractKeywordsFromPpt:
     @patch("app.services.ppt_service.Presentation")
     def test_extracts_repeated_chinese_terms(self, mock_pres_cls):
-        slide = _make_mock_slide(["单例模式很重要，工厂模式也很重要"])
+        slide = _make_mock_slide(["单例模式。单例模式。工厂模式。"])
         mock_pres = MagicMock()
         mock_pres.slides = [slide]
         mock_pres_cls.return_value = mock_pres

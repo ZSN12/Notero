@@ -26,12 +26,18 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.agents.dispatch import dispatch_agent_task
 from app.core.database import SessionLocal
 from app.models import AgentWorkflow, Task, User
+from app.services.agent_state_service import set_agent_queued
+from app.services.state_service import set_error as set_state_error
 
 logger = logging.getLogger(__name__)
 
 # Upstream -> downstream dependencies for agent orchestration.
 # An agent only starts after all of its upstream dependencies have succeeded.
 AGENT_DEPENDENCIES: dict[str, list[str]] = {
+    # The organized transcript is the canonical upstream artifact for agents
+    # that reason over the lecture content. The transcript agent short-circuits
+    # when a finalized transcript already exists, so the extra dependency does
+    # not cause a redundant LLM call.
     "mindmap": ["transcript"],
     "quiz": ["transcript"],
     "review": ["transcript"],
@@ -202,6 +208,40 @@ class AgentWorkflowOrchestrator:
                     success,
                 )
 
+                if not success:
+                    # Block downstream roles that were waiting on this failed role.
+                    blocked_any = False
+                    for downstream_role in workflow.roles:
+                        if workflow.role_states[downstream_role].get("status") != "pending":
+                            continue
+                        deps = workflow.dependencies.get(downstream_role, [])
+                        if role not in deps:
+                            continue
+                        blocked_msg = (
+                            f"前置任务 {role} 失败，未启动{_label_for_role(downstream_role)}生成"
+                        )
+                        workflow.role_states[downstream_role]["status"] = "error"
+                        workflow.role_states[downstream_role]["error_message"] = blocked_msg
+                        set_state_error(
+                            db,
+                            workflow.session_id,
+                            _stage_for_role(downstream_role),
+                            blocked_msg,
+                            commit=False,
+                        )
+                        blocked_any = True
+                        logger.info(
+                            "workflow_role_blocked workflow_id=%s role=%s reason=%s",
+                            self.workflow_id,
+                            downstream_role,
+                            blocked_msg,
+                        )
+                    if blocked_any:
+                        new_states = dict(workflow.role_states)
+                        workflow.role_states = new_states
+                        flag_modified(workflow, "role_states")
+                        db.commit()
+
                 ready_roles = self._ready_roles(workflow)
                 for ready_role in ready_roles:
                     self._dispatch_role(workflow, ready_role, db)
@@ -271,11 +311,22 @@ class AgentWorkflowOrchestrator:
         db.commit()
         db.refresh(task)
 
+        # Keep the Task pending until AgentRunner actually acquires it. The UI
+        # still receives a visible queued state through SessionProcessingState.
+        set_agent_queued(
+            db,
+            workflow.session_id,
+            role,
+            task.id,
+            message="等待后台任务执行",
+            user_id=workflow.user_id,
+        )
+
+        # Preserve workflow-specific timestamps used by the orchestrator.
         now = datetime.now(timezone.utc)
-        workflow.role_states[role]["status"] = "running"
-        workflow.role_states[role]["task_id"] = task.id
-        workflow.role_states[role]["started_at"] = now.isoformat()
-        workflow.role_states[role]["heartbeat_at"] = now.isoformat()
+        role_state = workflow.role_states[role]
+        role_state["started_at"] = now.isoformat()
+        role_state["heartbeat_at"] = now.isoformat()
         workflow.role_states = dict(workflow.role_states)
         flag_modified(workflow, "role_states")
         workflow.last_heartbeat_at = now
@@ -389,6 +440,23 @@ def on_agent_heartbeat(
     finally:
         if close_db:
             db.close()
+
+
+def _stage_for_role(role: str) -> str:
+    if role == "quiz":
+        return "quiz_bank"
+    if role == "transcript":
+        return "transcript_organize"
+    return role
+
+
+def _label_for_role(role: str) -> str:
+    return {
+        "mindmap": "知识导图",
+        "quiz": "题库",
+        "transcript": "转写整理",
+        "review": "复习建议",
+    }.get(role, role)
 
 
 def start_workflow(

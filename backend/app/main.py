@@ -227,6 +227,33 @@ async def on_startup():
         db.close()
     logging.getLogger("notero.startup").info("Database ready.")
 
+    # Log agent dispatch mode so operators know whether Celery workers are required.
+    from app.config import AGENTS_DISPATCH_MODE
+    logging.getLogger("notero.startup").info("Agent dispatch mode: %s", AGENTS_DISPATCH_MODE)
+
+    # Heal any tasks/states/workflows left in running/pending from a previous
+    # crash or a pre-fix deployment, so users can retry instead of seeing a
+    # permanent "running" spinner.
+    try:
+        from app.services.agent_state_service import heal_stuck_agent_states
+
+        def _heal_stuck():
+            db = SessionLocal()
+            try:
+                counts = heal_stuck_agent_states(db)
+                if any(counts.values()):
+                    logging.getLogger("notero.startup").info(
+                        "Healed stuck agent states on startup: %s", counts
+                    )
+            finally:
+                db.close()
+
+        await asyncio.to_thread(_heal_stuck)
+    except Exception as e:
+        logging.getLogger("notero.startup").warning(
+            "Failed to heal stuck agent states on startup: %s", e
+        )
+
     # Preload FunASR model in background
     if os.getenv("SKIP_ASR_PRELOAD") != "1":
         asyncio.create_task(_preload_asr_model())
@@ -298,4 +325,15 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8003, reload=True)
+    # On Windows uvicorn reload uses multiprocessing.spawn, which is fragile when
+    # unrelated files (e.g. tests) change. Only watch the application package.
+    # __file__ is backend/app/main.py, so its parent IS the app package.
+    app_dir = Path(__file__).resolve().parent
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8003,
+        reload=True,
+        reload_dirs=[str(app_dir)],
+        reload_excludes=["tests", "*.pyc", "__pycache__"],
+    )

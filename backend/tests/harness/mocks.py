@@ -3,7 +3,10 @@
 import io
 import json
 import wave
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
+
+import app.core.llm as _llm_mod
 
 
 def mock_chat_completion(
@@ -27,6 +30,8 @@ def mock_chat_completion(
     mock_response.choices = [MagicMock()]
     mock_response.choices[0].message = MagicMock(role="assistant", content=text)
     mock_response.choices[0].finish_reason = finish_reason
+    # Provide a ChatChoice-compatible attribute for code that builds dataclasses.
+    mock_response.choices[0].delta = MagicMock(content=None)
     mock_client.chat.completions.create.return_value = mock_response
     return mock_client
 
@@ -54,14 +59,59 @@ def mock_embedding_response(embeddings: list[list[float]]) -> MagicMock:
     return mock_client
 
 
+@contextmanager
 def patch_chat_provider(content: str | dict | list, *, target: str = "app.core.llm.OpenAI"):
     """Context manager/decorator that patches the default chat provider call."""
-    return patch(target, return_value=mock_chat_completion(content))
+    previous = _llm_mod._chat_provider
+    _llm_mod._chat_provider = None
+    try:
+        with patch(target, return_value=mock_chat_completion(content)) as mock_cls:
+            yield mock_cls
+    finally:
+        _llm_mod._chat_provider = previous
 
 
+@contextmanager
 def patch_chat_stream(chunks: list[str | None], *, target: str = "app.core.llm.OpenAI"):
     """Context manager/decorator that patches the default chat stream call."""
-    return patch(target, return_value=mock_chat_stream(chunks))
+    previous = _llm_mod._chat_provider
+    _llm_mod._chat_provider = None
+    try:
+        with patch(target, return_value=mock_chat_stream(chunks)) as mock_cls:
+            yield mock_cls
+    finally:
+        _llm_mod._chat_provider = previous
+
+
+def mock_ppt_placements(placements: list[dict]) -> MagicMock:
+    """Build a mocked OpenAI client that returns the given PPT placements.
+
+    ``placements`` should be a list of dicts like:
+    [{"page": 1, "after_sentence_index": 2, "reason": "..."}, ...]
+    """
+    return mock_chat_completion({"placements": placements})
+
+
+@contextmanager
+def patch_ppt_matcher(
+    placements: list[dict],
+    *,
+    target: str = "app.core.llm.OpenAI",
+):
+    """Patch the LLM client used by the PPT placement matcher.
+
+    Example::
+
+        with patch_ppt_matcher([{"page": 1, "after_sentence_index": -1}]):
+            result = client.post("/api/process/ppt-insert", ...)
+    """
+    previous = _llm_mod._chat_provider
+    _llm_mod._chat_provider = None
+    try:
+        with patch(target, return_value=mock_ppt_placements(placements)) as mock_cls:
+            yield mock_cls
+    finally:
+        _llm_mod._chat_provider = previous
 
 
 class MockASRSession:

@@ -19,6 +19,7 @@ def test_load_prompt_parses_system_and_user_template():
         course_title="操作系统",
         keywords="进程、管道",
         text="我们讲 fork 和 pipe。",
+        timestamped_text="00:00 我们讲 fork 和 pipe。",
     )
     assert "课程名称：操作系统" in rendered
     assert "课程关键词：进程、管道" in rendered

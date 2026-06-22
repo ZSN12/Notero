@@ -20,17 +20,19 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Add indexes for frequently queried foreign keys and filters."""
+    bind = op.get_bind()
+    dialect = bind.dialect.name
     # Foreign keys and commonly filtered columns
-    op.create_index('ix_notebooks_user_id', 'notebooks', ['user_id'])
-    op.create_index('ix_sessions_notebook_id', 'sessions', ['notebook_id'])
-    op.create_index('ix_sessions_share_token', 'sessions', ['share_token'])
-    op.create_index('ix_sessions_share_enabled', 'sessions', ['share_enabled'])
-    op.create_index('ix_notes_session_id', 'notes', ['session_id'])
-    op.create_index('ix_files_session_id', 'files', ['session_id'])
-    op.create_index('ix_tasks_session_id', 'tasks', ['session_id'])
-    op.create_index('ix_tasks_session_type_status', 'tasks', ['session_id', 'task_type', 'status'])
-    op.create_index('ix_vocabulary_notebook_id', 'vocabulary', ['notebook_id'])
-    op.create_index('ix_vector_chunks_source_type', 'vector_chunks', ['source_type'])
+    op.create_index('ix_notebooks_user_id', 'notebooks', ['user_id'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_sessions_notebook_id', 'sessions', ['notebook_id'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_sessions_share_token', 'sessions', ['share_token'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_sessions_share_enabled', 'sessions', ['share_enabled'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_notes_session_id', 'notes', ['session_id'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_files_session_id', 'files', ['session_id'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_tasks_session_id', 'tasks', ['session_id'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_tasks_session_type_status', 'tasks', ['session_id', 'task_type', 'status'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_vocabulary_notebook_id', 'vocabulary', ['notebook_id'], if_not_exists=(dialect == 'postgresql'))
+    op.create_index('ix_vector_chunks_source_type', 'vector_chunks', ['source_type'], if_not_exists=(dialect == 'postgresql'))
 
 
 def downgrade() -> None:

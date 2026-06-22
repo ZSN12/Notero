@@ -21,6 +21,7 @@ export function mapBackendSession(bs: BackendSession): Session {
     id: bs.id,
     notebookId: bs.notebook_id,
     title: bs.title,
+    summary: bs.summary || '',
     keywords: bs.keywords || [],
     icon: 'FileText',
     date: bs.created_at.split('T')[0],

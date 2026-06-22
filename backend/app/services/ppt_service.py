@@ -99,7 +99,7 @@ def _scan_system_fonts() -> None:
                 # Index by full path stem for direct matches
                 _system_fonts[path.stem.lower()] = str(path)
             except Exception:
-                pass
+                logger.warning("suppressed_exception", exc_info=True)
 
 
 def _resolve_font_path(font_name: str, bold: bool = False, italic: bool = False) -> Optional[str]:
@@ -208,7 +208,7 @@ def _render_background(slide, draw: ImageDraw.Draw, canvas: Image.Image) -> None
             draw.rectangle([(0, 0), canvas.size], fill=color)
             return
     except Exception:
-        pass
+        logger.warning("suppressed_exception", exc_info=True)
 
     # Default: white background
     draw.rectangle([(0, 0), canvas.size], fill=(255, 255, 255))
@@ -235,7 +235,7 @@ def _load_font(font_name: str, size_pt: float, bold: bool = False, italic: bool 
         # OTF with CFF outlines can fail in some PIL builds — try default
         pass
     except Exception:
-        pass
+        logger.warning("suppressed_exception", exc_info=True)
 
     return ImageFont.load_default()
 
@@ -354,7 +354,7 @@ def _render_image_shape(shape, canvas: Image.Image, dpi_scale: float) -> None:
         img_bytes = image.blob
         pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
     except Exception as e:
-        print(f"[PPT-RENDER] Failed to extract image: {e}")
+        logger.warning("ppt_render_image_extract_failed error=%s", e, exc_info=True)
         return
 
     x = _emu_to_px(shape.left, dpi_scale)
@@ -373,7 +373,7 @@ def _render_image_shape(shape, canvas: Image.Image, dpi_scale: float) -> None:
     try:
         canvas.paste(pil_img, (x, y), pil_img if pil_img.mode == "RGBA" else None)
     except Exception as e:
-        print(f"[PPT-RENDER] Failed to paste image at ({x},{y}): {e}")
+        logger.warning("ppt_render_paste_image_failed x=%s y=%s error=%s", x, y, e, exc_info=True)
 
 
 def _render_auto_shape(draw: ImageDraw.Draw, shape, dpi_scale: float) -> None:
@@ -401,7 +401,7 @@ def _render_auto_shape(draw: ImageDraw.Draw, shape, dpi_scale: float) -> None:
             except AttributeError:
                 pass
     except Exception:
-        pass
+        logger.warning("suppressed_exception", exc_info=True)
 
     # Line color & width are fragile — hide all attribute errors
     outline_color = None
@@ -420,7 +420,7 @@ def _render_auto_shape(draw: ImageDraw.Draw, shape, dpi_scale: float) -> None:
             except (AttributeError, TypeError):
                 pass
     except Exception:
-        pass
+        logger.warning("suppressed_exception", exc_info=True)
         pass
 
     # Simple enum check — MSO_SHAPE values
@@ -540,7 +540,7 @@ def _render_group(draw: ImageDraw.Draw, shape, canvas: Image.Image, dpi_scale: f
         for child in shape.shapes:
             _render_shape(draw, child, canvas, dpi_scale)
     except Exception as e:
-        print(f"[PPT-RENDER] Group render failed: {e}")
+        logger.warning("ppt_render_group_failed error=%s", e, exc_info=True)
 
 
 def _render_shape(draw: ImageDraw.Draw, shape, canvas: Image.Image, dpi_scale: float) -> None:
@@ -576,7 +576,7 @@ def _render_shape(draw: ImageDraw.Draw, shape, canvas: Image.Image, dpi_scale: f
     except NotImplementedError:
         pass  # Expected for unsupported shapes
     except Exception as e:
-        print(f"[PPT-RENDER] Shape {shape.shape_type} render error: {e}")
+        logger.warning("ppt_render_shape_failed shape_type=%s error=%s", shape.shape_type, e, exc_info=True)
 
 
 def _render_slides_via_pillow(ppt_path: str, output_dir: str, slide_count: int, slide_width_px: int = 1920) -> bool:
@@ -589,7 +589,7 @@ def _render_slides_via_pillow(ppt_path: str, output_dir: str, slide_count: int, 
     try:
         prs = Presentation(ppt_path)
     except Exception as e:
-        print(f"[PPT-RENDER] Failed to open presentation: {e}")
+        logger.error("ppt_render_open_failed error=%s", e, exc_info=True)
         return False
 
     # Determine canvas pixel dimensions from slide dimensions (EMU)
@@ -616,7 +616,7 @@ def _render_slides_via_pillow(ppt_path: str, output_dir: str, slide_count: int, 
                 try:
                     _render_shape(draw, shape, canvas, dpi_scale)
                 except Exception as e:
-                    print(f"[PPT-RENDER] Slide {i} shape error: {e}")
+                    logger.warning("ppt_render_slide_shape_failed slide=%s error=%s", i, e, exc_info=True)
 
             # Resize if wider than 1400px (matching old COM behavior)
             if slide_width_px > 1400:
@@ -630,7 +630,7 @@ def _render_slides_via_pillow(ppt_path: str, output_dir: str, slide_count: int, 
             rendered_any = True
 
         except Exception as e:
-            print(f"[PPT-RENDER] Failed to render slide {i}: {e}")
+            logger.warning("ppt_render_slide_failed slide=%s error=%s", i, e, exc_info=True)
             continue  # Next slide
 
     return rendered_any
@@ -711,7 +711,7 @@ def parse_ppt_to_slides(ppt_path: str, output_dir: Optional[str] = None) -> List
                 try:
                     os.remove(os.path.join(output_dir, old))
                 except Exception:
-                    pass
+                    logger.warning("suppressed_exception", exc_info=True)
         rendered = _render_slides_via_pillow(ppt_path, output_dir, slide_count)
 
     def _pick_title(slide) -> str:
@@ -737,7 +737,7 @@ def parse_ppt_to_slides(ppt_path: str, output_dir: Optional[str] = None) -> List
                     if ph_type == 6:  # slide number
                         continue
             except Exception:
-                pass
+                logger.warning("suppressed_exception", exc_info=True)
 
             for para in shape.text_frame.paragraphs:
                 txt = para.text.strip()
@@ -758,21 +758,21 @@ def parse_ppt_to_slides(ppt_path: str, output_dir: Optional[str] = None) -> List
                         if run.font.size:
                             font_size = run.font.size / 12700.0  # EMU to pt
                 except Exception:
-                    pass
+                    logger.warning("suppressed_exception", exc_info=True)
                 if not font_size and shape.text_frame.paragraphs[0].runs:
                     try:
                         run = shape.text_frame.paragraphs[0].runs[0]
                         if run.font.size:
                             font_size = run.font.size / 12700.0
                     except Exception:
-                        pass
+                        logger.warning("suppressed_exception", exc_info=True)
 
                 # Vertical position bonus (higher on slide = more likely title)
                 top_y = 0
                 try:
                     top_y = shape.top
                 except Exception:
-                    pass
+                    logger.warning("suppressed_exception", exc_info=True)
 
                 candidates.append((
                     is_title_placeholder,

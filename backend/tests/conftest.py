@@ -10,59 +10,47 @@ import importlib
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
 
-import pytest
-from pytest_factoryboy import register
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session, sessionmaker
+from dotenv import load_dotenv
 
 # Ensure backend is on path
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-# Force a test database before any app module is imported (app.config loads
-# the repo .env and would otherwise overwrite this value).
-os.environ["DATABASE_URL"] = os.getenv(
-    "TEST_DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/notero_test",
-)
+# Local test credentials live outside version control. Explicit shell
+# variables still win, which keeps CI and one-off database overrides simple.
+load_dotenv(BACKEND_DIR / ".env.test", override=False)
+
+# Require an explicit TEST_DATABASE_URL.  Never fall back to the development
+# database when the variable is missing or when connecting fails.
+test_db_url = os.getenv("TEST_DATABASE_URL")
+if not test_db_url:
+    raise RuntimeError(
+        "TEST_DATABASE_URL is required to run backend tests. "
+        "It must point to a PostgreSQL database whose name contains 'test' "
+        "(e.g. postgresql://postgres:postgres@localhost:5432/notero_test). "
+        "Tests must not fall back to the development database."
+    )
+
+# Pin DATABASE_URL BEFORE importing any module that may touch app.config.
+# tests.harness imports factories -> app.models -> app.core.database -> app.config,
+# so we must set the environment variable first.
+os.environ["DATABASE_URL"] = test_db_url
 os.environ.setdefault("SECRET_KEY", "test-secret-key-with-at-least-32-bytes")
 os.environ.setdefault("ADMIN_DEFAULT_EMAIL", "admin")
 os.environ.setdefault("ADMIN_DEFAULT_PASSWORD", "admin123")
 os.environ.setdefault("SKIP_ASR_PRELOAD", "1")
 os.environ.setdefault("AGENTS_SYNC", "1")
 
+from tests.harness.db_guard import ensure_test_database, validate_test_database_url  # noqa: E402
 
-def _ensure_test_database(url: str) -> None:
-    parsed = urlparse(url)
-    db_name = parsed.path.lstrip("/")
-    if parsed.scheme not in {"postgresql", "postgresql+psycopg2"}:
-        raise RuntimeError("Backend tests require a PostgreSQL TEST_DATABASE_URL.")
-    if "test" not in db_name.lower():
-        raise RuntimeError(
-            f"Refusing to reset non-test database '{db_name}'. "
-            "Use a database name containing 'test' for TEST_DATABASE_URL."
-        )
-
-    maintenance_url = urlunparse(parsed._replace(path="/postgres"))
-    admin_engine = create_engine(maintenance_url, isolation_level="AUTOCOMMIT")
-    try:
-        with admin_engine.connect() as conn:
-            exists = conn.execute(
-                text("SELECT 1 FROM pg_database WHERE datname = :name"),
-                {"name": db_name},
-            ).scalar()
-            if not exists:
-                conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-    finally:
-        admin_engine.dispose()
-
-
-_ensure_test_database(os.environ["DATABASE_URL"])
+ensure_test_database(os.environ["DATABASE_URL"])
 
 # Import app modules AFTER the test DATABASE_URL has been pinned.
+import pytest
+from pytest_factoryboy import register
+from sqlalchemy.orm import Session, sessionmaker
 from app.core.task_runner import wait_for_agent_threads  # noqa: E402
 from app.main import app  # noqa: E402
 from app.core.database import SessionLocal, engine, get_db  # noqa: E402
@@ -74,6 +62,10 @@ from tests.harness.helpers import (  # noqa: E402
     create_notebook_and_session,
 )
 
+# Re-validate from the actual SQLAlchemy engine URL.  If app.config somehow
+# ended up pointing at a non-test database, stop before drop_all().
+validate_test_database_url(str(engine.url))
+
 # Ensure tables exist for the shared PostgreSQL test database
 Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
@@ -82,6 +74,7 @@ Base.metadata.create_all(bind=engine)
 from tests.harness.factories import (  # noqa: E402
     NotebookFactory,
     NoteFactory,
+    RAGMessageFactory,
     SessionFactory,
     TaskFactory,
     UserFactory,
@@ -92,6 +85,7 @@ register(UserFactory)
 register(NotebookFactory)
 register(SessionFactory)
 register(NoteFactory)
+register(RAGMessageFactory)
 register(TaskFactory)
 register(VocabularyFactory)
 
@@ -145,6 +139,19 @@ def _clear_rate_limit_state():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_llm_providers():
+    """Reset lazy LLM provider singletons before each test.
+
+    This prevents a provider that was instantiated with real credentials in an
+    earlier test from being reused by code that later patches ``OpenAI``.
+    """
+    from app.core.llm import _reset_default_providers
+    _reset_default_providers()
+    yield
+    _reset_default_providers()
+
+
 @pytest.fixture
 def db():
     """Yield a SQLAlchemy session bound to a rolled-back transaction.
@@ -166,6 +173,7 @@ def db():
     NotebookFactory._meta.sqlalchemy_session = session
     SessionFactory._meta.sqlalchemy_session = session
     NoteFactory._meta.sqlalchemy_session = session
+    RAGMessageFactory._meta.sqlalchemy_session = session
     TaskFactory._meta.sqlalchemy_session = session
     VocabularyFactory._meta.sqlalchemy_session = session
 
@@ -193,6 +201,7 @@ def db():
         NotebookFactory._meta.sqlalchemy_session = None
         SessionFactory._meta.sqlalchemy_session = None
         NoteFactory._meta.sqlalchemy_session = None
+        RAGMessageFactory._meta.sqlalchemy_session = None
         TaskFactory._meta.sqlalchemy_session = None
         VocabularyFactory._meta.sqlalchemy_session = None
         session.rollback()

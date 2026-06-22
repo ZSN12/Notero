@@ -64,6 +64,40 @@ describe('login', () => {
     await expect(login('test@example.com', 'wrong')).rejects.toThrow('Invalid credentials')
   })
 
+  it('throws readable message when detail is an object', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({ detail: { msg: '用户名已存在' } }),
+    }))
+    await expect(login('test@example.com', 'password')).rejects.toThrow('用户名已存在')
+  })
+
+  it('throws readable message when detail is a validation array', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({
+        detail: [
+          { msg: '邮箱格式不正确', loc: ['body', 'email'] },
+          { msg: '密码太短', loc: ['body', 'password'] },
+        ],
+      }),
+    }))
+    await expect(login('test@example.com', 'password')).rejects.toThrow('邮箱格式不正确；密码太短')
+  })
+
+  it('strips pydantic style prefixes from validation messages', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({
+        detail: [
+          { msg: 'Value error, Invalid email format', loc: ['body', 'email'] },
+          { msg: 'Value error, Password must be at least 8 characters', loc: ['body', 'password'] },
+        ],
+      }),
+    }))
+    await expect(login('test@example.com', 'password')).rejects.toThrow('Invalid email format；Password must be at least 8 characters')
+  })
+
   it('throws on network error', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')))
     await expect(login('test@example.com', 'password')).rejects.toThrow('无法连接到服务器')

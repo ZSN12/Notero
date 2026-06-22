@@ -5,6 +5,7 @@ import type { SessionProcessingStatus } from '@/services/api';
 export function useAutoGenerate(
   sessionId: string | undefined,
   processingStatus: SessionProcessingStatus | null,
+  refresh: () => Promise<void> = async () => {},
 ) {
   const [autoGenerateStudyMaterials, setAutoGenerateStudyMaterials] = useState(() => {
     try {
@@ -14,8 +15,9 @@ export function useAutoGenerate(
       return true;
     }
   });
-  const lastTriggeredSignatureRef = useRef<string | null>(null);
   const [autoGenerateToast, setAutoGenerateToast] = useState<string | null>(null);
+  const [isTriggeringAgents, setIsTriggeringAgents] = useState(false);
+  const [triggerError, setTriggerError] = useState<string | null>(null);
   const lastToastSignatureRef = useRef<string | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -50,6 +52,8 @@ export function useAutoGenerate(
     if (!processingStatus) return;
     const stages = processingStatus.stages;
     const agentStages = [stages.mindmap, stages.quiz_bank];
+    const mindmapRunning = stages.mindmap?.status === 'running';
+    const quizRunning = stages.quiz_bank?.status === 'running';
     const anyRunning = agentStages.some(s => s?.status === 'running');
     const anyActionableError = agentStages.some(s => s?.status === 'error');
     const allSettled = agentStages.every(s => s?.status !== 'running');
@@ -72,7 +76,13 @@ export function useAutoGenerate(
     };
 
     if (anyRunning) {
-      setAutoGenerateToast('正在生成学习资料...');
+      setAutoGenerateToast(
+        mindmapRunning && quizRunning
+          ? '正在生成知识导图和题库...'
+          : mindmapRunning
+            ? '正在生成知识导图...'
+            : '正在生成题库...',
+      );
     } else if (allReady && hasAgents) {
       return showOnceForSignature('学习资料生成完成');
     } else if (anyActionableError && hasAgents && allSettled) {
@@ -86,52 +96,38 @@ export function useAutoGenerate(
     }
   }, [processingStatus, scheduleToastClear]);
 
-  const handleTriggerAgents = useCallback(async (sid: string | undefined, roles?: string[]) => {
+  const handleTriggerAgents = useCallback(async (sid: string | undefined, roles?: string[], force = false) => {
     if (!sid) return;
+    const targetRoles = roles && roles.length > 0 ? roles : ['mindmap', 'quiz'];
+    const includesMindmap = targetRoles.includes('mindmap');
+    const includesQuiz = targetRoles.includes('quiz');
+    const startingMessage = includesMindmap && includesQuiz
+      ? '正在重新生成知识导图和题库...'
+      : includesMindmap
+        ? '正在重新生成知识导图...'
+        : includesQuiz
+          ? '正在重新生成题库...'
+          : '正在重新生成学习资料...';
+    setIsTriggeringAgents(true);
+    setTriggerError(null);
+    setAutoGenerateToast(startingMessage);
     try {
-      await runAllAgents(sid, roles && roles.length > 0 ? roles : ['mindmap', 'quiz']);
-    } catch {
-      setAutoGenerateToast('自动启动学习资料生成失败，可手动重试');
+      await runAllAgents(sid, targetRoles, force);
+      setTriggerError(null);
+      await refresh();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '启动生成失败';
+      setTriggerError(msg);
+      setAutoGenerateToast(msg);
       scheduleToastClear(4000);
+      console.error('handleTriggerAgents failed', err);
+    } finally {
+      setIsTriggeringAgents(false);
     }
-  }, [scheduleToastClear]);
-
-  // Auto-trigger learning-material agents once after the user uploads audio and
-  // the transcript + vector index are ready. Only trigger when both agents are
-  // still in an initial/unstarted state. Remember the trigger signature so we
-  // don't auto-trigger again until the user deletes the output or resets the
-  // stage back to idle.
-  useEffect(() => {
-    if (!sessionId || !processingStatus || !autoGenerateStudyMaterials) return;
-    const stages = processingStatus.stages;
-    const mindmapStage = stages.mindmap;
-    const quizBankStage = stages.quiz_bank;
-
-    const agentStatus = (s: typeof mindmapStage) => s?.status || 'idle';
-    const mindmapStatus = agentStatus(mindmapStage);
-    const quizBankStatus = agentStatus(quizBankStage);
-    const canAutoStart = ['idle', 'not_generated', 'empty'].includes(mindmapStatus) &&
-      ['idle', 'not_generated', 'empty'].includes(quizBankStatus);
-
-    if (!processingStatus.can_auto_generate || !canAutoStart) {
-      // If either agent has been reset to idle (e.g. after deletion), clear the
-      // signature so a future ready state can auto-trigger again.
-      if (mindmapStatus === 'idle' || quizBankStatus === 'idle') {
-        lastTriggeredSignatureRef.current = null;
-      }
-      return;
-    }
-
-    const hash = stages.vector_index?.content_hash || stages.transcript_finalize?.content_hash || '';
-    const signature = `${sessionId}:${mindmapStatus}:${quizBankStatus}:${hash}`;
-    if (hash && lastTriggeredSignatureRef.current !== signature) {
-      lastTriggeredSignatureRef.current = signature;
-      handleTriggerAgents(sessionId);
-    }
-  }, [sessionId, processingStatus, autoGenerateStudyMaterials, handleTriggerAgents]);
+  }, [refresh, scheduleToastClear]);
 
   return {
-    state: { autoGenerateStudyMaterials, autoGenerateToast },
+    state: { autoGenerateStudyMaterials, autoGenerateToast, isTriggeringAgents, triggerError },
     actions: { setAutoGenerateStudyMaterials: persistSetting, setAutoGenerateToast, handleTriggerAgents },
   };
 }

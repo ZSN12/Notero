@@ -1,5 +1,9 @@
+import hashlib
+import json
+import logging
 import os
 import re
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from sqlalchemy.orm import Session
@@ -10,7 +14,11 @@ from app.models import Note, Session as DBSession, Notebook, User
 from app.services.ppt_service import extract_keywords_from_ppt, parse_ppt_to_slides
 from app.services.slide_aligner import SlideAligner
 from app.services.file_service import save_file
-from app.config import SLIDE_DIR, MAX_PPT_SIZE
+from app.services.ppt_llm_matcher import compute_placements
+from app.services.vocabulary_service import save_vocabulary_entry
+from app.config import SLIDE_DIR, MAX_PPT_SIZE, PPT_LLM_MATCHER
+
+logger = logging.getLogger(__name__)
 
 MAX_PPT_FILE_SIZE = MAX_PPT_SIZE  # Use centralized config
 
@@ -55,6 +63,106 @@ def get_transcript_text(note) -> str:
         return clean.strip()
 
     return ""
+
+
+def _compute_placement_hash(transcript: str, slides: list[dict]) -> str:
+    """Stable fingerprint of transcript + slide text for caching placements."""
+    payload = {
+        "transcript": transcript,
+        "slides": [
+            {"page": s.get("page"), "title": s.get("title", ""), "text": s.get("text", "")}
+            for s in slides
+        ],
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_cached_placements(note: Note, transcript: str, slides: list[dict]) -> list[dict] | None:
+    """Return cached LLM placements if the content fingerprint matches."""
+    if not isinstance(note.vocabulary, list):
+        return None
+    target_hash = _compute_placement_hash(transcript, slides)
+    for item in note.vocabulary:
+        if (
+            isinstance(item, dict)
+            and item.get("kind") == "ppt_placement"
+            and item.get("content_hash") == target_hash
+        ):
+            placements = item.get("data", {}).get("placements")
+            if isinstance(placements, list) and placements:
+                return placements
+    return None
+
+
+def _save_cached_placements(
+    note: Note,
+    db: Session,
+    transcript: str,
+    slides: list[dict],
+    placements: list[dict],
+) -> None:
+    """Persist LLM placements in note.vocabulary, keyed by content hash."""
+    target_hash = _compute_placement_hash(transcript, slides)
+    entry = {
+        "kind": "ppt_placement",
+        "content_hash": target_hash,
+        "data": {"placements": placements},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_vocabulary_entry(db, note.id, entry)
+
+
+def _build_blocks_from_placements(
+    sentences: list[str],
+    placements: list[dict],
+    slides: list[dict],
+    session_id: str,
+) -> list[dict]:
+    """Turn LLM placements into text/image blocks matching /ppt-insert format."""
+    slide_by_page = {s["page"]: s for s in slides if isinstance(s.get("page"), int)}
+    ordered = sorted(
+        placements,
+        key=lambda p: (p.get("after_sentence_index", -1), p.get("page", 0)),
+    )
+
+    blocks: list[dict] = []
+    last_text_idx = -1
+
+    def _flush_text(up_to_idx: int) -> None:
+        nonlocal last_text_idx
+        for i in range(last_text_idx + 1, min(up_to_idx + 1, len(sentences))):
+            sentence = sentences[i]
+            if blocks and blocks[-1]["type"] == "text":
+                blocks[-1]["content"] += " " + sentence
+            else:
+                blocks.append({"type": "text", "content": sentence})
+        last_text_idx = max(last_text_idx, up_to_idx)
+
+    for placement in ordered:
+        idx = placement.get("after_sentence_index", -1)
+        page = placement.get("page")
+        _flush_text(idx)
+
+        slide = slide_by_page.get(page)
+        if slide and slide.get("image_path"):
+            # Avoid duplicate consecutive images of the same slide.
+            if not (
+                blocks
+                and blocks[-1]["type"] == "image"
+                and blocks[-1].get("page") == page
+            ):
+                blocks.append(
+                    {
+                        "type": "image",
+                        "src": f"/api/media/slides/{session_id}/{slide['image_path']}",
+                        "page": page,
+                        "title": slide.get("title", ""),
+                    }
+                )
+
+    _flush_text(len(sentences) - 1)
+    return blocks
 
 
 @router.post("/ppt-insert")
@@ -108,6 +216,34 @@ def insert_ppt_into_transcript(
 
     if not sentences:
         return {"blocks": [{"type": "text", "content": transcript.strip()}]}
+
+    # ── Try LLM-based global placement first ──
+    placements: list[dict] | None = None
+    if PPT_LLM_MATCHER:
+        try:
+            placements = _load_cached_placements(note, transcript, slides)
+            if placements:
+                logger.info("ppt_insert using cached llm placements count=%s", len(placements))
+            else:
+                placements = compute_placements(transcript, slides)
+                if placements:
+                    _save_cached_placements(note, db, transcript, slides, placements)
+                    logger.info("ppt_insert computed llm placements count=%s", len(placements))
+        except Exception as exc:
+            logger.warning("ppt_insert llm_matcher_failed fallback_to_aligner error=%s", exc)
+            placements = None
+
+        if placements:
+            try:
+                blocks = _build_blocks_from_placements(
+                    sentences, placements, slides, session_id
+                )
+                return {"blocks": blocks}
+            except Exception as exc:
+                logger.warning(
+                    "ppt_insert build_blocks_from_placements_failed fallback_to_aligner error=%s",
+                    exc,
+                )
 
     # ── Build result blocks with sliding-window PPT matching ──
     # Keep the title/cover slide (page 1) in alignment but rely on

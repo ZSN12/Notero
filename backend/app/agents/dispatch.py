@@ -8,7 +8,6 @@ notify the orchestrator when an agent completes).
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from typing import Optional
 
@@ -19,11 +18,31 @@ from app.models import Task
 
 logger = logging.getLogger(__name__)
 
+from app.config import AGENTS_SYNC, AGENTS_USE_CELERY
+from app.core.task_runner import run_agent_task
+
 # In tests, run the agent synchronously so mocks are deterministic and threads
 # cannot leak across test cases.
-_RUN_AGENTS_SYNCHRONOUSLY = os.environ.get("AGENTS_SYNC", "0") == "1"
+_RUN_AGENTS_SYNCHRONOUSLY = AGENTS_SYNC
 # Production defaults to Celery/Redis; set AGENTS_USE_CELERY=0 to force threads.
-_USE_CELERY_FOR_AGENTS = os.environ.get("AGENTS_USE_CELERY", "1") == "1"
+_USE_CELERY_FOR_AGENTS = AGENTS_USE_CELERY
+
+
+def _celery_workers_available(timeout: float = 1.0) -> bool:
+    """Return True if at least one Celery worker is online.
+
+    ``run_agent.delay()`` only means the task was accepted by the broker; if no
+    worker is running the task will sit in the queue forever. This check is
+    used to fall back to local threads when Celery is configured but not staffed.
+    """
+    try:
+        from app.core.celery_app import celery_app
+
+        inspector = celery_app.control.inspect(timeout=timeout)
+        stats = inspector.stats()
+        return bool(stats)
+    except Exception:
+        return False
 
 
 def _run_agent_thread(
@@ -104,22 +123,32 @@ def dispatch_agent_task(
         return
 
     if _USE_CELERY_FOR_AGENTS:
-        try:
-            from app.tasks.agent_tasks import run_agent
-            run_agent.delay(session_id, user_id, role, task_id)
-            return
-        except Exception:
+        if _celery_workers_available():
+            try:
+                from app.tasks.agent_tasks import run_agent
+                run_agent.delay(session_id, user_id, role, task_id)
+                logger.info(
+                    "agent_dispatched_to_celery session_id=%s role=%s task_id=%s",
+                    session_id, role, task_id,
+                )
+                return
+            except Exception:
+                logger.warning(
+                    "celery_dispatch_failed_falling_back_to_thread session_id=%s role=%s task_id=%s",
+                    session_id,
+                    role,
+                    task_id,
+                    exc_info=True,
+                )
+        else:
             logger.warning(
-                "celery_dispatch_failed_falling_back_to_thread session_id=%s role=%s task_id=%s",
+                "no_celery_workers_available_falling_back_to_thread session_id=%s role=%s task_id=%s",
                 session_id,
                 role,
                 task_id,
-                exc_info=True,
             )
 
-    thread = threading.Thread(
-        target=_run_agent_thread,
-        args=(session_id, user_id, role, task_id),
+    run_agent_task(
+        target=lambda: _run_agent_thread(session_id, user_id, role, task_id),
         daemon=True,
     )
-    thread.start()

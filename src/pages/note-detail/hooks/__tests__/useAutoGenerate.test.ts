@@ -29,6 +29,7 @@ function makeStatus(
     can_auto_generate: true,
     can_ask_rag: true,
     needs_user_action: false,
+    agent_timeout_seconds: 600,
     latest_tasks: [],
     vector_chunks_count: 0,
   }
@@ -64,12 +65,29 @@ describe('useAutoGenerate', () => {
     expect(result.current.state.autoGenerateStudyMaterials).toBe(false)
   })
 
-  it('shows running toast when any agent is running', () => {
+  it('shows a mind-map-specific message when only mindmap is running', () => {
     const status = makeStatus({
       mindmap: { status: 'running', progress: 0.5, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
     })
     const { result } = renderHook(() => useAutoGenerate('s1', status))
-    expect(result.current.state.autoGenerateToast).toBe('正在生成学习资料...')
+    expect(result.current.state.autoGenerateToast).toBe('正在生成知识导图...')
+  })
+
+  it('shows a quiz-specific message when only quiz bank is running', () => {
+    const status = makeStatus({
+      quiz_bank: { status: 'running', progress: 0.5, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
+    })
+    const { result } = renderHook(() => useAutoGenerate('s1', status))
+    expect(result.current.state.autoGenerateToast).toBe('正在生成题库...')
+  })
+
+  it('names both resources when mindmap and quiz bank are running', () => {
+    const status = makeStatus({
+      mindmap: { status: 'running', progress: 0.5, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
+      quiz_bank: { status: 'running', progress: 0.5, message: null, error_message: null, content_hash: null, started_at: null, finished_at: null },
+    })
+    const { result } = renderHook(() => useAutoGenerate('s1', status))
+    expect(result.current.state.autoGenerateToast).toBe('正在生成知识导图和题库...')
   })
 
   it('shows success toast when all agents are ready', async () => {
@@ -121,16 +139,6 @@ describe('useAutoGenerate', () => {
     vi.useRealTimers()
   })
 
-  it('auto-triggers agents when transcript and vector index are ready', async () => {
-    vi.mocked(runAllAgents).mockResolvedValueOnce({ workflow_id: 'wf-1', session_id: 's1', agents: [] })
-    const status = makeStatus({})
-    renderHook(() => useAutoGenerate('s1', status))
-
-    await waitFor(() => {
-      expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap', 'quiz'])
-    })
-  })
-
   it('does not auto-trigger when auto-generate is disabled', () => {
     localStorage.setItem('notero_auto_generate_study_materials', 'false')
     const status = makeStatus({})
@@ -146,7 +154,7 @@ describe('useAutoGenerate', () => {
       await result.current.actions.handleTriggerAgents('s1')
     })
 
-    expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap', 'quiz'])
+    expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap', 'quiz'], false)
   })
 
   it('handleTriggerAgents calls runAllAgents with given roles', async () => {
@@ -157,6 +165,33 @@ describe('useAutoGenerate', () => {
       await result.current.actions.handleTriggerAgents('s1', ['mindmap'])
     })
 
-    expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap'])
+    expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap'], false)
+  })
+
+  it('handleTriggerAgents passes force and refreshes on success', async () => {
+    vi.mocked(runAllAgents).mockResolvedValueOnce({ workflow_id: 'wf-1', session_id: 's1', agents: [] })
+    const refresh = vi.fn().mockResolvedValue(undefined)
+    const { result } = renderHook(() => useAutoGenerate('s1', null, refresh))
+
+    await act(async () => {
+      await result.current.actions.handleTriggerAgents('s1', ['mindmap', 'quiz'], true)
+    })
+
+    expect(runAllAgents).toHaveBeenCalledWith('s1', ['mindmap', 'quiz'], true)
+    expect(refresh).toHaveBeenCalled()
+    expect(result.current.state.isTriggeringAgents).toBe(false)
+  })
+
+  it('handleTriggerAgents exposes backend detail on failure', async () => {
+    vi.mocked(runAllAgents).mockRejectedValueOnce(new Error('backend error detail'))
+    const { result } = renderHook(() => useAutoGenerate('s1', null))
+
+    await act(async () => {
+      await result.current.actions.handleTriggerAgents('s1')
+    })
+
+    expect(result.current.state.triggerError).toBe('backend error detail')
+    expect(result.current.state.autoGenerateToast).toBe('backend error detail')
+    expect(result.current.state.isTriggeringAgents).toBe(false)
   })
 })

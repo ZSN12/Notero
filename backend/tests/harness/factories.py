@@ -12,7 +12,7 @@ import factory
 from factory.fuzzy import FuzzyText
 
 from app.core.auth import hash_password
-from app.models import Notebook, Note, Session, Task, User, Vocabulary
+from app.models import Notebook, Note, RAGMessage, Session, Task, User, Vocabulary
 
 
 class UserFactory(factory.alchemy.SQLAlchemyModelFactory):
@@ -67,6 +67,20 @@ class TaskFactory(factory.alchemy.SQLAlchemyModelFactory):
     task_type = "review"
     status = "pending"
     session = factory.SubFactory(SessionFactory)
+
+
+class RAGMessageFactory(factory.alchemy.SQLAlchemyModelFactory):
+    class Meta:
+        model = RAGMessage
+        sqlalchemy_session_persistence = "flush"
+
+    id = factory.LazyFunction(lambda: str(uuid.uuid4()))
+    role = "user"
+    content = factory.Faker("sentence")
+    sources = factory.LazyFunction(list)
+    is_summary = False
+    session = factory.SubFactory(SessionFactory)
+    notebook = factory.LazyAttribute(lambda obj: obj.session.notebook)
 
 
 class VocabularyFactory(factory.alchemy.SQLAlchemyModelFactory):
