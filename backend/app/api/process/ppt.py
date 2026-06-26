@@ -16,6 +16,7 @@ from app.services.slide_aligner import SlideAligner
 from app.services.file_service import save_file
 from app.services.ppt_llm_matcher import compute_placements
 from app.services.vocabulary_service import save_vocabulary_entry
+from app.services.course_terms_service import build_terms_from_ppt, upsert_notebook_course_terms
 from app.config import SLIDE_DIR, MAX_PPT_SIZE, PPT_LLM_MATCHER
 
 logger = logging.getLogger(__name__)
@@ -442,6 +443,27 @@ async def upload_ppt(
                 db.commit()
         except Exception as kw_error:
             logger.warning("Keyword extraction failed: %s", kw_error)
+
+        try:
+            course_terms = build_terms_from_ppt(session.title, session.keywords or [], slides)
+            if course_terms:
+                upsert_notebook_course_terms(
+                    db,
+                    session.notebook_id,
+                    course_terms,
+                    source="ppt",
+                    session_id=session_id,
+                    weight=3.0,
+                    commit=True,
+                )
+                logger.info(
+                    "ppt_course_terms_upserted session_id=%s notebook_id=%s count=%s",
+                    session_id,
+                    session.notebook_id,
+                    len(course_terms),
+                )
+        except Exception:
+            logger.warning("ppt_course_terms_update_failed session_id=%s", session_id, exc_info=True)
 
         ppt_data = {
             "filename": file.filename,

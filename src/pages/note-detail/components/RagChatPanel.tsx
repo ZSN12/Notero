@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { Loader2, Sparkles, Trash2, X, ChevronDown } from 'lucide-react';
 import type { RAGMessage, RAGSource } from '@/services/api';
 import RagSourceCards from './RagSourceCards';
@@ -39,6 +39,7 @@ function RagChatPanel({
   onClear,
 }: RagChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [expandedSourceMessages, setExpandedSourceMessages] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -47,6 +48,18 @@ function RagChatPanel({
   }, [messages, streamingAnswer, ragStatus]);
 
   const hasContent = messages.length > 0 || streamingAnswer || streamingSources.length > 0 || ragError || ragStatus;
+
+  const toggleMessageSources = (messageId: string) => {
+    setExpandedSourceMessages((prev) => {
+      const next = new Set(prev);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
+  };
 
   return (
     <div className="flex flex-col h-full max-h-[80vh]">
@@ -102,28 +115,36 @@ function RagChatPanel({
               }`}
             >
               {msg.content}
-              {msg.role === 'assistant' && (msg.sources?.length ?? 0) > 0 && (
-                <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-700">
-                  <button
-                    onClick={(e) => {
-                      const el = e.currentTarget.nextElementSibling as HTMLElement | null;
-                      if (el) el.classList.toggle('hidden');
-                    }}
-                    className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-violet-500 transition-colors"
-                  >
-                    <ChevronDown className="w-3 h-3" />
-                    参考来源 ({msg.sources!.length})
-                  </button>
-                  <div className="hidden mt-2">
+              {msg.role === 'assistant' && (msg.sources?.length ?? 0) > 0 && (() => {
+                const sources = msg.sources!;
+                const expanded = expandedSourceMessages.has(msg.id);
+                const visibleSources = expanded ? sources : sources.slice(0, 3);
+                const hasMoreSources = sources.length > 3;
+
+                return (
+                  <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-700">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <p className="text-[10px] text-slate-400">参考来源 ({sources.length})</p>
+                      {hasMoreSources && (
+                        <button
+                          type="button"
+                          onClick={() => toggleMessageSources(msg.id)}
+                          className="flex items-center gap-1 text-[10px] text-violet-500 hover:text-violet-600 transition-colors"
+                        >
+                          <ChevronDown className={`w-3 h-3 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+                          {expanded ? '收起来源' : `展开全部 ${sources.length} 条`}
+                        </button>
+                      )}
+                    </div>
                     <RagSourceCards
-                      sources={msg.sources!}
+                      sources={visibleSources}
                       onSourceClick={onSourceClick}
                       getSourceTypeLabel={getSourceTypeLabel}
                       onClose={onClose}
                     />
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           </div>
         ))}

@@ -197,6 +197,8 @@ def normalize_mind_map_data(data: dict) -> dict:
 
 VALID_OPTION_IDS = {"A", "B", "C", "D"}
 VALID_QUESTION_SOURCE_TYPES = {"transcript", "note", "ppt"}
+VALID_QUESTION_DIFFICULTIES = {"easy", "medium", "hard"}
+VALID_QUESTION_TYPES = {"diagnostic", "review", "variant"}
 
 
 def normalize_quiz_option(option: dict) -> Optional[dict]:
@@ -254,12 +256,38 @@ def normalize_quiz_question(question: dict) -> Optional[dict]:
     if not isinstance(page, int):
         page = None
 
+    raw_points = question.get("knowledge_points", [])
+    knowledge_points: list[str] = []
+    if isinstance(raw_points, list):
+        for point in raw_points:
+            point_text = str(point).strip()
+            if point_text and point_text not in knowledge_points:
+                knowledge_points.append(point_text[:40])
+    if not knowledge_points:
+        fallback = str(raw_source.get("snippet", "") or q_text).strip()
+        knowledge_points = [fallback[:24] or "本节课核心知识"]
+
+    difficulty = str(question.get("difficulty", "medium")).lower()
+    if difficulty not in VALID_QUESTION_DIFFICULTIES:
+        difficulty = "medium"
+
+    question_type = str(question.get("question_type", "diagnostic")).lower()
+    if question_type not in VALID_QUESTION_TYPES:
+        question_type = "diagnostic"
+
+    source_question_id = question.get("source_question_id")
+    source_question_id = str(source_question_id) if source_question_id else None
+
     return {
         "id": str(q_id),
         "question": str(q_text),
         "options": options,
         "answer": answer,
         "explanation": str(question.get("explanation", "")),
+        "knowledge_points": knowledge_points,
+        "difficulty": difficulty,
+        "question_type": question_type,
+        "source_question_id": source_question_id,
         "source": {
             "source_type": source_type,
             "snippet": str(raw_source.get("snippet", "")),

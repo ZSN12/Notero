@@ -65,7 +65,8 @@ backend/tests_*output.txt
 backend/tests_cov_summary.txt
 backend/pytest_bisect.log
 backend/bisect_tests.py
-backend/scripts/
+backend/scripts/*
+!backend/scripts/cleanup_orphan_audio.py
 
 # Uploads & outputs (user data)
 uploads/

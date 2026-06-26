@@ -6,6 +6,9 @@ export interface TranscriptChunk {
   text?: string;
   display_text?: string;
   corrected_text?: string;
+  is_corrected?: boolean;
+  is_ai_corrected?: boolean;
+  correction_error?: string | null;
   correction_stage?: string;
   timestamps?: Array<{ text: string; start_ms: number; end_ms: number; start?: number; end?: number }>;
 }
@@ -189,12 +192,18 @@ export interface QuizOption {
   explanation?: string;
 }
 
+export type QuizMode = 'diagnostic' | 'review' | 'variant';
+
 export interface QuizQuestion {
   id: string;
   question: string;
   options: QuizOption[];
   answer?: string;
   explanation?: string;
+  knowledge_points?: string[];
+  difficulty?: 'easy' | 'medium' | 'hard' | string;
+  question_type?: QuizMode | string;
+  source_question_id?: string | null;
   source?: {
     source_type: string;
     snippet: string;
@@ -215,6 +224,7 @@ export interface QuizBankStatus {
 export interface QuizListItem {
   quiz_id: string;
   title: string;
+  mode?: QuizMode;
   question_count: number;
   questions: Array<{ id: string; question: string; options: Array<{ id: string; text: string }> }>;
   generated_at?: string;
@@ -229,6 +239,7 @@ export interface QuizListItem {
 export interface QuizDetail {
   quiz_id: string;
   title: string;
+  mode?: QuizMode;
   questions: QuizQuestion[];
   generated_at?: string;
   submission?: {
@@ -242,6 +253,8 @@ export interface QuizDetail {
       selected: string;
       answer: string;
       explanation: string;
+      knowledge_points?: string[];
+      difficulty?: string;
     }>;
     submitted_at: string;
   };
@@ -257,7 +270,29 @@ export interface QuizSubmitResult {
     selected: string;
     answer: string;
     explanation: string;
+    knowledge_points?: string[];
+    difficulty?: string;
   }>;
+}
+
+export interface QuizMasteryPoint {
+  knowledge_point: string;
+  mastery: number;
+  attempts: number;
+  correct: number;
+  wrong: number;
+  pending_review: boolean;
+  weak: boolean;
+  last_mode: QuizMode;
+}
+
+export interface QuizMastery {
+  session_id: string;
+  knowledge_points: QuizMasteryPoint[];
+  summary: {
+    weak_count: number;
+    pending_review_count: number;
+  };
 }
 
 export interface AgentTask {

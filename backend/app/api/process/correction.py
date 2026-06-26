@@ -4,6 +4,8 @@ import threading
 import time
 
 from app.models import Note
+from app.models import Session as DBSession, Notebook
+from app.services.course_terms_service import build_shared_course_terms_for_session
 from app.services.term_corrector import corrector
 
 
@@ -97,10 +99,22 @@ def correct_uncorrected_transcripts_from_data(
             bool(ppt_slides),
         )
 
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        shared_keywords = keywords
+        if db_session:
+            notebook = db.query(Notebook).filter(Notebook.id == db_session.notebook_id).first()
+            shared_keywords = build_shared_course_terms_for_session(
+                db,
+                db_session,
+                course_title=(notebook.title if notebook else course_title),
+                current_keywords=keywords,
+                ppt_slides=ppt_slides,
+            )
+
         corrected = corrector.restructure_transcript(
             text=full_text,
             course_title=course_title,
-            keywords=keywords,
+            keywords=shared_keywords,
             ppt_slides=ppt_slides,
         )
         logger.info(
@@ -114,7 +128,7 @@ def correct_uncorrected_transcripts_from_data(
                 review = corrector.review_and_repair_candidate(
                     full_text,
                     corrected,
-                    protected_terms=keywords,
+                    protected_terms=shared_keywords,
                 )
                 logger.info(
                     "transcript_correction_llm_accepted session_id=%s source_chars=%s corrected_chars=%s reviewed=%s repaired=%s",

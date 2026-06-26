@@ -20,9 +20,12 @@ from app.services.note_utils import get_canonical_transcript_text
 
 
 class MockNote:
-    def __init__(self, content=None, transcript=None):
+    def __init__(self, content=None, transcript=None, layout_blocks=None, ppt_images=None):
+        self.id = "note-1"
         self.content = content
         self.transcript = transcript
+        self.layout_blocks = layout_blocks
+        self.ppt_images = ppt_images
 
 
 def test_extract_transcript_from_content():
@@ -256,6 +259,102 @@ def test_canonical_honours_empty_user_edited():
     assert get_canonical_transcript_text(note) == ""
 
 
+def test_canonical_final_skips_empty_display_text():
+    """A final entry with empty display_text should still use corrected_text."""
+    note = MockNote(
+        transcript=[{
+            "chunk_index": 0,
+            "display_text": "",
+            "corrected_text": "corrected transcript",
+            "text": "raw-ish transcript",
+            "raw_text": "raw asr text",
+            "correction_stage": "final",
+        }],
+    )
+    assert get_canonical_transcript_text(note) == "corrected transcript"
+
+
+def test_canonical_final_empty_entry_falls_back_to_content():
+    """Empty final metadata should not hide valid note.content transcript text."""
+    note = MockNote(
+        content="## 语音转文字\n\ncontent transcript",
+        transcript=[{
+            "chunk_index": 0,
+            "display_text": "",
+            "corrected_text": "",
+            "text": "",
+            "correction_stage": "final",
+        }],
+    )
+    assert get_canonical_transcript_text(note) == "content transcript"
+
+
+def test_vector_extraction_uses_canonical_transcript_before_layout_blocks():
+    """Vector index must not resurrect stale transcript text from layout_blocks."""
+    from app.services.vector_service import _extract_text_from_note
+
+    note = MockNote(
+        content="## 语音转文字\n\ncurrent transcript\n\n---\n\nstudent note",
+        transcript=[{
+            "chunk_index": 0,
+            "display_text": "current transcript",
+            "correction_stage": "final",
+        }],
+        layout_blocks=[
+            {"id": "old", "type": "transcript", "content": "stale deleted layout text"},
+        ],
+    )
+
+    extracted = _extract_text_from_note(note)
+    joined = "\n".join(item[2] for item in extracted)
+    assert "current transcript" in joined
+    assert "student note" in joined
+    assert "stale deleted layout text" not in joined
+
+
+def test_vector_extraction_adds_stable_paragraph_anchors():
+    """Transcript chunks should carry paragraph ids for precise RAG source jumps."""
+    from app.services.vector_service import _extract_text_from_note
+
+    note = MockNote(
+        transcript=[{
+            "chunk_index": 0,
+            "display_text": "first paragraph\n\nsecond paragraph",
+            "correction_stage": "final",
+        }],
+    )
+
+    extracted = _extract_text_from_note(note)
+    transcript_items = [item for item in extracted if item[0] == "transcript"]
+
+    assert len(transcript_items) == 2
+    assert transcript_items[0][1].startswith("transcript-0-")
+    assert transcript_items[0][3]["block_id"] == transcript_items[0][1]
+    assert transcript_items[0][3]["paragraph_id"] == transcript_items[0][1]
+    assert transcript_items[1][1].startswith("transcript-1-")
+
+
+def test_vector_search_balances_source_types():
+    """A single source type should not crowd out all other high-quality candidates."""
+    from app.services.vector_service import _balance_search_results
+
+    results = [
+        {"chunk_id": f"t{i}", "source_type": "transcript", "score": 0.99 - i * 0.01}
+        for i in range(6)
+    ] + [
+        {"chunk_id": "p1", "source_type": "ppt", "score": 0.7},
+        {"chunk_id": "n1", "source_type": "note", "score": 0.65},
+    ]
+
+    balanced = _balance_search_results(results, 5)
+    source_types = [r["source_type"] for r in balanced]
+
+    assert len(balanced) == 5
+    assert source_types.count("transcript") == 3
+    assert "ppt" in source_types
+    assert "note" in source_types
+
+
 if __name__ == "__main__":
     test_extract_transcript_from_content()
     test_sync_transcript_no_change()
@@ -266,6 +365,9 @@ if __name__ == "__main__":
     test_sync_creates_user_edited_and_preserves_raw_text()
     test_canonical_prefers_latest_authoritative_entry()
     test_canonical_honours_empty_user_edited()
+    test_canonical_final_skips_empty_display_text()
+    test_canonical_final_empty_entry_falls_back_to_content()
+    test_vector_extraction_uses_canonical_transcript_before_layout_blocks()
     test_dedupe_append_variants()
     test_dedupe_append_chinese()
     test_finalize_merges_user_edited_with_post_asr()

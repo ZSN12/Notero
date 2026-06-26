@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { uploadAudio, finalizeTranscript } from '@/services/api';
-import type { BackendNote } from '@/services/api';
+import type { BackendNote, TranscriptChunk } from '@/services/api';
 import { buildCorrectionStatus, type CorrectionStatus } from './useRestructure';
+import { getErrorMessage } from '@/lib/error';
 
 export interface AudioUploadCallbacks {
   clearDerivedTranscriptViews: () => void;
@@ -147,8 +148,9 @@ export function useAudioUpload(
             abort();
           });
         });
-      } catch (err: any) {
+      } catch (err: unknown) {
         // 某个文件出错，停止后续队列
+        console.error('[useAudioUpload] Upload queue failed:', err);
         setIsUploadingAudio(false);
         setAudioUploadStatus(null);
         setAudioQueueProgress(null);
@@ -169,7 +171,7 @@ export function useAudioUpload(
         const finalNote = finalResult?.note;
         if (finalNote?.transcript && Array.isArray(finalNote.transcript)) {
           const dbText = finalNote.transcript
-            .map((c: any) => c.display_text || c.corrected_text || c.text || c.raw_text || '')
+            .map((c: TranscriptChunk) => c.display_text || c.corrected_text || c.text || c.raw_text || '')
             .filter(Boolean)
             .join('\n\n')
             .trim();
@@ -183,8 +185,8 @@ export function useAudioUpload(
         }
         await onTranscriptReady?.(finalNote);
         options?.onFinalize?.();
-      } catch (err: any) {
-        const message = err?.message || '统一整理失败';
+      } catch (err) {
+        const message = getErrorMessage(err) || '统一整理失败';
         setAudioUploadError(message);
         onCorrectionStatus({ type: 'error', message });
       } finally {

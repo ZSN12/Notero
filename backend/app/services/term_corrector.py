@@ -284,6 +284,8 @@ class TermCorrector:
             return text
 
         keyword_str = "、".join(keywords) if keywords else "无"
+        course_terms = self.build_course_terms(course_title, keywords, ppt_slides)
+        course_terms_str = "、".join(course_terms) if course_terms else "无"
         ppt_context = ""
 
         if ppt_slides:
@@ -301,6 +303,7 @@ class TermCorrector:
         prompt = prompt_template.render(
             course_title=course_title,
             keywords=keyword_str,
+            course_terms=course_terms_str,
             text=text,
             timestamped_text="（无）",
             ppt_context=ppt_context,
@@ -866,6 +869,114 @@ class TermCorrector:
         return keywords
 
     @classmethod
+    def _extract_ordered_terms(cls, text: str) -> list[str]:
+        """Extract candidate course terms while preserving first-seen order."""
+        seen: set[str] = set()
+        terms: list[str] = []
+        text = text or ""
+        matches: list[tuple[int, str]] = []
+
+        technical_suffixes = (
+            "进程|线程|管道|函数|模式|系统|文件|描述符|队列|内存|地址|权限|"
+            "信号|指针|中断|寄存器|调度|同步|互斥|死锁|缓冲区|页面|算法|结构"
+        )
+        for match in re.finditer(r"[\u4e00-\u9fa5]{2,18}", text):
+            seq = match.group()
+            start = match.start()
+            if len(seq) <= 6 and not re.search(r"[与和及或]", seq):
+                matches.append((start, seq))
+            for part in re.split(r"[与和及或、]", seq):
+                if 2 <= len(part) <= 6:
+                    offset = seq.find(part)
+                    matches.append((start + max(offset, 0), part))
+            for term_match in re.finditer(rf"[\u4e00-\u9fa5]{{0,4}}(?:{technical_suffixes})", seq):
+                term = term_match.group()
+                term = re.sub(r"^[与和及或的在中把被将]+", "", term)
+                term = re.sub(r"(区别|特点|流程|步骤|示例|用途|原理|概念|本质)$", "", term)
+                if 2 <= len(term) <= 10:
+                    matches.append((start + term_match.start(), term))
+
+        for pattern in (
+            r"[a-zA-Z_][a-zA-Z0-9_./]*(?:\([^)]*\))?",
+            r"(?:第\s*)?\d+(?:[.．]\d+)?(?:\s*[章节页])?",
+        ):
+            for match in re.finditer(pattern, text):
+                matches.append((match.start(), match.group()))
+
+        for _, term in sorted(matches, key=lambda item: item[0]):
+            term = str(term).strip()
+            term = re.sub(r"^[与和及或的在中把被将]+", "", term)
+            term = re.sub(r"(区别|特点|流程|步骤|示例|用途|原理|概念|本质)$", "", term)
+            if not cls._is_high_value_course_term(term):
+                continue
+            if term in seen:
+                continue
+            seen.add(term)
+            terms.append(term)
+        return terms
+
+    @classmethod
+    def _is_high_value_course_term(cls, term: str) -> bool:
+        term = (term or "").strip()
+        if not term or term in cls._KEYWORD_STOPWORDS:
+            return False
+        if len(term) > 32:
+            return False
+        if re.fullmatch(r"\d+", term):
+            return False
+        if re.search(r"[A-Za-z_./\-]", term):
+            return len(term) >= 2
+        if re.fullmatch(r"[\u4e00-\u9fa5]{2,10}", term):
+            return term not in cls._KEYWORD_STOPWORDS
+        return False
+
+    @classmethod
+    def build_course_terms(
+        cls,
+        course_title: str = "",
+        keywords: Optional[List[str]] = None,
+        ppt_slides: Optional[list] = None,
+        limit: int = 80,
+    ) -> list[str]:
+        """Build an authoritative dynamic term list from title, keywords and PPT.
+
+        We deliberately avoid using raw ASR text here. ASR can contain homophone
+        mistakes (e.g. a wrong common word where a technical term should be), and
+        protecting those mistakes would make later correction harder.  PPT/title
+        terms are much more reliable as a context bias for the LLM.
+        """
+        scores: dict[str, float] = {}
+        order: dict[str, int] = {}
+
+        def add(term: str, weight: float) -> None:
+            clean = str(term or "").strip()
+            if not cls._is_high_value_course_term(clean):
+                return
+            if clean not in order:
+                order[clean] = len(order)
+            scores[clean] = scores.get(clean, 0.0) + weight
+
+        for term in keywords or []:
+            add(str(term), 8.0)
+            for extracted in cls._extract_ordered_terms(str(term)):
+                add(extracted, 4.0)
+
+        for term in cls._extract_ordered_terms(course_title or ""):
+            add(term, 6.0)
+
+        if ppt_slides:
+            for slide in ppt_slides:
+                if not isinstance(slide, dict):
+                    continue
+                for term in cls._extract_ordered_terms(str(slide.get("title") or "")):
+                    add(term, 5.0)
+                for term in cls._extract_ordered_terms(str(slide.get("text") or "")):
+                    add(term, 2.0)
+
+        ranked = sorted(scores, key=lambda t: (-scores[t], order[t], len(t)))
+        return ranked[:limit]
+
+    @classmethod
     def keyword_retention_ratio(cls, source: str, candidate: str) -> float:
         """Ratio of source keywords retained in candidate."""
         source_kw = cls.extract_keywords(source)
@@ -1307,6 +1418,8 @@ class TermCorrector:
         ppt_slides: Optional[list],
     ) -> tuple[str, str]:
         keyword_str = "、".join(keywords) if keywords else "无"
+        course_terms = self.build_course_terms(course_title, keywords, ppt_slides)
+        course_terms_str = "、".join(course_terms) if course_terms else "无"
         ppt_context = ""
         if ppt_slides:
             ppt_lines = ["## PPT 页面信息（按课堂顺序）"]
@@ -1322,6 +1435,7 @@ class TermCorrector:
         prompt = prompt_template.render(
             course_title=course_title,
             keywords=keyword_str,
+            course_terms=course_terms_str,
             text=text,
             timestamped_text="（无）",
             ppt_context=ppt_context,
@@ -1506,6 +1620,7 @@ class TermCorrector:
 
         chunks = self._split_natural_chunks(text)
         total = len(chunks)
+        course_terms = self.build_course_terms(course_title, keywords, ppt_slides)
 
         # Map previous results by index for reuse.
         prev_by_index: dict[int, RestructureChunkResult] = {}
@@ -1537,7 +1652,7 @@ class TermCorrector:
                 chunk_text,
                 prompt,
                 system_msg,
-                protected_terms=keywords,
+                protected_terms=course_terms,
                 timeout_seconds=90.0,
             )
 

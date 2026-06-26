@@ -195,6 +195,31 @@ def _extract_segments_from_entry(entry: dict) -> list[dict]:
     return []
 
 
+def _best_authoritative_entry_text(entry: dict) -> tuple[bool, str]:
+    """Return whether an authoritative entry should be used and its text.
+
+    ``user_edited`` is special: an explicitly empty user edit means the user
+    deleted the transcript, so callers must not fall back to old raw ASR.
+    For ``final`` entries, empty display_text is not authoritative by itself;
+    continue through corrected_text/text/raw_text and finally other fallbacks.
+    """
+    stage = entry.get("correction_stage")
+    for key in ("display_text", "corrected_text", "text"):
+        value = str(entry.get(key) or "").strip()
+        if value:
+            return True, value
+
+    if stage == "user_edited" and any(
+        key in entry for key in ("display_text", "corrected_text", "text")
+    ):
+        return True, ""
+
+    raw_text = str(entry.get("raw_text") or "").strip()
+    if raw_text:
+        return True, raw_text
+    return False, ""
+
+
 def get_canonical_transcript_text(note: "Note") -> str:
     """Return the canonical transcript text for a note.
 
@@ -223,10 +248,9 @@ def get_canonical_transcript_segments(note: "Note") -> tuple[str, list[dict]]:
     transcript = getattr(note, "transcript", None)
     latest = _latest_authoritative_transcript_entry(transcript)
     if latest is not None:
-        for key in ("display_text", "corrected_text", "text"):
-            if key in latest:
-                return str(latest[key] or "").strip(), _extract_segments_from_entry(latest)
-        return str(latest.get("raw_text") or "").strip(), _extract_segments_from_entry(latest)
+        should_use, text = _best_authoritative_entry_text(latest)
+        if should_use:
+            return text, _extract_segments_from_entry(latest)
 
     # 2. Any non-superseded transcript entry (fallback when no authoritative entry exists).
     if transcript and isinstance(transcript, list):

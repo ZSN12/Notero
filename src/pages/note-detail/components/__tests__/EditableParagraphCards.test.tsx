@@ -3,6 +3,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { createRef } from 'react';
 import { EditableParagraphCards } from '../EditableParagraphCards';
 import type { EditableParagraphCardsHandle } from '../EditableParagraphCards';
+import { stableTextId } from '@/lib/sourceAnchors';
 
 describe('EditableParagraphCards', () => {
   beforeEach(() => {
@@ -183,5 +184,29 @@ describe('EditableParagraphCards', () => {
 
     fireEvent.click(screen.getByTitle('跳转到该段落'));
     expect(onSeek).toHaveBeenCalledWith(2500);
+  });
+
+  it('adds stable paragraph anchors for RAG source jumps', () => {
+    render(
+      <EditableParagraphCards
+        transcriptText={`First paragraph.
+
+Second paragraph.`}
+        onUpdateDraft={vi.fn()}
+        onCommitDraft={vi.fn()}
+        onMarkUserEdited={vi.fn()}
+        onSetActiveTextEl={vi.fn()}
+        onClearSentences={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('First paragraph.')).toHaveAttribute(
+      'data-paragraph-id',
+      stableTextId('transcript', 0, 'First paragraph.'),
+    );
+    expect(screen.getByText('Second paragraph.')).toHaveAttribute(
+      'data-paragraph-id',
+      stableTextId('transcript', 1, 'Second paragraph.'),
+    );
   });
 });

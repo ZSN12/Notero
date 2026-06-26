@@ -14,6 +14,11 @@ from app.config import DEEPSEEK_MODEL
 from app.core.llm import ChatMessage, get_default_chat_provider
 from app.services.prompt_loader import load_prompt
 from app.services.term_corrector import corrector, CORRECTION_ERROR_CODES, classify_correction_exception
+from app.services.course_terms_service import (
+    build_shared_course_terms_for_session,
+    build_terms_from_ppt,
+    upsert_notebook_course_terms,
+)
 from app.services.state_service import set_running, set_ready, set_error, set_fallback, set_partial
 from app.services.vector_service import build_session_index, _compute_session_content_hash
 from app.services.vocabulary_service import save_vocabulary_entry
@@ -22,6 +27,15 @@ from app.services.vocabulary_service import save_vocabulary_entry
 from app.agents import AgentContext, get_agent
 
 router = APIRouter()
+
+
+def _extract_ppt_slides(note: Note) -> list[dict] | None:
+    if isinstance(note.ppt_images, list) and note.ppt_images:
+        last_ppt = note.ppt_images[-1]
+        if isinstance(last_ppt, dict):
+            slides = last_ppt.get("slides", [])
+            return slides or None
+    return None
 
 
 def generate_summary(transcript_text: str, course_title: str):
@@ -257,7 +271,37 @@ def finalize_session_transcript(
 
         notebook = db.query(Notebook).filter(Notebook.id == session.notebook_id).first()
         course_title = notebook.title if notebook else ""
-        keywords = session.keywords or []
+        ppt_slides = _extract_ppt_slides(note)
+        session_keywords = session.keywords or []
+        keywords = build_shared_course_terms_for_session(
+            db,
+            session,
+            course_title=course_title,
+            current_keywords=session_keywords,
+            ppt_slides=ppt_slides,
+        )
+
+        try:
+            fresh_terms = build_terms_from_ppt(course_title, session_keywords, ppt_slides)
+            if fresh_terms:
+                upsert_notebook_course_terms(
+                    db,
+                    session.notebook_id,
+                    fresh_terms,
+                    source="transcript_finalize",
+                    session_id=session_id,
+                    weight=2.0,
+                    commit=True,
+                )
+                keywords = build_shared_course_terms_for_session(
+                    db,
+                    session,
+                    course_title=course_title,
+                    current_keywords=session_keywords,
+                    ppt_slides=ppt_slides,
+                )
+        except Exception:
+            logger.warning("course_terms_update_failed session_id=%s", session_id, exc_info=True)
 
         # Build full text from ALL entries (sorted by chunk_index)
         sorted_entries = sorted(
@@ -365,7 +409,7 @@ def finalize_session_transcript(
                     local_display,
                     course_title,
                     keywords,
-                    note.ppt_images,
+                    ppt_slides,
                     previous_results=previous,
                     retry_failed_only=retry_failed_only,
                     on_chunk_complete=on_chunk_complete,

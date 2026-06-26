@@ -24,6 +24,10 @@
       ],
       "answer": "A",
       "explanation": "正确答案解析",
+      "knowledge_points": ["知识点1", "知识点2"],
+      "difficulty": "easy",
+      "question_type": "diagnostic",
+      "source_question_id": null,
       "source": {
         "source_type": "transcript",
         "snippet": "来源片段",
@@ -41,6 +45,9 @@
 4. 题目应覆盖课程的核心概念、要点和难点
 5. 难度必须按由易到难的顺序排列：前面是基础概念题（简单），后面是细节和深入理解题（中等/较难）
 6. 题目之间不要重复
+7. 每道题必须填写 `knowledge_points`，列出 1-3 个具体知识点，不要写泛泛的“课堂内容”
+8. `difficulty` 只能是 `easy`、`medium`、`hard`
+9. 普通题库题目的 `question_type` 使用 `diagnostic`，`source_question_id` 使用 null
 
 ## User Template
 请根据以下课堂笔记内容，尽量生成 $count 道单选题题库 JSON。如果课程内容确实无法扩展出 $count 道互不重复的高质量题目，允许返回略少，但不得低于实际可生成的数量。
@@ -58,5 +65,6 @@ $content
 2. 每道题都要基于课堂内容，不要编造课堂外知识点。
 3. 如果课堂内容较短，也要从概念定义、应用场景、对比区别、步骤流程、易错点等角度扩展出不同考法。
 4. 保证这一批内部题干不重复。
+5. 每题都要标注具体知识点，后续系统会按知识点统计掌握度。
 
 必须输出完整的 JSON，以 `}` 结尾。

@@ -73,7 +73,10 @@ export async function request<T = any>(url: string, options?: ApiRequestOptions)
         const parsed = JSON.parse(errorText);
         if (typeof parsed.detail === 'string') message = parsed.detail;
         else if (Array.isArray(parsed.detail)) message = parsed.detail.map((item: unknown) => (item as { msg?: string }).msg || JSON.stringify(item)).join('；');
-      } catch { /* ignore */ }
+      } catch (parseErr) {
+        // Response body is not JSON; keep the raw status text as the error message.
+        console.warn('[api] Failed to parse error response:', parseErr);
+      }
       throw new Error(message || `请求失败 (${res.status})`);
     }
 

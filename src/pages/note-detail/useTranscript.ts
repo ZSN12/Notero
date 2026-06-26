@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { fetchNote, updateNote as apiUpdateNote, insertPPTIntoTranscript, ContentBlock, Slide } from '@/services/api';
-import type { ParagraphTimeRange } from '@/services/api';
+import type { BackendNote, ParagraphTimeRange, TranscriptChunk } from '@/services/api';
 import { contentBlocksFromLayout, layoutFromNoteParts, normalizeHtmlText, transcriptTextFromRawTranscript } from '@/lib/noteLayout';
+import { getErrorMessage } from '@/lib/error';
 
 const CORRECTION_POLL_MS = 12000;
 const FINAL_CORRECTION_POLL_MS = 2500;
@@ -18,6 +19,49 @@ export interface SentenceWithTime {
   text: string;
   startTime: number;
   endTime: number;
+  startIdx?: number;
+  endIdx?: number;
+}
+
+export function computeParagraphTimeRanges(
+  transcriptText: string,
+  sentencesWithTime: SentenceWithTime[],
+): ParagraphTimeRange[] {
+  if (!transcriptText.trim() || sentencesWithTime.length === 0) return [];
+
+  const paragraphs = transcriptText
+    .split('\n\n')
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  // Assign each sentence to the first paragraph whose text contains the sentence.
+  // This is robust to AI restructure because it matches by content rather than
+  // relying on fragile character indices after the text has been edited.
+  const assigned: Map<number, SentenceWithTime[]> = new Map();
+  paragraphs.forEach((_, i) => assigned.set(i, []));
+
+  for (const sentence of sentencesWithTime) {
+    const sentenceText = sentence.text.trim();
+    if (!sentenceText) continue;
+    for (let i = 0; i < paragraphs.length; i++) {
+      if (paragraphs[i].includes(sentenceText)) {
+        assigned.get(i)!.push(sentence);
+        break;
+      }
+    }
+  }
+
+  return paragraphs
+    .map((para, i) => {
+      const sentencesInPara = assigned.get(i) || [];
+      if (sentencesInPara.length === 0) return null;
+      return {
+        text: para,
+        start_ms: Math.min(...sentencesInPara.map((s) => Math.round(s.startTime * 1000))),
+        end_ms: Math.max(...sentencesInPara.map((s) => Math.round(s.endTime * 1000))),
+      };
+    })
+    .filter((range): range is ParagraphTimeRange => range !== null);
 }
 
 export function useTranscript(
@@ -37,7 +81,7 @@ export function useTranscript(
   const [isPptMatching, setIsPptMatching] = useState(false);
   const [pptMatchMessage, setPptMatchMessage] = useState<string | null>(null);
   const [pendingAiText, setPendingAiText] = useState<string | null>(null);
-  const [loadedNote, setLoadedNote] = useState<any>(null);
+  const [loadedNote, setLoadedNote] = useState<BackendNote | null>(null);
   const [isLoaded, setIsLoaded] = useState(false);
   const [hasLocalChanges, setHasLocalChanges] = useState(false);
   const [partialText, setPartialText] = useState('');
@@ -69,7 +113,7 @@ export function useTranscript(
   const dedupeKey = useCallback((value: string) => {
     return normalizeEditableHtml(value)
       .toLowerCase()
-      // eslint-disable-next-line no-useless-escape, no-empty-character-class
+      // eslint-disable-next-line no-useless-escape
       .replace(/[\]\[\s，。！？,.!?；;：:、"'“”‘’（）()《》<>【—_-]+/g, '');
   }, [normalizeEditableHtml]);
 
@@ -299,13 +343,13 @@ export function useTranscript(
     });
   }, [clearDerivedTranscriptViews, markBackendSynced, replaceTranscriptBlocks]);
 
-  const parseSentencesWithTime = useCallback((note: any): SentenceWithTime[] => {
+  const parseSentencesWithTime = useCallback((note: BackendNote): SentenceWithTime[] => {
     if (!note?.transcript || !Array.isArray(note.transcript) || note.transcript.length === 0) return [];
 
-    const transcriptSourceText = (chunk: any) => chunk.raw_text || chunk.text || '';
+    const transcriptSourceText = (chunk: TranscriptChunk) => chunk.raw_text || chunk.text || '';
     const sortedChunks = note.transcript
-      .sort((a: any, b: any) => (a.chunk_index || 0) - (b.chunk_index || 0))
-      .filter((chunk: any) => transcriptSourceText(chunk).trim());
+      .sort((a, b) => (a.chunk_index || 0) - (b.chunk_index || 0))
+      .filter((chunk) => transcriptSourceText(chunk).trim());
 
     if (sortedChunks.length === 0) return [];
 
@@ -314,6 +358,7 @@ export function useTranscript(
     // Build timestamp array with sequential position tracking to correctly handle
     // duplicate words (e.g. "的", "是", "在" appear many times in Chinese text).
     // Using indexOf(word, searchPos) ensures each occurrence maps to its actual position.
+    // Backend timestamps are in milliseconds; convert to seconds for audio API compatibility.
     const allTimestamps: { text: string; start: number; end: number; pos: number }[] = [];
     let searchPos = 0;
     for (const chunk of sortedChunks) {
@@ -323,7 +368,9 @@ export function useTranscript(
           if (!word) continue;
           const pos = fullText.indexOf(word, searchPos);
           if (pos !== -1) {
-            allTimestamps.push({ text: word, start: ts.start || 0, end: ts.end || 0, pos });
+            const startMs = (ts.start_ms ?? ts.start ?? 0) as number;
+            const endMs = (ts.end_ms ?? ts.end ?? 0) as number;
+            allTimestamps.push({ text: word, start: startMs / 1000, end: endMs / 1000, pos });
             searchPos = pos + word.length;
           }
         }
@@ -355,6 +402,8 @@ export function useTranscript(
           text: sentence.text,
           startTime: Math.min(...wordsInRange.map(w => w.start)),
           endTime: Math.max(...wordsInRange.map(w => w.end)),
+          startIdx: sentence.startIdx,
+          endIdx: sentence.endIdx,
         });
       } else if (result.length > 0) {
         // Fallback: estimate time range from previous sentence
@@ -363,6 +412,8 @@ export function useTranscript(
           text: sentence.text,
           startTime: prev.endTime,
           endTime: prev.endTime + 2,
+          startIdx: sentence.startIdx,
+          endIdx: sentence.endIdx,
         });
       } else {
         // First sentence(s) have no timestamp match — use the first available timestamp
@@ -370,6 +421,8 @@ export function useTranscript(
           text: sentence.text,
           startTime: allTimestamps[0]?.start ?? 0,
           endTime: (allTimestamps[0]?.start ?? 0) + 2,
+          startIdx: sentence.startIdx,
+          endIdx: sentence.endIdx,
         });
       }
     }
@@ -424,7 +477,7 @@ export function useTranscript(
         let restoredTranscriptText = '';
         const backendTranscript = transcriptTextFromRawTranscript(note.transcript);
         const hasFinalTranscript = note.transcript?.some?.(
-          (chunk: any) => chunk.correction_stage === 'final' || chunk.correction_stage === 'user_edited',
+          (chunk) => chunk.correction_stage === 'final' || chunk.correction_stage === 'user_edited',
         );
         if (hasFinalTranscript) {
           // An explicitly empty user_edited display_text is a valid deletion and
@@ -488,16 +541,19 @@ export function useTranscript(
               if (blocks.blocks?.some((b: ContentBlock) => b.type === 'image')) {
                 updateContentBlocks(blocks.blocks, false, false);
               }
-            } catch { /* ignore */ }
+            } catch (err) {
+              console.error('[useTranscript] Failed to auto-insert PPT during history load:', err);
+            }
           }, 500);
         }
       }
-    } catch (error: any) {
+    } catch (error) {
       // Missing note is a normal empty-state, not a load failure.
+      const message = getErrorMessage(error);
       const isMissingNote =
-        error?.message?.includes('404') ||
-        error?.message?.includes('Not found') ||
-        error?.message?.includes('Note not found');
+        message.includes('404') ||
+        message.includes('Not found') ||
+        message.includes('Note not found');
       if (!isMissingNote) {
         console.error('Failed to load history:', error);
       }
@@ -507,7 +563,7 @@ export function useTranscript(
       setHasLocalChanges(false);
       setIsLoaded(true);
     }
-  }, [cleanTranscriptText, sessionId, parseSentencesWithTime, transcriptFromBlocks, transcriptTextFromRawTranscript, updateContentBlocks, buildBlocksWithPreservedImages]);
+  }, [cleanTranscriptText, sessionId, parseSentencesWithTime, transcriptFromBlocks, updateContentBlocks, buildBlocksWithPreservedImages]);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
@@ -534,10 +590,10 @@ export function useTranscript(
         hasLocalChangesRef.current = false;
         setHasLocalChanges(false);
         return true;
-      } catch (error: any) {
+      } catch (error) {
         console.error('[NoteDetail] Failed to save content:', error);
         setSaveStatus('error');
-        setSaveError(error?.message || '保存失败，请检查网络后重试');
+        setSaveError(getErrorMessage(error) || '保存失败，请检查网络后重试');
         return false;
       }
     }
@@ -609,16 +665,20 @@ export function useTranscript(
             if (parsed.length > 0) setSentencesWithTime(parsed);
           }
         }
-      } catch { /* ignore */ }
+      } catch (err) {
+        console.error('[useTranscript] Correction poll failed:', err);
+      }
     }, CORRECTION_POLL_MS);
     return () => clearInterval(interval);
-  }, [isRecording, sessionId, transcriptText, parseSentencesWithTime, receiveAiText, transcriptTextFromRawTranscript]);
+  }, [isRecording, sessionId, transcriptText, parseSentencesWithTime, receiveAiText]);
 
   useEffect(() => {
     if (!isRecording && sessionId && transcriptText) {
       prevTranscriptRef.current = transcriptText;
       setIsTranscribing(true);
     }
+    // Intentionally capture transcriptText only when recording stops, not on every text change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRecording, sessionId]);
 
   useEffect(() => {
@@ -635,7 +695,7 @@ export function useTranscript(
         if (!note) return;
         const corrected = transcriptTextFromRawTranscript(note.transcript);
         const hasFinalTranscript = note.transcript?.some?.(
-          (chunk: any) => chunk.correction_stage === 'final',
+          (chunk) => chunk.correction_stage === 'final',
         );
 
         if (hasFinalTranscript) {
@@ -649,7 +709,9 @@ export function useTranscript(
           }
           return;
         }
-      } catch { /* ignore */ }
+      } catch (err) {
+        console.error('[useTranscript] Final transcript poll failed:', err);
+      }
 
       if (attempts >= FINAL_CORRECTION_MAX_ATTEMPTS) {
         stopped = true;
@@ -663,7 +725,7 @@ export function useTranscript(
       stopped = true;
       clearInterval(interval);
     };
-  }, [isTranscribing, isRecording, sessionId, parseSentencesWithTime, receiveAiText, transcriptTextFromRawTranscript]);
+  }, [isTranscribing, isRecording, sessionId, parseSentencesWithTime, receiveAiText]);
 
   useEffect(() => {
     if (!isTranscribing) return;
@@ -700,7 +762,9 @@ export function useTranscript(
           xhr.setRequestHeader('Content-Type', 'application/json');
           if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
           xhr.send(payload);
-        } catch { /* ignore */ }
+        } catch (err) {
+          console.error('[useTranscript] Beforeunload auto-save failed:', err);
+        }
       }
     };
     window.addEventListener('beforeunload', handler);
@@ -734,7 +798,7 @@ export function useTranscript(
     const t1 = setTimeout(doInsert, PPT_INSERT_INITIAL_MS);
     const t2 = setInterval(doInsert, PPT_INSERT_INTERVAL_MS);
     return () => { clearTimeout(t1); clearInterval(t2); };
-  }, [isRecording, sessionId, slides.length]);
+  }, [isRecording, sessionId, slides.length, updateContentBlocks]);
 
   useEffect(() => {
     if (isRecording && slides.length > 0) {
@@ -744,6 +808,11 @@ export function useTranscript(
       setIsAiRestructuring(false);
     }
   }, [isRecording, slides.length]);
+
+  const paragraphTimeRanges = useMemo(
+    () => computeParagraphTimeRanges(transcriptText, sentencesWithTime),
+    [transcriptText, sentencesWithTime],
+  );
 
   return {
     state: {
@@ -764,7 +833,7 @@ export function useTranscript(
       hasLocalChanges,
       partialText,
       streamingFinals,
-      paragraphTimeRanges: [] as ParagraphTimeRange[],
+      paragraphTimeRanges,
     },
     actions: {
       setTranscriptText,

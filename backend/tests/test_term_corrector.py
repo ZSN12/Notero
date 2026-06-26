@@ -249,6 +249,36 @@ class TestNormKey:
         assert "！" not in key
 
 
+class TestBuildCourseTerms:
+    def test_extracts_terms_from_ppt_title_and_text(self):
+        slides = [
+            {
+                "page": 1,
+                "title": "父进程和子进程",
+                "text": "fork 创建子进程，exec 族函数替换程序映像。无名管道与有名管道区别，mkfifo、unlink、FIFO、文件描述符。",
+            }
+        ]
+        terms = TermCorrector.build_course_terms("嵌入式系统", [], slides)
+
+        assert "父进程" in terms
+        assert "子进程" in terms
+        assert "无名管道" in terms
+        assert "有名管道" in terms
+        assert "fork" in terms
+        assert "exec" in terms
+        assert "mkfifo" in terms
+
+    def test_does_not_learn_wrong_asr_homophone_from_raw_text(self):
+        terms = TermCorrector.build_course_terms(
+            course_title="嵌入式系统",
+            keywords=[],
+            ppt_slides=[{"page": 1, "title": "进程通信", "text": "父进程、子进程、fork、exec"}],
+        )
+
+        assert "子进程" in terms
+        assert "紫禁城" not in terms
+
+
 class TestPreservesSourceContent:
     def test_empty_source(self):
         # Empty source has nothing to preserve.

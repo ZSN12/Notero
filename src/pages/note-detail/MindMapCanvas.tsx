@@ -16,7 +16,7 @@ import {
   MarkerType,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { ChevronRight, ChevronDown, BookOpen, FileText, Presentation, ArrowRight } from 'lucide-react';
+import { BookOpen, FileText, Presentation, ArrowRight } from 'lucide-react';
 import type { MindMapNode, MindMapData } from '@/services/api';
 import { saveMindMapPositions } from '@/services/api';
 import ELK from 'elkjs/lib/elk.bundled.js';
@@ -290,7 +290,6 @@ function MindMapCanvasInner({
   const [nodes, setNodes, onNodesChange] = useNodesState([] as Node[]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([] as Edge[]);
   const layoutInProgress = useRef(false);
-  const queuedExpanded = useRef<Set<string> | null>(null);
   const { fitView } = useReactFlow();
   const displayRootTitle = rootTitle?.trim() || data.title?.trim() || '知识导图';
 
@@ -314,7 +313,7 @@ function MindMapCanvasInner({
         console.error('ELK layout failed:', err);
         layoutInProgress.current = false;
       });
-  }, [data, sessionId, displayRootTitle, setNodes, setEdges, fitView]);
+  }, [data, displayRootTitle, setNodes, setEdges, fitView]);
 
   useEffect(() => {
     runLayout();

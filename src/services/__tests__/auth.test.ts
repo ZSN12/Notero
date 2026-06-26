@@ -13,7 +13,7 @@ import {
   changePassword,
   uploadAvatar,
 } from '@/services/auth'
-import { API_BASE } from '@/services/api'
+
 
 describe('auth token management', () => {
   beforeEach(() => {

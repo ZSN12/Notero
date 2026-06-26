@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { getProfile, updateProfile, changePassword, uploadAvatar, getAvatarUrl, logout, type UserProfile } from "@/services/auth";
 import { getToken } from "@/services/auth";
-import { User, Lock, Upload, LogOut, ArrowLeft, CheckCircle2, AlertCircle, Camera } from "lucide-react";
+import { User, Lock, LogOut, ArrowLeft, CheckCircle2, AlertCircle, Camera } from "lucide-react";
 
 export default function Profile() {
   const navigate = useNavigate();

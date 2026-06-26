@@ -133,11 +133,13 @@ def delete_session(
 
 def _cleanup_session_files(session_id: str) -> None:
     try:
-        delete_session_files(session_id, delete_audio=False)
-    except Exception:
+        # Deleting the whole session must also remove its recording files.
+        delete_session_files(session_id, delete_audio=True)
+    except Exception as exc:
         logger.warning(
-            "delete_session_files_failed session_id=%s",
+            "delete_session_files_failed session_id=%s error=%s",
             session_id,
+            exc,
             exc_info=True,
         )
 

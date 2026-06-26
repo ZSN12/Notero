@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Plus, Search, Upload } from 'lucide-react';
 import { useStore } from '@/store/useStore';
-import { getProfile, getAvatarUrl } from '@/services/auth';
+import { getProfile, getAvatarUrl, type UserProfile } from '@/services/auth';
 import { importNotebook } from '@/services/api';
 import NotebookCard from '@/components/NotebookCard';
 import CreateDialog from '@/components/CreateDialog';
@@ -13,7 +13,7 @@ export default function Dashboard() {
   const { notebooks, loading, error, openDialog, loadNotebooks } = useStore();
   const navigate = useNavigate();
   const [searchQuery, setSearchQuery] = useState('');
-  const [profile, setProfile] = useState<any>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const importFileRef = useRef<HTMLInputElement>(null);
 
@@ -50,11 +50,6 @@ export default function Dashboard() {
       if (importFileRef.current) importFileRef.current.value = '';
     }
   };
-
-  const filteredNotebooks = notebooks.filter(nb =>
-    nb.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    nb.description.toLowerCase().includes(searchQuery.toLowerCase())
-  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/30 to-slate-100">

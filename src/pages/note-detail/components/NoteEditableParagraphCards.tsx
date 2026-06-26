@@ -1,5 +1,6 @@
 import { useRef, useEffect, useMemo } from 'react';
 import { sanitizeHTML } from '@/lib/sanitize';
+import { stableTextId } from '@/lib/sourceAnchors';
 
 export interface NoteEditableParagraphCardsProps {
   transcriptText: string;
@@ -117,6 +118,8 @@ export function NoteEditableParagraphCards({
         <div
           key={`para-${i}`}
           ref={setBlockRef(i)}
+          data-transcript-block
+          data-paragraph-id={stableTextId('transcript', i, para.trim())}
           contentEditable
           suppressContentEditableWarning
           dangerouslySetInnerHTML={{ __html: sanitizeHTML(para.trim()) as unknown as string }}

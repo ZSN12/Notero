@@ -1,5 +1,5 @@
 import { API_BASE, authHeaders } from './core';
-import type { BackendNote, ContentBlock, PPTSlide, Slide } from './types';
+import type { ContentBlock, PPTSlide, Slide } from './types';
 
 export async function alignPPTWithText(sessionId: string, text: string): Promise<{ matched_page: number | null; similarity: number; slide?: PPTSlide }> {
   const res = await fetch(`${API_BASE}/api/process/ppt-align?session_id=${sessionId}&text=${encodeURIComponent(text)}`, {

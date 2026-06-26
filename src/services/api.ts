@@ -22,11 +22,14 @@ export type {
   MindMapData,
   MindMapStatus,
   QuizOption,
+  QuizMode,
   QuizQuestion,
   QuizBankStatus,
   QuizListItem,
   QuizDetail,
   QuizSubmitResult,
+  QuizMasteryPoint,
+  QuizMastery,
   AgentTask,
   RAGSource,
   RAGCallbacks,
@@ -102,6 +105,7 @@ export {
   generateSessionQuiz,
   getQuizDetail,
   submitQuizAnswers,
+  getQuizMastery,
   deleteQuiz,
 } from './api/quiz';
 

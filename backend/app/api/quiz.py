@@ -13,6 +13,10 @@ class SubmitAnswersRequest(BaseModel):
     answers: dict[str, str]
 
 
+class GenerateQuizRequest(BaseModel):
+    mode: str = "diagnostic"
+
+
 @router.get("/session/{session_id}/bank/status")
 def get_bank_status(
     session_id: str,
@@ -67,6 +71,7 @@ def get_session_quizzes(
 def generate_quiz(
     session_id: str,
     response: Response,
+    body: GenerateQuizRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -75,7 +80,7 @@ def generate_quiz(
     If bank is not ready, returns status so frontend can trigger bank generation.
     """
     try:
-        result = quiz_service.generate_quiz(session_id, current_user, db)
+        result = quiz_service.generate_quiz(session_id, current_user, db, mode=(body.mode if body else "diagnostic"))
         if result.get("status") in ("need_bank", "stale"):
             # Auto-trigger bank generation if needed
             if result["status"] == "need_bank":
@@ -94,6 +99,19 @@ def generate_quiz(
         if "失败" in error_msg or "超时" in error_msg or "timeout" in error_msg.lower():
             raise HTTPException(status_code=502, detail=error_msg)
         raise HTTPException(status_code=404, detail=error_msg)
+
+
+@router.get("/session/{session_id}/mastery")
+def get_quiz_mastery(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get weighted knowledge point mastery for a session."""
+    try:
+        return quiz_service.get_quiz_mastery(session_id, current_user, db)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/session/{session_id}/{quiz_id}/submit")

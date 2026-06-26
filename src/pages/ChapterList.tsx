@@ -25,21 +25,9 @@ export default function ChapterList() {
     }
   }, [id, loadSessions]);
 
-  const filteredSessions = notebookSessions.filter(s =>
-    s.title.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
   const handleShare = () => {
     const shareUrl = `${window.location.origin}/subject/${id}`;
     navigator.clipboard.writeText(shareUrl).then(() => {
-      setCopyFeedback('已复制');
-      setTimeout(() => setCopyFeedback(''), 2000);
-    });
-  };
-
-  const handleCopyAll = () => {
-    const content = notebookSessions.map(s => `# ${s.title}\n${s.summary}`).join('\n\n');
-    navigator.clipboard.writeText(content).then(() => {
       setCopyFeedback('已复制');
       setTimeout(() => setCopyFeedback(''), 2000);
     });

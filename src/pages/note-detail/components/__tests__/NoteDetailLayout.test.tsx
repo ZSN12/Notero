@@ -80,6 +80,7 @@ vi.mock('../../useTranscript', () => ({
         lastSaveTime: null,
         sentencesWithTime: [],
         activeSentenceIndex: null,
+        paragraphTimeRanges: [],
       },
       {
         receiveAiText: vi.fn(),

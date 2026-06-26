@@ -1,5 +1,6 @@
 import { useRef, useEffect, useMemo, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { sanitizeHTML } from '@/lib/sanitize';
+import { stableTextId } from '@/lib/sourceAnchors';
 import { useEditorHistory } from '@/hooks/useEditorHistory';
 import { formatDuration, type ParagraphTimeRange } from '@/services/api';
 
@@ -247,6 +248,7 @@ export const EditableParagraphCards = forwardRef<EditableParagraphCardsHandle, E
               key={`para-${i}`}
               ref={setBlockRef(i)}
               data-transcript-block
+              data-paragraph-id={stableTextId('transcript', i, para.trim())}
               contentEditable
               suppressContentEditableWarning
               dangerouslySetInnerHTML={{ __html: sanitizeHTML(para.trim()) as unknown as string }}

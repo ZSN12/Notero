@@ -133,6 +133,26 @@ class TestDeleteSessionFiles:
         with pytest.raises(ValueError):
             file_service.delete_session_files("bad-id")
 
+    def test_deletes_audio_chunk_dir_when_requested(self):
+        sid = "550e8400-e29b-41d4-a716-446655440000"
+        chunk_dir = file_service.AUDIO_DIR / sid
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        (chunk_dir / "chunk_0001.wav").write_bytes(b"chunk")
+
+        file_service.delete_session_files(sid, delete_audio=True)
+
+        assert not chunk_dir.exists()
+
+    def test_keeps_audio_chunk_dir_by_default(self):
+        sid = "550e8400-e29b-41d4-a716-446655440000"
+        chunk_dir = file_service.AUDIO_DIR / sid
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        (chunk_dir / "chunk_0001.wav").write_bytes(b"chunk")
+
+        file_service.delete_session_files(sid)
+
+        assert chunk_dir.exists()
+
 
 class TestDeleteNotebookFiles:
     def test_deletes_all_sessions(self, db, admin_user):
@@ -159,3 +179,23 @@ class TestDeleteNotebookFiles:
             assert not f.name.startswith(str(s1.id))
         for f in file_service.PPT_DIR.iterdir():
             assert not f.name.startswith(str(s2.id))
+
+    def test_deletes_audio_chunk_dirs(self, db, admin_user):
+        from app.models import Notebook, Session
+
+        nb = Notebook(title="Test", user_id=admin_user.id)
+        db.add(nb)
+        db.commit()
+        db.refresh(nb)
+
+        s1 = Session(notebook_id=nb.id, title="S1")
+        db.add(s1)
+        db.commit()
+
+        chunk_dir = file_service.AUDIO_DIR / str(s1.id)
+        chunk_dir.mkdir(parents=True, exist_ok=True)
+        (chunk_dir / "chunk_0001.wav").write_bytes(b"chunk")
+
+        file_service.delete_notebook_files(nb.id, db)
+
+        assert not chunk_dir.exists()

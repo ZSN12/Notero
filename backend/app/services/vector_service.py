@@ -27,6 +27,10 @@ from app.services.embedding_service import (
     neural_embedding, neural_embedding_batch, EMBEDDING_DIM,
 )
 from app.services.session_service import get_user_session as _get_session_by_user
+from app.services.note_utils import (
+    _extract_notes_from_content,
+    get_canonical_transcript_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,21 @@ VEC_DIM_LEGACY = 512  # dimension of legacy TF-IDF vector
 MIN_CHUNK_CHARS = 10  # skip chunks shorter than this
 CHUNK_SIZE = 300  # target chars per chunk
 CHUNK_OVERLAP = 50  # overlap between chunks
+
+
+def _stable_text_id(prefix: str, index: int, text: str) -> str:
+    """Build a stable enough id for source text anchors without a schema change."""
+    normalized = re.sub(r"\s+", "", text or "")
+    value = 2166136261
+    for ch in normalized[:240]:
+        value ^= ord(ch)
+        value = (value * 16777619) & 0xFFFFFFFF
+    return f"{prefix}-{index}-{value:08x}"
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """Split text using authored paragraph breaks, keeping single paragraphs intact."""
+    return [p.strip() for p in re.split(r"\n\s*\n+", text or "") if p.strip()]
 
 
 # ── Legacy TF-IDF Embedding (fallback) ──
@@ -187,66 +206,62 @@ def _extract_text_from_note(note: Note) -> list[tuple[str, str, str, dict]]:
     """
     results = []
 
-    # 1. Layout blocks (highest priority - structured content)
-    layout_blocks = note.layout_blocks
-    if layout_blocks and isinstance(layout_blocks, list):
-        for i, block in enumerate(layout_blocks):
-            if not isinstance(block, dict):
+    # 1. Canonical transcript is the primary source. Do not prefer
+    # layout_blocks here; they may contain stale transcript blocks after edits.
+    transcript_text = get_canonical_transcript_text(note)
+    if transcript_text and len(transcript_text.strip()) >= MIN_CHUNK_CHARS:
+        paragraphs = _split_paragraphs(transcript_text)
+        if not paragraphs:
+            paragraphs = [transcript_text.strip()]
+        for idx, para in enumerate(paragraphs):
+            if len(para.strip()) < MIN_CHUNK_CHARS:
                 continue
-            btype = block.get("type", "")
-            content = block.get("content", "")
-            page = block.get("page")
-            title = block.get("title", "")
-
-            block_id = block.get("id") or f"block-{i}"
-
-            if btype == "transcript" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
-                meta = {"block_id": block_id, "block_index": i, "block_type": "transcript"}
-                results.append(("transcript", block_id, content.strip(), meta))
-            elif btype == "note" and content and len(content.strip()) >= MIN_CHUNK_CHARS:
-                meta = {"block_id": block_id, "block_index": i, "block_type": "note"}
-                results.append(("note", block_id, content.strip(), meta))
-            elif btype == "ppt":
-                ppt_text = ""
-                if title:
-                    ppt_text += title + " "
-                if content:
-                    ppt_text += content + " "
-                if ppt_text.strip() and len(ppt_text.strip()) >= MIN_CHUNK_CHARS:
-                    meta = {"block_id": block_id, "block_index": i, "block_type": "ppt", "page": page}
-                    results.append(("ppt", block_id, ppt_text.strip(), meta))
-
-    # 2. Transcript (if no layout blocks)
-    if not layout_blocks:
-        transcript = note.transcript
-        if transcript and isinstance(transcript, list):
-            for idx, chunk in enumerate(sorted(transcript, key=lambda x: x.get("chunk_index", 0))):
-                if not isinstance(chunk, dict):
-                    continue
-                text = (
-                    chunk.get("display_text")
-                    or chunk.get("corrected_text")
-                    or chunk.get("text")
-                    or ""
-                ).strip()
-                if text and len(text) >= MIN_CHUNK_CHARS:
-                    chunk_index = chunk.get("chunk_index", idx)
-                    meta = {
-                        "block_id": f"transcript-{chunk_index}",
+            paragraph_id = _stable_text_id("transcript", idx, para)
+            results.append(
+                (
+                    "transcript",
+                    paragraph_id,
+                    para.strip(),
+                    {
+                        "block_id": paragraph_id,
                         "block_type": "transcript",
-                        "chunk_index": chunk_index,
-                        "correction_stage": chunk.get("correction_stage"),
-                        "is_ai_corrected": chunk.get("is_ai_corrected"),
-                    }
-                    results.append(("transcript", meta["block_id"], text, meta))
+                        "paragraph_id": paragraph_id,
+                        "paragraph_index": idx,
+                    },
+                )
+            )
 
-    # 3. Note content (fallback)
+    # 2. Student notes from note.content are supplemental note chunks.
+    notes_text = _extract_notes_from_content(note.content)
+    if notes_text and len(notes_text.strip()) >= MIN_CHUNK_CHARS:
+        note_paragraphs = _split_paragraphs(notes_text)
+        if not note_paragraphs:
+            note_paragraphs = [notes_text.strip()]
+        for idx, para in enumerate(note_paragraphs):
+            if len(para.strip()) < MIN_CHUNK_CHARS:
+                continue
+            block_id = _stable_text_id("note", idx, para)
+            results.append(
+                (
+                    "note",
+                    block_id,
+                    para.strip(),
+                    {
+                        "block_id": block_id,
+                        "block_type": "note",
+                        "paragraph_id": block_id,
+                        "paragraph_index": idx,
+                    },
+                )
+            )
+
+    # 3. Plain content fallback for notes without transcript marker.
     if not results and note.content:
         content = note.content.strip()
         if len(content) >= MIN_CHUNK_CHARS:
             results.append(("note", note.id, content, {}))
 
-    # 4. PPT images text (if available)
+    # 4. PPT images text is supplemental source, never the primary transcript.
     ppt_images = note.ppt_images
     if ppt_images and isinstance(ppt_images, list):
         for ppt_data in ppt_images:
@@ -424,9 +439,10 @@ def _search_vectors_pgvector(
         if notebook_id:
             q = q.filter(VectorChunk.notebook_id == notebook_id)
 
+        candidate_limit = max(limit * 4, limit + 12)
         rows = (
             q.order_by(distance_expr.asc())
-            .limit(limit)
+            .limit(candidate_limit)
             .all()
         )
         return [_build_result(chunk, 1.0 - float(distance), db) for chunk, distance in rows]
@@ -470,7 +486,47 @@ def _search_vectors_numpy(
     ]
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    return [_build_result(chunk, score, db) for chunk, score in scored[:limit]]
+    candidate_limit = max(limit * 4, limit + 12)
+    return [_build_result(chunk, score, db) for chunk, score in scored[:candidate_limit]]
+
+
+def _balance_search_results(results: list[dict], limit: int) -> list[dict]:
+    """Keep relevance order while preventing one source type from crowding out all others."""
+    if limit <= 0:
+        return []
+    if len(results) <= limit or limit <= 2:
+        return results[:limit]
+
+    max_per_source = max(1, math.ceil(limit * 0.6))
+    selected: list[dict] = []
+    selected_ids: set[str] = set()
+    per_source: Counter[str] = Counter()
+
+    for result in results:
+        source_type = str(result.get("source_type") or "unknown")
+        chunk_id = str(result.get("chunk_id") or "")
+        if chunk_id in selected_ids:
+            continue
+        if per_source[source_type] >= max_per_source:
+            continue
+        selected.append(result)
+        selected_ids.add(chunk_id)
+        per_source[source_type] += 1
+        if len(selected) >= limit:
+            selected.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
+            return selected
+
+    for result in results:
+        chunk_id = str(result.get("chunk_id") or "")
+        if chunk_id in selected_ids:
+            continue
+        selected.append(result)
+        selected_ids.add(chunk_id)
+        if len(selected) >= limit:
+            break
+
+    selected.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
+    return selected
 
 
 def search_vectors(
@@ -506,13 +562,19 @@ def search_vectors(
                 user, query_vec, session_id, notebook_id, limit, db
             )
             if pg_results is not None:
-                return pg_results
+                return _balance_search_results(pg_results, limit)
         # If pgvector failed, still try numpy with the neural bytes.
-        return _search_vectors_numpy(user, query_emb_bytes, chunks, limit, db)
+        return _balance_search_results(
+            _search_vectors_numpy(user, query_emb_bytes, chunks, limit, db),
+            limit,
+        )
 
     # Neural service unavailable: TF-IDF fallback.
     query_emb_bytes = _text_to_embedding_tfidf(query)
-    return _search_vectors_numpy(user, query_emb_bytes, chunks, limit, db)
+    return _balance_search_results(
+        _search_vectors_numpy(user, query_emb_bytes, chunks, limit, db),
+        limit,
+    )
 
 
 # ── Status ──

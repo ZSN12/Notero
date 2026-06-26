@@ -25,6 +25,7 @@ export default function NotebookCard({ notebook }: NotebookCardProps) {
         await removeNotebook(notebook.id);
         toast.success('笔记本已删除');
       } catch (error) {
+        console.error('[NotebookCard] Failed to delete notebook:', error);
         toast.error('删除失败，请稍后重试');
       } finally {
         setIsDeleting(false);

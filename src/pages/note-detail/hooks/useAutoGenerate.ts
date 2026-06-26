@@ -52,8 +52,6 @@ export function useAutoGenerate(
     if (!processingStatus) return;
     const stages = processingStatus.stages;
     const agentStages = [stages.mindmap, stages.quiz_bank];
-    const mindmapRunning = stages.mindmap?.status === 'running';
-    const quizRunning = stages.quiz_bank?.status === 'running';
     const anyRunning = agentStages.some(s => s?.status === 'running');
     const anyActionableError = agentStages.some(s => s?.status === 'error');
     const allSettled = agentStages.every(s => s?.status !== 'running');
@@ -76,13 +74,10 @@ export function useAutoGenerate(
     };
 
     if (anyRunning) {
-      setAutoGenerateToast(
-        mindmapRunning && quizRunning
-          ? '正在生成知识导图和题库...'
-          : mindmapRunning
-            ? '正在生成知识导图...'
-            : '正在生成题库...',
-      );
+      if (autoGenerateToast?.startsWith('正在')) {
+        setAutoGenerateToast(null);
+      }
+      return undefined;
     } else if (allReady && hasAgents) {
       return showOnceForSignature('学习资料生成完成');
     } else if (anyActionableError && hasAgents && allSettled) {
@@ -94,7 +89,7 @@ export function useAutoGenerate(
         : `${failed.join('、')}生成失败，可手动重试`;
       return showOnceForSignature(msg);
     }
-  }, [processingStatus, scheduleToastClear]);
+  }, [autoGenerateToast, processingStatus, scheduleToastClear]);
 
   const handleTriggerAgents = useCallback(async (sid: string | undefined, roles?: string[], force = false) => {
     if (!sid) return;

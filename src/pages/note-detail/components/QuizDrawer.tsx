@@ -26,6 +26,15 @@ export function QuizDrawer({
 }: QuizDrawerProps) {
   if (!quiz.state.showQuiz) return null;
 
+  const modeLabel = {
+    diagnostic: '课后诊断',
+    review: '复习后测验',
+    variant: '错题变式',
+  } as const;
+  const weakOrPendingCount =
+    (quiz.state.mastery?.summary.weak_count || 0) + (quiz.state.mastery?.summary.pending_review_count || 0);
+  const canVariantPractice = weakOrPendingCount > 0;
+
   const closeQuiz = () => {
     quiz.actions.setShowQuiz(false);
     quiz.actions.setShowQuizQA(false);
@@ -217,6 +226,11 @@ export function QuizDrawer({
               <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-4">
                 {quiz.state.activeQuiz.title}
               </h3>
+              {quiz.state.activeQuiz.mode && (
+                <div className="mb-4 inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-300">
+                  {modeLabel[quiz.state.activeQuiz.mode as keyof typeof modeLabel] || '测验'}
+                </div>
+              )}
 
               {quiz.state.quizSubmitted && quiz.state.activeQuiz.submission ? (
                 /* Results View */
@@ -294,10 +308,48 @@ export function QuizDrawer({
                               {q.explanation}
                             </div>
                           )}
+                          {q.knowledge_points && q.knowledge_points.length > 0 && (
+                            <div className="mt-2 ml-5 flex flex-wrap gap-1.5">
+                              {q.knowledge_points.map((point) => (
+                                <span
+                                  key={point}
+                                  className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] text-slate-500 ring-1 ring-slate-200 dark:bg-slate-800/60 dark:text-slate-300 dark:ring-slate-600"
+                                >
+                                  {point}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
                   </div>
+                  {quiz.state.mastery && quiz.state.mastery.knowledge_points.length > 0 && (
+                    <div className="mt-6 rounded-xl border border-slate-200 p-4 dark:border-slate-600">
+                      <div className="mb-3 text-sm font-semibold text-slate-700 dark:text-slate-200">知识点掌握度</div>
+                      <div className="space-y-2">
+                        {quiz.state.mastery.knowledge_points.slice(0, 5).map((item) => (
+                          <div key={item.knowledge_point}>
+                            <div className="mb-1 flex items-center justify-between text-xs">
+                              <span className="text-slate-600 dark:text-slate-300">{item.knowledge_point}</span>
+                              <span className={item.weak ? 'text-red-500' : item.pending_review ? 'text-amber-500' : 'text-emerald-500'}>
+                                {item.weak ? '薄弱' : item.pending_review ? '待复习' : '稳定'} · {item.mastery}%
+                              </span>
+                            </div>
+                            <div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-700">
+                              <div
+                                className={`h-full rounded-full ${item.weak ? 'bg-red-400' : item.pending_review ? 'bg-amber-400' : 'bg-emerald-400'}`}
+                                style={{ width: `${Math.max(4, Math.min(100, item.mastery))}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-3 text-xs text-slate-400">
+                        下一步建议：{quiz.state.mastery.summary.weak_count > 0 ? '优先做错题变式练习' : quiz.state.mastery.summary.pending_review_count > 0 ? '先复习待复习知识点，再做复习后测验' : '可以继续做未做题覆盖更多知识点'}
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 /* Taking Quiz View */
@@ -309,6 +361,15 @@ export function QuizDrawer({
                           <span className="text-emerald-500 mr-1">{idx + 1}.</span>
                           {q.question}
                         </p>
+                        {q.knowledge_points && q.knowledge_points.length > 0 && (
+                          <div className="mb-3 flex flex-wrap gap-1.5">
+                            {q.knowledge_points.map((point) => (
+                              <span key={point} className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-300">
+                                {point}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                         <div className="space-y-2">
                           {q.options.map((opt) => (
                             <button
@@ -415,6 +476,17 @@ export function QuizDrawer({
                 </div>
               )}
 
+              {quiz.state.bankStatus?.status === 'ready' && quiz.state.mastery && quiz.state.mastery.knowledge_points.length > 0 && (
+                <div className="mb-4 rounded-lg border border-slate-200 p-3 text-xs dark:border-slate-700">
+                  <div className="mb-2 font-medium text-slate-600 dark:text-slate-300">学习状态</div>
+                  <div className="flex flex-wrap gap-2 text-slate-500 dark:text-slate-400">
+                    <span>薄弱 {quiz.state.mastery.summary.weak_count}</span>
+                    <span>待复习 {quiz.state.mastery.summary.pending_review_count}</span>
+                    <span>已记录 {quiz.state.mastery.knowledge_points.length} 个知识点</span>
+                  </div>
+                </div>
+              )}
+
               {quiz.state.isGeneratingQuiz ? (
                 <div className="flex flex-col items-center justify-center py-16 text-slate-400 gap-3">
                   <Loader2 className="w-8 h-8 animate-spin text-emerald-500" />
@@ -424,30 +496,57 @@ export function QuizDrawer({
                 <div className="flex flex-col items-center justify-center py-16 text-slate-400 gap-4">
                   <ClipboardCheck className="w-10 h-10 opacity-30" />
                   <p className="text-sm">尚未开始测验</p>
-                  <button
-                    onClick={quiz.actions.handleGenerateQuiz}
-                    disabled={!quiz.state.bankStatus || quiz.state.bankStatus.status !== 'ready'}
-                    className="px-4 py-2 text-sm font-medium text-white bg-emerald-500 rounded-lg hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
-                  >
-                    开始测验
-                  </button>
+                  <div className="grid w-full max-w-md grid-cols-1 gap-2">
+                    <button
+                      onClick={() => quiz.actions.handleGenerateQuiz('diagnostic')}
+                      disabled={!quiz.state.bankStatus || quiz.state.bankStatus.status !== 'ready'}
+                      className="px-4 py-2 text-sm font-medium text-white bg-emerald-500 rounded-lg hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      课后诊断
+                    </button>
+                    <button
+                      onClick={() => quiz.actions.handleGenerateQuiz('review')}
+                      disabled={!quiz.state.bankStatus || quiz.state.bankStatus.status !== 'ready'}
+                      className="px-4 py-2 text-sm font-medium text-emerald-600 bg-emerald-50 rounded-lg hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed dark:bg-emerald-900/20 dark:text-emerald-300"
+                    >
+                      复习后测验
+                    </button>
+                    <button
+                      onClick={() => quiz.actions.handleGenerateQuiz('variant')}
+                      disabled={!quiz.state.bankStatus || quiz.state.bankStatus.status !== 'ready' || !canVariantPractice}
+                      className="px-4 py-2 text-sm font-medium text-violet-600 bg-violet-50 rounded-lg hover:bg-violet-100 disabled:opacity-40 disabled:cursor-not-allowed dark:bg-violet-900/20 dark:text-violet-300"
+                      title={canVariantPractice ? '根据错题知识点抽取变式题' : '需要先完成一次测验并产生待复习或薄弱知识点'}
+                    >
+                      错题变式练习
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div>
                   <div className="flex items-center justify-between mb-4">
                     <span className="text-sm text-slate-500">历史测验</span>
-                    <button
-                      onClick={quiz.actions.handleGenerateQuiz}
-                      disabled={
-                        quiz.state.isGeneratingQuiz ||
-                        !quiz.state.bankStatus ||
-                        quiz.state.bankStatus.status !== 'ready'
-                      }
-                      className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-500 rounded-lg hover:bg-emerald-600 disabled:opacity-50 flex items-center gap-1"
-                    >
-                      {quiz.state.isGeneratingQuiz ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-                      开始新测验
-                    </button>
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {([
+                        ['diagnostic', '课后诊断'],
+                        ['review', '复习后测验'],
+                        ['variant', '错题变式'],
+                      ] as const).map(([mode, label]) => (
+                        <button
+                          key={mode}
+                          onClick={() => quiz.actions.handleGenerateQuiz(mode)}
+                          disabled={
+                            quiz.state.isGeneratingQuiz ||
+                            !quiz.state.bankStatus ||
+                            quiz.state.bankStatus.status !== 'ready' ||
+                            (mode === 'variant' && !canVariantPractice)
+                          }
+                          className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-500 rounded-lg hover:bg-emerald-600 disabled:opacity-50 flex items-center gap-1"
+                        >
+                          {quiz.state.isGeneratingQuiz ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                          {label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                   <div className="space-y-2">
                     {quiz.state.quizList.map((q) => (
@@ -461,7 +560,7 @@ export function QuizDrawer({
                         >
                           <div className="text-sm font-medium text-slate-700 dark:text-slate-200">{q.title}</div>
                           <div className="text-xs text-slate-400 mt-0.5">
-                            {q.question_count} 题 · {q.submitted ? '已完成' : '未完成'}
+                            {q.mode ? `${modeLabel[q.mode] || '测验'} · ` : ''}{q.question_count} 题 · {q.submitted ? '已完成' : '未完成'}
                             {q.score && ` · ${q.score.percentage}%`}
                             {q.generated_at && ` · ${new Date(q.generated_at).toLocaleDateString()}`}
                           </div>

@@ -38,6 +38,55 @@ logger = logging.getLogger(__name__)
 TASK_TYPE = "agent_quiz"
 ACTIVE_TASK_STATUSES = {"pending", "running"}
 QUESTIONS_PER_QUIZ = 10
+QUIZ_MODES = {"diagnostic", "review", "variant"}
+QUIZ_MODE_TITLES = {
+    "diagnostic": "课后诊断",
+    "review": "复习后测验",
+    "variant": "错题变式练习",
+}
+QUIZ_MODE_WEIGHTS = {
+    "diagnostic": 0.3,
+    "review": 1.0,
+    "variant": 1.2,
+}
+
+
+def _normalize_quiz_mode(mode: str | None) -> str:
+    normalized = (mode or "diagnostic").strip().lower()
+    return normalized if normalized in QUIZ_MODES else "diagnostic"
+
+
+def _question_knowledge_points(question: dict) -> list[str]:
+    raw_points = question.get("knowledge_points", [])
+    points: list[str] = []
+    if isinstance(raw_points, list):
+        for point in raw_points:
+            text = str(point).strip()
+            if text and text not in points:
+                points.append(text[:40])
+    if points:
+        return points
+
+    source = question.get("source", {})
+    snippet = source.get("snippet", "") if isinstance(source, dict) else ""
+    fallback = str(snippet or question.get("question", "") or "本节课核心知识").strip()
+    return [fallback[:24] or "本节课核心知识"]
+
+
+def _safe_question(question: dict) -> dict:
+    return {
+        "id": question.get("id"),
+        "question": question.get("question"),
+        "options": [
+            {"id": o.get("id"), "text": o.get("text")}
+            for o in question.get("options", [])
+            if isinstance(o, dict)
+        ],
+        "knowledge_points": _question_knowledge_points(question),
+        "difficulty": question.get("difficulty", "medium"),
+        "question_type": question.get("question_type", "diagnostic"),
+        "source_question_id": question.get("source_question_id"),
+    }
 
 
 # ── Vocabulary helpers: quiz_bank ──
@@ -132,20 +181,28 @@ def _update_quiz_in_vocabulary(
     )
 
 
-def _sample_questions_for_attempt(all_questions: list[dict], quizzes: list[dict], count: int) -> list[dict]:
+def _sample_questions_for_attempt(all_questions: list[dict], quizzes: list[dict], count: int, mode: str = "diagnostic") -> list[dict]:
     """Sample questions with review-friendly priority.
 
     Priority:
-    1. Previously answered wrong questions.
-    2. Questions not used in submitted attempts yet.
-    3. Previously answered correctly / already used questions.
+    diagnostic: broad coverage, prefer unused questions.
+    review: wrong questions, then unused questions, then used questions.
+    variant: questions sharing knowledge points with historical mistakes, excluding the original wrong questions.
     """
+    mode = _normalize_quiz_mode(mode)
     by_id = {q.get("id"): q for q in all_questions if isinstance(q, dict) and q.get("id")}
     used_ids: set[str] = set()
     wrong_ids: set[str] = set()
+    correct_ids: set[str] = set()
+    wrong_points: set[str] = set()
 
     for quiz in quizzes:
         snapshot = quiz.get("questions_snapshot", [])
+        questions_by_id = {
+            q.get("id"): q
+            for q in snapshot
+            if isinstance(q, dict) and q.get("id")
+        }
         for q in snapshot:
             if isinstance(q, dict) and q.get("id"):
                 used_ids.add(q["id"])
@@ -153,26 +210,80 @@ def _sample_questions_for_attempt(all_questions: list[dict], quizzes: list[dict]
         submission = quiz.get("submission")
         if isinstance(submission, dict):
             for result in submission.get("results", []):
-                if isinstance(result, dict) and result.get("correct") is False and result.get("question_id"):
-                    wrong_ids.add(result["question_id"])
+                if not isinstance(result, dict) or not result.get("question_id"):
+                    continue
+                qid = result["question_id"]
+                if result.get("correct") is False:
+                    wrong_ids.add(qid)
+                    for point in _question_knowledge_points(questions_by_id.get(qid, {})):
+                        wrong_points.add(point)
+                elif result.get("correct") is True:
+                    correct_ids.add(qid)
 
     def pick(ids: list[str], remaining: int) -> list[dict]:
         candidates = [by_id[qid] for qid in ids if qid in by_id]
         random.shuffle(candidates)
         return candidates[:remaining]
 
+    def pick_balanced(ids: list[str], remaining: int) -> list[dict]:
+        buckets: dict[str, list[str]] = {}
+        for qid in ids:
+            if qid not in by_id:
+                continue
+            point = _question_knowledge_points(by_id[qid])[0]
+            buckets.setdefault(point, []).append(qid)
+        for bucket in buckets.values():
+            random.shuffle(bucket)
+        selected_ids: list[str] = []
+        while len(selected_ids) < remaining and buckets:
+            for point in list(buckets.keys()):
+                bucket = buckets[point]
+                if bucket:
+                    selected_ids.append(bucket.pop())
+                    if len(selected_ids) >= remaining:
+                        break
+                if not bucket:
+                    buckets.pop(point, None)
+        return [by_id[qid] for qid in selected_ids if qid in by_id]
+
     selected: list[dict] = []
     selected_ids: set[str] = set()
 
-    for ids in (
-        list(wrong_ids),
-        [qid for qid in by_id if qid not in used_ids],
-        [qid for qid in by_id if qid not in wrong_ids],
-    ):
+    if mode == "diagnostic":
+        priority_groups = (
+            [qid for qid in by_id if qid not in used_ids],
+            list(by_id.keys()),
+        )
+        first_group = True
+    elif mode == "variant":
+        variant_ids = [
+            qid for qid, q in by_id.items()
+            if qid not in wrong_ids
+            and any(point in wrong_points for point in _question_knowledge_points(q))
+        ]
+        priority_groups = (
+            variant_ids,
+            [qid for qid in by_id if qid not in wrong_ids and qid not in used_ids],
+            [qid for qid in by_id if qid not in wrong_ids],
+        )
+        first_group = False
+    else:
+        priority_groups = (
+            list(wrong_ids),
+            [qid for qid in by_id if qid not in used_ids],
+            [qid for qid in by_id if qid not in wrong_ids],
+            [qid for qid in by_id if qid not in correct_ids],
+        )
+        first_group = False
+
+    for ids in priority_groups:
         remaining = count - len(selected)
         if remaining <= 0:
             break
-        for q in pick([qid for qid in ids if qid not in selected_ids], remaining):
+        filtered_ids = [qid for qid in ids if qid not in selected_ids]
+        picked = pick_balanced(filtered_ids, remaining) if first_group else pick(filtered_ids, remaining)
+        first_group = False
+        for q in picked:
             selected.append(q)
             selected_ids.add(q["id"])
 
@@ -443,12 +554,13 @@ def start_bank_generation(session_id: str, user: User, db: DBSessionType, force:
 
 # ── Generate quiz attempt (from bank, no AI call) ──
 
-def generate_quiz(session_id: str, user: User, db: DBSessionType) -> dict:
+def generate_quiz(session_id: str, user: User, db: DBSessionType, mode: str = "diagnostic") -> dict:
     """Generate a quiz attempt by sampling from the question bank.
 
     If bank is not ready, returns status info so the frontend can trigger bank generation.
     Does NOT call AI — only samples from existing bank.
     """
+    mode = _normalize_quiz_mode(mode)
     session = _get_session_for_user(session_id, user, db)
     if not session:
         raise ValueError("Session not found or access denied")
@@ -470,17 +582,27 @@ def generate_quiz(session_id: str, user: User, db: DBSessionType) -> dict:
     # Sample questions from bank
     all_questions = bank_entry["questions"]
     count = min(QUESTIONS_PER_QUIZ, len(all_questions))
-    sampled = _sample_questions_for_attempt(all_questions, _get_quizzes_from_vocabulary(note), count)
+    sampled = _sample_questions_for_attempt(all_questions, _get_quizzes_from_vocabulary(note), count, mode)
+    if mode == "variant" and not sampled:
+        return {"status": "no_mistakes", "message": "暂无可用于变式练习的错题知识点"}
 
     quiz_id = str(uuid.uuid4())
 
     # Save full question snapshot in the attempt so it's immune to bank rebuilds.
     # The snapshot includes answers; we strip them when returning to the frontend.
-    questions_snapshot = sampled
+    questions_snapshot = []
+    for q in sampled:
+        snapshot_q = dict(q)
+        snapshot_q["knowledge_points"] = _question_knowledge_points(snapshot_q)
+        snapshot_q["difficulty"] = snapshot_q.get("difficulty", "medium")
+        snapshot_q["question_type"] = mode
+        questions_snapshot.append(snapshot_q)
 
     quiz_entry = {
         "kind": "quiz",
         "quiz_id": quiz_id,
+        "mode": mode,
+        "title": QUIZ_MODE_TITLES[mode],
         "bank_hash": bank_entry.get("content_hash", ""),
         "questions_snapshot": questions_snapshot,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -489,17 +611,12 @@ def generate_quiz(session_id: str, user: User, db: DBSessionType) -> dict:
     _add_quiz_to_vocabulary(db, note, quiz_entry)
 
     # Return questions WITHOUT answers for the taking-quiz view
-    safe_questions = []
-    for q in sampled:
-        safe_questions.append({
-            "id": q["id"],
-            "question": q["question"],
-            "options": [{"id": o["id"], "text": o["text"]} for o in q.get("options", [])],
-        })
+    safe_questions = [_safe_question(q) for q in questions_snapshot]
 
     return {
         "quiz_id": quiz_id,
-        "title": "本节课测验",
+        "title": QUIZ_MODE_TITLES[mode],
+        "mode": mode,
         "questions": safe_questions,
     }
 
@@ -525,11 +642,7 @@ def get_session_quizzes(session_id: str, user: User, db: DBSessionType) -> list[
         # Build safe questions (no answers)
         safe_questions = []
         for q in snapshot:
-            safe_questions.append({
-                "id": q.get("id"),
-                "question": q.get("question"),
-                "options": [{"id": o.get("id"), "text": o.get("text")} for o in q.get("options", [])],
-            })
+            safe_questions.append(_safe_question(q))
 
         score_summary = None
         if submission:
@@ -541,7 +654,8 @@ def get_session_quizzes(session_id: str, user: User, db: DBSessionType) -> list[
 
         result.append({
             "quiz_id": entry.get("quiz_id"),
-            "title": "本节课测验",
+            "title": entry.get("title") or QUIZ_MODE_TITLES.get(entry.get("mode", "diagnostic"), "本节课测验"),
+            "mode": _normalize_quiz_mode(entry.get("mode")),
             "question_count": len(snapshot),
             "questions": safe_questions,
             "generated_at": entry.get("generated_at"),
@@ -575,7 +689,8 @@ def get_quiz_detail(session_id: str, quiz_id: str, user: User, db: DBSessionType
         # Submitted — return full detail with answers and explanations
         return {
             "quiz_id": entry.get("quiz_id"),
-            "title": "本节课测验",
+            "title": entry.get("title") or QUIZ_MODE_TITLES.get(entry.get("mode", "diagnostic"), "本节课测验"),
+            "mode": _normalize_quiz_mode(entry.get("mode")),
             "questions": snapshot,
             "generated_at": entry.get("generated_at"),
             "submission": submission,
@@ -584,15 +699,12 @@ def get_quiz_detail(session_id: str, quiz_id: str, user: User, db: DBSessionType
         # Not submitted — strip answers
         safe_questions = []
         for q in snapshot:
-            safe_questions.append({
-                "id": q.get("id"),
-                "question": q.get("question"),
-                "options": [{"id": o.get("id"), "text": o.get("text")} for o in q.get("options", [])],
-            })
+            safe_questions.append(_safe_question(q))
 
         return {
             "quiz_id": entry.get("quiz_id"),
-            "title": "本节课测验",
+            "title": entry.get("title") or QUIZ_MODE_TITLES.get(entry.get("mode", "diagnostic"), "本节课测验"),
+            "mode": _normalize_quiz_mode(entry.get("mode")),
             "questions": safe_questions,
             "generated_at": entry.get("generated_at"),
             "submission": None,
@@ -644,6 +756,8 @@ def submit_quiz_answers(session_id: str, quiz_id: str, user: User, db: DBSession
             "selected": selected,
             "answer": correct_answer,
             "explanation": q.get("explanation", ""),
+            "knowledge_points": _question_knowledge_points(q),
+            "difficulty": q.get("difficulty", "medium"),
         })
 
     total = len(snapshot)
@@ -653,6 +767,7 @@ def submit_quiz_answers(session_id: str, quiz_id: str, user: User, db: DBSession
     updated_entry = dict(entry)
     updated_entry["submission"] = {
         "answers": answers,
+        "mode": _normalize_quiz_mode(entry.get("mode")),
         "score": correct_count,
         "total": total,
         "percentage": percentage,
@@ -666,6 +781,95 @@ def submit_quiz_answers(session_id: str, quiz_id: str, user: User, db: DBSession
         "total": total,
         "percentage": percentage,
         "results": results,
+    }
+
+
+# ── Knowledge point mastery ──
+
+def get_quiz_mastery(session_id: str, user: User, db: DBSessionType) -> dict:
+    """Return weighted mastery stats grouped by question knowledge point."""
+    session = _get_session_for_user(session_id, user, db)
+    if not session:
+        raise ValueError("Session not found or access denied")
+
+    note = db.query(Note).filter(Note.session_id == session_id).first()
+    if not note:
+        return {"session_id": session_id, "knowledge_points": [], "summary": {"weak_count": 0, "pending_review_count": 0}}
+
+    stats: dict[str, dict] = {}
+    quizzes = _get_quizzes_from_vocabulary(note)
+
+    for quiz in quizzes:
+        submission = quiz.get("submission")
+        if not isinstance(submission, dict):
+            continue
+        mode = _normalize_quiz_mode(submission.get("mode") or quiz.get("mode"))
+        weight = QUIZ_MODE_WEIGHTS.get(mode, 1.0)
+        snapshot = quiz.get("questions_snapshot", [])
+        questions_by_id = {
+            q.get("id"): q
+            for q in snapshot
+            if isinstance(q, dict) and q.get("id")
+        }
+
+        for result in submission.get("results", []):
+            if not isinstance(result, dict):
+                continue
+            qid = result.get("question_id")
+            question = questions_by_id.get(qid, {})
+            points = result.get("knowledge_points")
+            if not isinstance(points, list) or not points:
+                points = _question_knowledge_points(question)
+            for raw_point in points:
+                point = str(raw_point).strip()
+                if not point:
+                    continue
+                item = stats.setdefault(point, {
+                    "knowledge_point": point,
+                    "attempts": 0,
+                    "correct": 0,
+                    "wrong": 0,
+                    "weighted_total": 0.0,
+                    "weighted_correct": 0.0,
+                    "diagnostic_wrong": 0,
+                    "last_mode": mode,
+                })
+                item["attempts"] += 1
+                item["weighted_total"] += weight
+                item["last_mode"] = mode
+                if result.get("correct"):
+                    item["correct"] += 1
+                    item["weighted_correct"] += weight
+                else:
+                    item["wrong"] += 1
+                    if mode == "diagnostic":
+                        item["diagnostic_wrong"] += 1
+
+    knowledge_points = []
+    for item in stats.values():
+        total = item["weighted_total"]
+        mastery = round(item["weighted_correct"] / total * 100, 1) if total else 0
+        pending_review = item["diagnostic_wrong"] > 0 and item["weighted_total"] < 1
+        weak = (item["wrong"] >= 2 and mastery < 70) or (total >= 1 and mastery < 60)
+        knowledge_points.append({
+            "knowledge_point": item["knowledge_point"],
+            "mastery": mastery,
+            "attempts": item["attempts"],
+            "correct": item["correct"],
+            "wrong": item["wrong"],
+            "pending_review": pending_review,
+            "weak": weak,
+            "last_mode": item["last_mode"],
+        })
+
+    knowledge_points.sort(key=lambda x: (x["mastery"], -x["wrong"], x["knowledge_point"]))
+    return {
+        "session_id": session_id,
+        "knowledge_points": knowledge_points,
+        "summary": {
+            "weak_count": sum(1 for item in knowledge_points if item["weak"]),
+            "pending_review_count": sum(1 for item in knowledge_points if item["pending_review"]),
+        },
     }
 
 

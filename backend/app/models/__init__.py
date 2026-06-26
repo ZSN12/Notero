@@ -44,6 +44,7 @@ class Notebook(Base):
     user = relationship("User", back_populates="notebooks")
     sessions = relationship("Session", back_populates="notebook", cascade="all, delete-orphan")
     vocabulary = relationship("Vocabulary", back_populates="notebook", cascade="all, delete-orphan")
+    course_terms = relationship("CourseTerm", back_populates="notebook", cascade="all, delete-orphan")
     vector_chunks = relationship("VectorChunk", back_populates="notebook", cascade="all, delete-orphan")
     rag_messages = relationship("RAGMessage", back_populates="notebook", cascade="all, delete-orphan")
 
@@ -153,6 +154,24 @@ class Vocabulary(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     notebook = relationship("Notebook", back_populates="vocabulary")
 
+
+class CourseTerm(Base):
+    __tablename__ = "course_terms"
+    __table_args__ = (
+        UniqueConstraint("notebook_id", "term", name="uix_course_terms_notebook_term"),
+        Index("ix_course_terms_notebook_weight", "notebook_id", "weight"),
+    )
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    notebook_id = Column(String(36), ForeignKey("notebooks.id", ondelete="CASCADE"), nullable=False)
+    term = Column(String(100), nullable=False)
+    source = Column(String(50), nullable=True)
+    weight = Column(Float, default=1.0, nullable=False)
+    first_seen_session_id = Column(String(36), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    notebook = relationship("Notebook", back_populates="course_terms")
+
+
 class VectorChunk(Base):
     __tablename__ = "vector_chunks"
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -231,4 +250,4 @@ class RAGMessage(Base):
     notebook = relationship("Notebook", back_populates="rag_messages")
 
 
-__all__ = ["Base", "User", "Notebook", "Session", "Note", "File", "Task", "Vocabulary", "VectorChunk", "SessionProcessingState", "AgentWorkflow", "RAGMessage"]
+__all__ = ["Base", "User", "Notebook", "Session", "Note", "File", "Task", "Vocabulary", "CourseTerm", "VectorChunk", "SessionProcessingState", "AgentWorkflow", "RAGMessage"]

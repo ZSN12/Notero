@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { ASRWebSocketClient } from '@/services/asrWebSocket';
-import { finishRecording, getAudioUrl, updateSessionDuration, fetchNote } from '@/services/api';
+import { finishRecording, getAudioUrl, updateSessionDuration } from '@/services/api';
+import type { BackendNote } from '@/services/api';
+import { getErrorMessage } from '@/lib/error';
 
 export function useRecording(
   sessionId: string | undefined,
@@ -163,13 +165,13 @@ export function useRecording(
       setIsRecording(true);
       setIsPaused(false);
       setIsProcessing(false);
-    } catch (error: any) {
+    } catch (error) {
       console.error('Recording failed:', error);
       setIsProcessing(false);
       setIsError(true);
-      if (error.name === 'NotAllowedError') {
+      if (error instanceof DOMException && error.name === 'NotAllowedError') {
         setErrorMessage('麦克风权限被拒绝。请在浏览器设置中允许访问麦克风，然后重试。');
-      } else if (error.name === 'NotFoundError') {
+      } else if (error instanceof DOMException && error.name === 'NotFoundError') {
         setErrorMessage('未检测到麦克风设备。请连接麦克风后重试。');
       } else {
         setErrorMessage('录音启动失败，请检查设备并重试。');
@@ -197,7 +199,7 @@ export function useRecording(
     setIsPaused(false);
   }, [_startTimerOnly]);
 
-  const stopRecording = useCallback(async (onTranscriptUpdate: (text: string, options?: { force?: boolean; authoritative?: boolean }) => void): Promise<{ note?: any; status?: string } | undefined> => {
+  const stopRecording = useCallback(async (onTranscriptUpdate: (text: string, options?: { force?: boolean; authoritative?: boolean }) => void): Promise<{ note?: BackendNote; status?: string } | undefined> => {
     // 1. Cleanup audio
     if (streamRef.current) { streamRef.current.getTracks().forEach((track) => track.stop()); streamRef.current = null; }
     if (audioContextRef.current) { await audioContextRef.current.close(); audioContextRef.current = null; }
@@ -223,7 +225,7 @@ export function useRecording(
 
       // 4. Call audio-finish: concatenate and persist audio only. AI organization
       // remains an explicit user action for real-time recordings.
-      let finalNote: any = undefined;
+      let finalNote: BackendNote | undefined = undefined;
       let finishStatus: string | undefined = undefined;
       if (sessionId) {
         const finishResult = await finishRecording(sessionId);
@@ -237,12 +239,12 @@ export function useRecording(
           options?.onFinalize?.();
           if (finalNote?.transcript && finalNote.transcript.length > 0) {
             const sorted = [...finalNote.transcript].sort(
-              (a: any, b: any) => (a.chunk_index || 0) - (b.chunk_index || 0)
+              (a, b) => (a.chunk_index || 0) - (b.chunk_index || 0)
             );
-            const hasFinalTranscript = sorted.some((c: any) => c.correction_stage === 'final');
+            const hasFinalTranscript = sorted.some((c) => c.correction_stage === 'final');
             if (hasFinalTranscript) {
               const dbText = sorted
-                .map((c: any) => c.display_text || c.corrected_text || c.text || c.raw_text || '')
+                .map((c) => c.display_text || c.corrected_text || c.text || c.raw_text || '')
                 .filter(Boolean)
                 .join('\n\n')
                 .trim();
@@ -255,10 +257,10 @@ export function useRecording(
         setAudioPlaybackUrl(getAudioUrl(sessionId));
       }
       return { note: finalNote, status: finishStatus };
-    } catch (error: any) {
+    } catch (error) {
       console.error('Failed to finish recording:', error);
       setIsError(true);
-      setErrorMessage(error?.message || '录音收尾失败，请稍后重试');
+      setErrorMessage(getErrorMessage(error) || '录音收尾失败，请稍后重试');
     } finally {
       setIsProcessing(false);
     }

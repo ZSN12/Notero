@@ -36,6 +36,18 @@ const vectorIndex = {
 const onRagSourceClick = vi.fn();
 const getRagSourceTypeLabel = (source: RAGSource) => source.source_type;
 
+const makeSource = (index: number): RAGSource => ({
+  chunk_id: `c${index}`,
+  notebook_id: 'n1',
+  notebook_title: 'Notebook',
+  session_id: 's1',
+  session_title: 'Session',
+  source_type: index % 2 === 0 ? 'ppt' : 'transcript',
+  snippet: `Source snippet ${index}`,
+  score: 0.9,
+  page: index % 2 === 0 ? index : undefined,
+});
+
 describe('RagSearchModal', () => {
   it('renders nothing when showSearch is false', () => {
     const rag = createRag({ showSearch: false });
@@ -192,5 +204,38 @@ describe('RagSearchModal', () => {
     expect(screen.getByText('Source snippet')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Source snippet'));
     expect(onRagSourceClick).toHaveBeenCalledWith(sources[0], expect.any(Function));
+  });
+
+  it('shows the first three historical sources by default and can expand the rest', () => {
+    const sources = [1, 2, 3, 4, 5].map(makeSource);
+    const messages: RAGMessage[] = [
+      { id: 'a1', session_id: 's1', notebook_id: 'n1', role: 'assistant', content: 'Answer with many sources', sources, created_at: '2026-01-01T00:00:00Z' },
+    ];
+    const rag = createRag({ messages });
+
+    render(
+      <RagSearchModal
+        rag={rag as unknown as ReturnType<typeof import('@/pages/note-detail/hooks/useRAG').useRAG>}
+        vectorIndex={vectorIndex as unknown as ReturnType<typeof import('@/pages/note-detail/hooks/useVectorIndex').useVectorIndex>}
+        sessionId="s1"
+        displayNotebook={{ id: 'n1' }}
+        onRagSourceClick={onRagSourceClick}
+        getRagSourceTypeLabel={getRagSourceTypeLabel}
+      />,
+    );
+
+    expect(screen.getByText('Source snippet 1')).toBeInTheDocument();
+    expect(screen.getByText('Source snippet 2')).toBeInTheDocument();
+    expect(screen.getByText('Source snippet 3')).toBeInTheDocument();
+    expect(screen.queryByText('Source snippet 4')).not.toBeInTheDocument();
+    expect(screen.queryByText('Source snippet 5')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('展开全部 5 条'));
+    expect(screen.getByText('Source snippet 4')).toBeInTheDocument();
+    expect(screen.getByText('Source snippet 5')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('收起来源'));
+    expect(screen.queryByText('Source snippet 4')).not.toBeInTheDocument();
+    expect(screen.queryByText('Source snippet 5')).not.toBeInTheDocument();
   });
 });

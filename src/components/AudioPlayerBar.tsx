@@ -74,6 +74,8 @@ export const AudioPlayerBar = forwardRef<HTMLAudioElement, AudioPlayerBarProps>(
         audio.removeEventListener('pause', handlePause);
         audio.removeEventListener('ended', handleEnded);
       };
+      // playbackRate changes are handled by the dedicated effect below.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [src, audioRef, onTimeUpdate, onPlayingChange]);
 
     useEffect(() => {

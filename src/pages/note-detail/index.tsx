@@ -144,6 +144,36 @@ export default function NoteDetail() {
     return '资料';
   }, []);
 
+  const highlightElement = useCallback((targetEl: HTMLElement) => {
+    targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    targetEl.classList.add('ring-2', 'ring-violet-300', 'bg-violet-50', 'dark:bg-violet-900/20');
+    window.setTimeout(() => {
+      targetEl.classList.remove('ring-2', 'ring-violet-300', 'bg-violet-50', 'dark:bg-violet-900/20');
+    }, 3000);
+  }, []);
+
+  const highlightTranscriptAnchor = useCallback(
+    (source: RAGSource) => {
+      const container = paragraphContainerRef.current;
+      if (!container) return false;
+      const rawId =
+        source.block_id ||
+        (typeof source.metadata?.paragraph_id === 'string' ? source.metadata.paragraph_id : null);
+      if (!rawId || rawId === 'canonical-transcript' || rawId === 'student-notes') return false;
+      const escapeSelector = (value: string) =>
+        typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+          ? CSS.escape(value)
+          : value.replace(/["\\]/g, '\\$&');
+      const targetEl = container.querySelector(
+        `[data-paragraph-id="${escapeSelector(rawId)}"], [data-transcript-block][data-block-id="${escapeSelector(rawId)}"]`,
+      ) as HTMLElement | null;
+      if (!targetEl) return false;
+      highlightElement(targetEl);
+      return true;
+    },
+    [highlightElement],
+  );
+
   const highlightTranscriptSnippet = useCallback((snippet?: string | null) => {
     const container = paragraphContainerRef.current;
     if (!container || !snippet) return false;
@@ -151,17 +181,13 @@ export default function NoteDetail() {
     const target = normalize(snippet).slice(0, 80);
     if (!target) return false;
 
-    const candidates = Array.from(container.children) as HTMLElement[];
+    const candidates = Array.from(container.querySelectorAll('[data-transcript-block]')) as HTMLElement[];
     const targetEl = candidates.find((el) => normalize(el.textContent || '').includes(target));
     if (!targetEl) return false;
 
-    targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    targetEl.classList.add('ring-2', 'ring-violet-300', 'bg-violet-50', 'dark:bg-violet-900/20');
-    window.setTimeout(() => {
-      targetEl.classList.remove('ring-2', 'ring-violet-300', 'bg-violet-50', 'dark:bg-violet-900/20');
-    }, 3000);
+    highlightElement(targetEl);
     return true;
-  }, []);
+  }, [highlightElement]);
 
   const handleRagSourceClick = useCallback(
     (source: RAGSource, closePanel?: () => void) => {
@@ -179,11 +205,11 @@ export default function NoteDetail() {
       }
 
       window.setTimeout(() => {
-        const located = highlightTranscriptSnippet(source.snippet);
+        const located = highlightTranscriptAnchor(source) || highlightTranscriptSnippet(source.snippet);
         if (!located) toast.info('已找到来源，但当前页面没有可精确定位的文本块');
       }, 200);
     },
-    [getRagSourceTypeLabel, highlightTranscriptSnippet, navigate, ppt.actions, sessionId],
+    [getRagSourceTypeLabel, highlightTranscriptAnchor, highlightTranscriptSnippet, navigate, ppt.actions, sessionId],
   );
 
   useEffect(() => {
@@ -208,6 +234,7 @@ export default function NoteDetail() {
   // always use the most recent notes content, not a stale closure.
   useEffect(() => {
     transcript.actions.setGetCurrentNotes(() => notesHook.refs.notesDraftRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transcript.actions.setGetCurrentNotes, notesHook.refs.notesDraftRef]);
 
   // React to loadedNote from useTranscript (single source of truth for history load)
@@ -220,8 +247,9 @@ export default function NoteDetail() {
     }
     // Restore notes
     if (loadedNote.content) {
-      const hasTranscript =
-        loadedNote.transcript && Array.isArray(loadedNote.transcript) && loadedNote.transcript.length > 0;
+      const hasTranscript = Boolean(
+        loadedNote.transcript && Array.isArray(loadedNote.transcript) && loadedNote.transcript.length > 0,
+      );
       const parsed = notesHook.actions.parseNotesFromContent(loadedNote.content, hasTranscript);
       if (parsed.length > 0) {
         notesHook.actions.setNotes(parsed);
@@ -258,13 +286,14 @@ export default function NoteDetail() {
             if (blocks.blocks?.some((b: ContentBlock) => b.type === 'image')) {
               transcript.actions.updateContentBlocks(blocks.blocks, false, false);
             }
-          } catch {
-            /* ignore */
+          } catch (err) {
+            console.error('[NoteDetail] Failed to auto-insert PPT after load:', err);
           }
         }, 500);
       }
     }
     setIsLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadedNote, sessionId, transcript.state.isLoaded]);
 
   useEffect(() => {
@@ -279,6 +308,7 @@ export default function NoteDetail() {
     } else if (stage.status === 'error') {
       setAiCorrectionStatus({ type: 'error', message: stage.error_message || 'AI 整理失败' });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     processing.processingStatus?.stages?.transcript_finalize?.status,
     processing.processingStatus?.stages?.transcript_finalize?.message,
@@ -291,6 +321,7 @@ export default function NoteDetail() {
       return;
     transcript.actions.scheduleSave(() => notesHook.refs.notesDraftRef.current, 300);
     return () => {};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     sessionId,
     transcript.state.isLoaded,
@@ -496,6 +527,7 @@ export default function NoteDetail() {
       await transcript.actions.saveContent(notesHook.refs.notesDraftRef.current, false);
     }
     navigate(`/subject/${id}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, transcript.state.hasLocalChanges, transcript.actions.saveContent, notesHook.refs.notesDraftRef, navigate, id]);
 
   // ---- PPT ----
@@ -524,6 +556,7 @@ export default function NoteDetail() {
       return;
     }
     processing.refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording.actions.stopRecording, transcript.actions.receiveAiText, processing.refresh]);
 
   if (isLoading) {
@@ -580,6 +613,7 @@ export default function NoteDetail() {
         recording={recording}
         transcript={transcript}
         audioUpload={audioUpload}
+        processingStatus={processing.processingStatus}
         processingOverallStatus={processing.processingStatus?.overall_status}
         onRetryAgents={(agents) => autoGen.actions.handleTriggerAgents(sessionId, agents, true)}
         onRetrySave={() => {

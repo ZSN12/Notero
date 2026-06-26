@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from app.core.database import get_db
@@ -6,6 +7,8 @@ from app.api.schemas import NotebookCreate, NotebookUpdate, NotebookResponse, No
 from app.models import Notebook, User, Session as DBSession, Note, VectorChunk
 from app.services.file_service import delete_notebook_files_by_session_ids
 from sqlalchemy import func as sql_func
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/notebooks", tags=["notebooks"])
 
@@ -97,8 +100,21 @@ def delete_notebook(
     # File cleanup can be slow for notebooks with many sessions; run it in the
     # background so the HTTP response returns immediately and the UI doesn't hang.
     if session_ids:
-        background_tasks.add_task(delete_notebook_files_by_session_ids, session_ids)
+        background_tasks.add_task(_cleanup_notebook_files, notebook_id, session_ids)
     return None
+
+
+def _cleanup_notebook_files(notebook_id: str, session_ids: list[str]) -> None:
+    """Clean up on-disk files for all sessions of a deleted notebook."""
+    try:
+        delete_notebook_files_by_session_ids(session_ids)
+    except Exception:
+        logger.warning(
+            "delete_notebook_files_failed notebook_id=%s session_ids=%s",
+            notebook_id,
+            session_ids,
+            exc_info=True,
+        )
 
 
 @router.get("/{notebook_id}/export", response_model=NotebookPackage)

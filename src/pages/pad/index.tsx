@@ -2,12 +2,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
-  ArrowLeft,
-  BrainCircuit,
-  ClipboardCheck,
-  Download,
-  Search,
-  Share2,
   ChevronLeft,
   ChevronRight,
   Pen,
@@ -15,23 +9,19 @@ import {
   Undo,
   Redo,
   Trash2,
-  Circle,
   Minus,
   Plus,
-  Play,
-  Pause,
   FileText,
   Menu,
   X,
 } from 'lucide-react';
 
 import { useStore } from '@/store/useStore';
-import { getProfile, getAvatarUrl } from '@/services/auth';
+import { getProfile } from '@/services/auth';
 import type { UserProfile } from '@/services/auth';
-import { fetchNotebookDetail, fetchSessionById, getMediaUrl } from '@/services/api';
-import { layoutFromNoteParts } from '@/lib/noteLayout';
+import { fetchNotebookDetail, fetchSessionById } from '@/services/api';
 import type { Notebook, Session } from '@/types';
-import type { ContentBlock, RAGSource } from '@/services/api/types';
+import type { RAGSource } from '@/services/api/types';
 
 import { useRecording } from '@/pages/note-detail/useRecording';
 import { useTranscript } from '@/pages/note-detail/useTranscript';
@@ -147,7 +137,7 @@ export default function PadPage() {
   const [color, setColor] = useState(PRESET_COLORS[2].value);
   const [strokeWidth, setStrokeWidth] = useState(4);
   const [showTranscript, setShowTranscript] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
+
 
   const handleBack = async () => {
     if (sessionId && transcript.state.hasLocalChanges) {
@@ -400,8 +390,6 @@ export default function PadPage() {
                 src={recording.state.audioPlaybackUrl}
                 className="w-full"
                 controls
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
               />
             ) : (
               <div className="text-xs text-slate-400">暂无录音回放</div>

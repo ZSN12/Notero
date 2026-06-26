@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import { askRAG, fetchRAGMessages, clearRAGMessages } from '@/services/api';
 import type { RAGMessage, RAGSource } from '@/services/api';
+import { getErrorMessage } from '@/lib/error';
 
 export function useRAG() {
   const [showSearch, setShowSearch] = useState(false);

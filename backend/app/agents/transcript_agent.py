@@ -20,6 +20,8 @@ from typing import Any, Optional
 from app.agents.base import AgentContext, AgentResult, BaseAgent
 from app.core.llm import ChatMessage, get_default_chat_provider
 from app.services.prompt_loader import load_prompt
+from app.services.term_corrector import TermCorrector
+from app.services.course_terms_service import build_shared_course_terms_for_session
 from app.services.vector_service import _compute_session_content_hash
 
 logger = logging.getLogger(__name__)
@@ -90,8 +92,14 @@ class TranscriptOrganizerAgent(BaseAgent):
                 return AgentResult(success=False, error_message="没有可用的转写内容")
 
             course_title = ctx.notebook.title if ctx.notebook else ""
-            keywords = ctx.session.keywords or []
             ppt_slides = self._extract_ppt_slides(ctx.note)
+            keywords = build_shared_course_terms_for_session(
+                ctx.db,
+                ctx.session,
+                course_title=course_title,
+                current_keywords=ctx.session.keywords or [],
+                ppt_slides=ppt_slides,
+            )
 
             paragraph_ranges = self._organize_transcript(
                 raw_text=raw_text,
@@ -170,6 +178,8 @@ class TranscriptOrganizerAgent(BaseAgent):
             return []
 
         keyword_str = "、".join(keywords) if keywords else "无"
+        course_terms = TermCorrector.build_course_terms(course_title, keywords, ppt_slides)
+        course_terms_str = "、".join(course_terms) if course_terms else "无"
         timestamped_text = cls._build_timestamped_text(segments)
         ppt_context = ""
 
@@ -188,6 +198,7 @@ class TranscriptOrganizerAgent(BaseAgent):
         prompt = prompt_template.render(
             course_title=course_title,
             keywords=keyword_str,
+            course_terms=course_terms_str,
             text=raw_text,
             timestamped_text=timestamped_text,
             ppt_context=ppt_context,

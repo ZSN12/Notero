@@ -108,6 +108,8 @@ export function useMindMap(
         setMindMapStatus(prev => prev ? { ...prev, status: 'error', error: '获取导图数据失败' } : { session_id: sessionId, status: 'error', mind_map: null, error: '获取导图数据失败' });
       });
     }
+  // Only react to changes in the status fields, not the whole derivedStatus object.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, derivedStatus?.status, derivedStatus?.progress, derivedStatus?.error]);
 
   const handleGenerateMindMap = async (force = false) => {

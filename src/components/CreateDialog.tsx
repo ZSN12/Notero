@@ -36,6 +36,7 @@ export default function CreateDialog() {
       setTitle('');
       closeDialog();
     } catch (error) {
+      console.error('[CreateDialog] Submit failed:', error);
       setFormError(isEditMode ? '更新失败，请稍后重试' : '创建失败，请稍后重试');
     } finally {
       setIsSubmitting(false);
@@ -71,6 +72,9 @@ export default function CreateDialog() {
             autoFocus
             disabled={isSubmitting}
           />
+          {formError && (
+            <p className="mt-2 text-sm text-red-600 dark:text-red-400">{formError}</p>
+          )}
 
           <div className="flex gap-3 mt-5">
             <button

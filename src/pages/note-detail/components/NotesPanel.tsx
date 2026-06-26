@@ -1,9 +1,9 @@
-import { useMemo } from 'react';
-import { Play, Pause, Loader2, RefreshCw, Mic, Trash2 } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { Play, Pause, Loader2, RefreshCw, Mic, Trash2, Info, X } from 'lucide-react';
 import RichTextEditor, { type RichTextEditorHandle } from '@/components/RichTextEditor';
 import { AuthenticatedImage } from '@/components/AuthenticatedImage';
 import ContentBlocksView from '@/pages/note-detail/components/ContentBlocksView';
-import { NoteEditableParagraphCards } from '@/pages/note-detail/components/NoteEditableParagraphCards';
+import { EditableParagraphCards } from '@/pages/note-detail/components/EditableParagraphCards';
 import { insertPPTIntoTranscript, deleteAudio, type ContentBlock } from '@/services/api';
 import { escapeHtml } from '@/lib/sanitize';
 import type { DragState } from './PPTPanel';
@@ -66,6 +66,9 @@ export function NotesPanel({
     return confirmed ? `${confirmed}${partialHtml}` : partialHtml;
   }, [transcript.state.transcriptText, transcript.state.partialText]);
 
+  const [audioCurrentTimeMs, setAudioCurrentTimeMs] = useState(0);
+  const [showCorrectionDetails, setShowCorrectionDetails] = useState(false);
+
   const isLiveTranscriptMode = recording.state.isRecording || recording.state.isProcessing || audioUpload.state.isUploadingAudio;
   const hasPptImageBlocks = transcript.state.contentBlocks.some((b) => b.type === 'image');
 
@@ -88,41 +91,66 @@ export function NotesPanel({
   };
 
   const renderCorrectionBadge = () => {
+    const baseClass = 'px-1.5 py-0.5 rounded text-[10px] font-medium inline-flex items-center gap-1';
     if (aiCorrectionStatus.type === 'corrected') {
       return (
-        <span
-          className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+        <button
+          type="button"
+          onClick={() => setShowCorrectionDetails(true)}
+          className={`${baseClass} bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50`}
           title="DeepSeek AI 已纠正同音字、术语和格式"
         >
           AI 已纠正
-        </span>
+          <Info className="w-3 h-3" />
+        </button>
       );
     }
     if (aiCorrectionStatus.type === 'processing') {
       return (
-        <span
-          className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 inline-flex items-center gap-1"
+        <button
+          type="button"
+          onClick={() => setShowCorrectionDetails(true)}
+          className={`${baseClass} bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-900/50`}
           title={aiCorrectionStatus.message || '正在调用 DeepSeek 整理转写'}
         >
           <Loader2 className="w-3 h-3 animate-spin" />
           AI 整理中
-        </span>
+          <Info className="w-3 h-3" />
+        </button>
       );
     }
     if (aiCorrectionStatus.type === 'local') {
       return (
-        <span
-          className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+        <button
+          type="button"
+          onClick={() => setShowCorrectionDetails(true)}
+          className={`${baseClass} bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50`}
           title="未配置 DeepSeek API 或 AI 纠正被拦截，使用本地规则整理"
         >
           本地整理
-        </span>
+          <Info className="w-3 h-3" />
+        </button>
+      );
+    }
+    if (aiCorrectionStatus.type === 'partial') {
+      return (
+        <button
+          type="button"
+          onClick={() => setShowCorrectionDetails(true)}
+          className={`${baseClass} bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400 hover:bg-orange-200 dark:hover:bg-orange-900/50`}
+          title={aiCorrectionStatus.message || '部分分段使用 AI 整理，失败分段已使用本地稿'}
+        >
+          AI 部分完成
+          <Info className="w-3 h-3" />
+        </button>
       );
     }
     if (aiCorrectionStatus.type === 'error') {
       return (
-        <span
-          className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 cursor-help"
+        <button
+          type="button"
+          onClick={() => setShowCorrectionDetails(true)}
+          className={`${baseClass} bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50`}
           title={aiCorrectionStatus.message || 'AI 整理失败'}
         >
           {aiCorrectionStatus.message?.includes('删减')
@@ -132,14 +160,72 @@ export function NotesPanel({
               : aiCorrectionStatus.message?.includes('未配置')
                 ? '本地整理：未配置 API'
                 : 'AI 纠正失败'}
-        </span>
+          <Info className="w-3 h-3" />
+        </button>
       );
     }
     return null;
   };
 
+  const renderCorrectionDetails = () => {
+    if (!showCorrectionDetails) return null;
+    const total = aiCorrectionStatus.chunksTotal ?? 0;
+    const succeeded = aiCorrectionStatus.chunksSucceeded ?? 0;
+    const failed = aiCorrectionStatus.chunksFailed ?? 0;
+    const finalSource =
+      aiCorrectionStatus.type === 'corrected'
+        ? 'AI 整理稿'
+        : aiCorrectionStatus.type === 'partial'
+          ? 'AI 整理稿 + 本地兜底稿'
+          : aiCorrectionStatus.type === 'processing'
+            ? '处理中，暂未确定'
+            : '本地整理稿';
+    const rows = [
+      ['当前状态', aiCorrectionStatus.type === 'corrected' ? '已完成' : aiCorrectionStatus.type === 'partial' ? '部分完成' : aiCorrectionStatus.type === 'processing' ? '处理中' : aiCorrectionStatus.type === 'error' ? '失败' : '本地整理'],
+      ['最终采用', finalSource],
+      ['分段结果', total > 0 ? `共 ${total} 段，成功 ${succeeded} 段，失败 ${failed} 段` : '暂无分段统计'],
+      ['错误类型', aiCorrectionStatus.errorType || aiCorrectionStatus.code || '无'],
+      ['是否可重试', aiCorrectionStatus.retryable ? '可以重试' : aiCorrectionStatus.type === 'processing' ? '处理中' : '无需重试或不可重试'],
+      ['请求 ID', aiCorrectionStatus.requestId || '无'],
+    ];
+
+    return (
+      <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/30 backdrop-blur-sm px-4">
+        <div className="w-full max-w-md rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 dark:border-slate-800">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">AI 整理详情</h3>
+              <p className="mt-0.5 text-xs text-slate-400">用于判断这次最终展示的是 AI 稿还是本地兜底稿。</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowCorrectionDetails(false)}
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="px-5 py-4 space-y-3">
+            {rows.map(([label, value]) => (
+              <div key={label} className="flex items-start justify-between gap-4 text-xs">
+                <span className="shrink-0 text-slate-400">{label}</span>
+                <span className="text-right text-slate-700 dark:text-slate-200 break-all">{value}</span>
+              </div>
+            ))}
+            {aiCorrectionStatus.message && (
+              <div className="rounded-xl bg-slate-50 dark:bg-slate-800/70 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                {aiCorrectionStatus.message}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <main className="flex-1 flex flex-col min-h-0 bg-white/40 dark:bg-slate-900/40 backdrop-blur-sm">
+      {renderCorrectionDetails()}
       <div className="flex-shrink-0 px-4 md:px-6 py-4">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold text-slate-600 dark:text-slate-300 flex items-center gap-2">
@@ -240,6 +326,7 @@ export function NotesPanel({
               }}
               onTimeUpdate={(e) => {
                 const currentTime = (e.target as HTMLAudioElement).currentTime;
+                setAudioCurrentTimeMs(Math.round(currentTime * 1000));
                 const sentences = transcript.state.sentencesWithTime;
                 if (sentences.length === 0) return;
                 let idx = lastSentenceIdxRef.current;
@@ -384,9 +471,20 @@ export function NotesPanel({
             </p>
           </div>
         ) : transcript.state.transcriptText ? (
-          <NoteEditableParagraphCards
+          <EditableParagraphCards
             transcriptText={transcript.state.transcriptText}
             containerRef={paragraphContainerRef}
+            paragraphTimeRanges={
+              recording.state.audioPlaybackUrl ? transcript.state.paragraphTimeRanges : []
+            }
+            currentTimeMs={audioCurrentTimeMs}
+            onSeek={(ms) => {
+              const audio = recording.refs.audioPlayerRef.current;
+              if (!audio) return;
+              audio.currentTime = ms / 1000;
+              audio.play().catch(() => { /* ignore autoplay errors */ });
+              recording.actions.setIsPlayingAudio(true);
+            }}
             onUpdateDraft={transcript.actions.updateTranscriptDraft}
             onCommitDraft={() => {
               transcript.actions.commitTranscriptDraft();

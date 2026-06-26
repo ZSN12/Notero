@@ -54,8 +54,8 @@ export function useNotes() {
   }, [updateNote]);
 
   const commitNotesDraft = useCallback(() => {
-    setNotes((prev) => {
-      const committed = notesDraftRef.current.map((n, i) => ({ ...n, content: n.content }));
+    setNotes(() => {
+      const committed = notesDraftRef.current.map((n) => ({ ...n, content: n.content }));
       return committed;
     });
   }, []);
