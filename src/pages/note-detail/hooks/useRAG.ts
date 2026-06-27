@@ -23,8 +23,8 @@ export function useRAG() {
     try {
       const data = await fetchRAGMessages(sessionId);
       setMessages(data);
-    } catch (err: any) {
-      console.warn('[useRAG] loadMessages failed:', err?.message || err);
+    } catch (err: unknown) {
+      console.warn('[useRAG] loadMessages failed:', getErrorMessage(err));
       setMessages([]);
     }
   }, []);
@@ -37,8 +37,8 @@ export function useRAG() {
     try {
       await clearRAGMessages(sessionId);
       setMessages([]);
-    } catch (err: any) {
-      setRagError(err?.message || '清空对话失败');
+    } catch (err: unknown) {
+      setRagError(getErrorMessage(err) || '清空对话失败');
     }
   }, []);
 
@@ -71,8 +71,8 @@ export function useRAG() {
 
       try {
         await ensureIndexed?.();
-      } catch (err: any) {
-        setRagError(err?.message || '知识索引建立失败，请稍后重试');
+      } catch (err: unknown) {
+        setRagError(getErrorMessage(err) || '知识索引建立失败，请稍后重试');
         setIsAskingRAG(false);
         setRagStatus(null);
         return;

@@ -131,9 +131,12 @@ export function NoteDetailStatusBanners({
     const status = processingStatus?.stages?.[key]?.status;
     return status && status !== 'idle';
   });
+  const isSuccessSummary = displayText === '学习资料生成完成' || displayText === '整理成功';
+  const shouldShowStatusBanner = !isSuccessSummary;
 
   return (
     <>
+      {shouldShowStatusBanner && (
       <div className={`flex-shrink-0 mx-4 mt-3 px-3 py-2 border rounded-xl flex items-start gap-2 text-xs ${displayStatusClass}`}>
         {(isBusy || isTransientRunning) && <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0 mt-0.5" />}
         <div className="flex-1 min-w-0">
@@ -207,9 +210,10 @@ export function NoteDetailStatusBanners({
           </button>
         )}
       </div>
+      )}
 
       {shouldShowLearningQueue && (
-        <div className="flex-shrink-0 mx-4 mt-2 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
+        <div className={`flex-shrink-0 mx-4 ${shouldShowStatusBanner ? 'mt-2' : 'mt-1.5'} grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-1`}>
           {stageRows.map(({ key, label, icon: Icon, retryAgent }) => {
             const stage = processingStatus?.stages?.[key];
             const title = stage?.error_message || stage?.message || undefined;
@@ -217,29 +221,29 @@ export function NoteDetailStatusBanners({
             return (
               <div
                 key={key}
-                className={`min-w-0 rounded-xl border px-3 py-2 text-xs ${stageToneClass(stage)}`}
+                className={`min-w-0 rounded-md border px-2 py-1 text-[10px] leading-tight ${stageToneClass(stage)}`}
                 title={title}
               >
-                <div className="flex items-center gap-2">
-                  <Icon className="w-3.5 h-3.5 shrink-0 opacity-80" />
+                <div className="flex items-center gap-1">
+                  <Icon className="w-2.5 h-2.5 shrink-0 opacity-80" />
                   <span className="font-medium truncate">{label}</span>
-                  <span className="ml-auto shrink-0">{stageStatusIcon(stage)}</span>
+                  <span className="ml-auto shrink-0 [&>svg]:h-2.5 [&>svg]:w-2.5">{stageStatusIcon(stage)}</span>
                 </div>
-                <div className="mt-1 flex items-center gap-2">
+                <div className="mt-0.5 flex items-center gap-1">
                   <span className="truncate">{stageLabel(stage)}</span>
                   {canRetry && (
                     <button
                       type="button"
                       onClick={() => onRetryAgents([retryAgent])}
                       disabled={autoGen.state.isTriggeringAgents}
-                      className="ml-auto shrink-0 rounded-md bg-white/70 dark:bg-slate-900/50 px-1.5 py-0.5 font-medium hover:bg-white disabled:opacity-50"
+                      className="ml-auto shrink-0 rounded bg-white/70 dark:bg-slate-900/50 px-1 py-0.5 font-medium hover:bg-white disabled:opacity-50"
                     >
                       重试
                     </button>
                   )}
                 </div>
                 {stage?.status === 'running' && normalizeProgress(stage.progress) !== null && (
-                  <div className="mt-2 h-1 rounded-full bg-current/15 overflow-hidden">
+                  <div className="mt-1 h-0.5 rounded-full bg-current/15 overflow-hidden">
                     <div
                       className="h-full rounded-full bg-current transition-all duration-300"
                       style={{ width: `${normalizeProgress(stage.progress)}%` }}

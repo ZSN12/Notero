@@ -3,9 +3,11 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Plus, Search, Share2, Download } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { getProfile, getAvatarUrl, type UserProfile } from '@/services/auth';
+import { fetchNotebookDetail } from '@/services/api';
 import SessionCard from '@/components/SessionCard';
 import CreateDialog from '@/components/CreateDialog';
 import ThemeToggle from '@/components/ThemeToggle';
+import type { Notebook } from '@/types';
 
 export default function ChapterList() {
   const { id } = useParams<{ id: string }>();
@@ -14,8 +16,10 @@ export default function ChapterList() {
   const [searchQuery, setSearchQuery] = useState('');
   const [copyFeedback, setCopyFeedback] = useState('');
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [fallbackNotebook, setFallbackNotebook] = useState<Notebook | null>(null);
+  const [notebookLoading, setNotebookLoading] = useState(false);
 
-  const notebook = notebooks.find((n) => n.id === id);
+  const notebook = notebooks.find((n) => n.id === id) || fallbackNotebook;
   const notebookSessions = sessions.filter((s) => s.notebookId === id);
 
   useEffect(() => {
@@ -24,6 +28,33 @@ export default function ChapterList() {
       getProfile().then(setProfile).catch(() => {});
     }
   }, [id, loadSessions]);
+
+  useEffect(() => {
+    if (!id || notebooks.some((n) => n.id === id)) return;
+    let cancelled = false;
+    setNotebookLoading(true);
+    fetchNotebookDetail(id)
+      .then((data) => {
+        if (cancelled || !data) return;
+        setFallbackNotebook({
+          id: data.id,
+          title: data.title,
+          description: data.description || '',
+          icon: data.icon || 'BookOpen',
+          color: data.color || 'from-blue-500 to-blue-600',
+          sessionCount: data.session_count,
+          updatedAt: data.created_at.split('T')[0],
+          createdAt: data.created_at.split('T')[0],
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setNotebookLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, notebooks]);
 
   const handleShare = () => {
     const shareUrl = `${window.location.origin}/subject/${id}`;
@@ -44,6 +75,14 @@ export default function ChapterList() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   };
+
+  if (!notebook && notebookLoading) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4">
+        <p className="text-slate-500 dark:text-slate-400">加载中...</p>
+      </div>
+    );
+  }
 
   if (!notebook) {
     return (

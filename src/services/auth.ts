@@ -27,20 +27,30 @@ export function isAuthenticated(): boolean {
 
 async function authFetch(path: string, body: object): Promise<Response> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const url = `${API_BASE}${path}`;
+  const startedAt = performance.now();
+  const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const res = await fetch(`${API_BASE}${path}`, {
+    if (import.meta.env.DEV) console.info(`[auth] POST ${url}`);
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    if (import.meta.env.DEV) {
+      console.info(`[auth] ${res.status} ${url} ${Math.round(performance.now() - startedAt)}ms`);
+    }
     return res;
   } catch (err: unknown) {
     if (err instanceof Error && err.name === "AbortError") {
+      if (import.meta.env.DEV) {
+        console.warn(`[auth] timeout ${url} ${Math.round(performance.now() - startedAt)}ms`);
+      }
       throw new Error("请求超时，请检查后端是否在 8003 端口运行");
     }
+    if (import.meta.env.DEV) console.warn(`[auth] failed ${url}`, err);
     throw new Error(`无法连接到服务器 (${API_BASE})，请确认后端已启动`);
   } finally {
     clearTimeout(timeout);

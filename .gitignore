@@ -20,6 +20,7 @@ backend/test_ai_finalize.py
 backend/test_mindmap_perf.py
 
 node_modules
+.pnpm-store/
 dist
 dist-ssr
 *.local

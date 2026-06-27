@@ -144,7 +144,7 @@ The backend runs Alembic migrations on startup.
 
 ```bash
 cd backend
-uvicorn app.main:app --reload --reload-dir app --reload-exclude tests --port 8000
+uvicorn app.main:app --reload --reload-dir app --reload-exclude tests --host 0.0.0.0 --port 8003
 ```
 
 ### 6. Run frontend
@@ -154,6 +154,37 @@ npm run dev
 ```
 
 Open the Vite URL shown in the terminal, usually `http://localhost:5173`.
+
+### Mac frontend + Windows backend
+
+If the backend runs on Windows and the frontend runs on macOS, keep the backend
+paths and generated media on Windows. On the Windows machine, start FastAPI on a
+LAN-accessible host:
+
+```powershell
+cd backend
+uvicorn app.main:app --reload --reload-dir app --reload-exclude tests --host 0.0.0.0 --port 8003
+```
+
+On the Mac, create `.env.local` and point Vite at the Windows backend:
+
+```env
+VITE_API_PROXY_TARGET=http://<windows-lan-ip>:8003
+```
+
+Then run:
+
+```bash
+npm run dev
+```
+
+With `VITE_API_PROXY_TARGET`, the browser calls the Mac Vite server first, and
+Vite proxies `/api` and `/ws` to Windows. This is recommended for local
+development because HTTP requests and ASR WebSocket traffic share the same
+frontend origin. If you instead use direct browser requests to Windows, set
+`VITE_API_BASE_URL=http://<windows-lan-ip>:8003` and make sure the backend
+`ALLOWED_ORIGINS` includes the frontend origin, such as `http://localhost:5173`
+or `http://<mac-lan-ip>:5173`.
 
 ## Docker
 

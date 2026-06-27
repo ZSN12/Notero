@@ -4,13 +4,13 @@ import type { BackendSession } from './types';
 import { mapBackendSession } from './mappers';
 
 export async function fetchSessions(notebookId: string): Promise<Session[]> {
-  const data = await request<BackendSession[]>(`/api/sessions?notebook_id=${notebookId}`);
+  const data = await request<BackendSession[]>(`/api/sessions/?notebook_id=${notebookId}`, { timeoutMs: 20000 });
   return data.map(mapBackendSession);
 }
 
 export async function fetchSessionDetail(notebookId: string): Promise<BackendSession[]> {
   try {
-    const data = await request<BackendSession[]>(`/api/sessions?notebook_id=${notebookId}`);
+    const data = await request<BackendSession[]>(`/api/sessions/?notebook_id=${notebookId}`, { timeoutMs: 20000 });
     return data;
   } catch { return []; }
 }
@@ -23,7 +23,7 @@ export async function fetchSessionById(sessionId: string): Promise<Session | nul
 }
 
 export async function createSession(notebookId: string, title: string): Promise<Session> {
-  const data = await request<BackendSession>(`/api/sessions?notebook_id=${notebookId}`, {
+  const data = await request<BackendSession>(`/api/sessions/?notebook_id=${notebookId}`, {
     method: 'POST',
     body: JSON.stringify({ title }),
   });

@@ -37,15 +37,20 @@ export function useAutoGenerate(
     };
   }, []);
 
-  const scheduleToastClear = useCallback((duration = 4000) => {
+  const clearToastTimeout = useCallback(() => {
     if (toastTimeoutRef.current) {
       clearTimeout(toastTimeoutRef.current);
+      toastTimeoutRef.current = null;
     }
+  }, []);
+
+  const scheduleToastClear = useCallback((duration = 4000) => {
+    clearToastTimeout();
     toastTimeoutRef.current = setTimeout(() => {
       setAutoGenerateToast(null);
       toastTimeoutRef.current = null;
     }, duration);
-  }, []);
+  }, [clearToastTimeout]);
 
   // Observe processing status and show toast messages for agent stages
   useEffect(() => {
@@ -65,21 +70,20 @@ export function useAutoGenerate(
       lastToastSignatureRef.current = toastKey;
       setAutoGenerateToast(message);
       scheduleToastClear(duration);
-      return () => {
-        if (toastTimeoutRef.current) {
-          clearTimeout(toastTimeoutRef.current);
-          toastTimeoutRef.current = null;
-        }
-      };
     };
 
     if (anyRunning) {
-      if (autoGenerateToast?.startsWith('正在')) {
-        setAutoGenerateToast(null);
-      }
+      clearToastTimeout();
+      const runningMessage = stages.mindmap?.status === 'running' && stages.quiz_bank?.status === 'running'
+        ? '正在生成知识导图和题库...'
+        : stages.mindmap?.status === 'running'
+          ? '正在生成知识导图...'
+          : '正在生成题库...';
+      lastToastSignatureRef.current = `running|${signature}`;
+      setAutoGenerateToast(current => current === runningMessage ? current : runningMessage);
       return undefined;
     } else if (allReady && hasAgents) {
-      return showOnceForSignature('学习资料生成完成');
+      showOnceForSignature('学习资料生成完成');
     } else if (anyActionableError && hasAgents && allSettled) {
       const failed: string[] = [];
       if (stages.mindmap?.status === 'error') failed.push('导图');
@@ -87,9 +91,9 @@ export function useAutoGenerate(
       const msg = failed.length === 1
         ? `${failed[0]}生成失败，可手动重试`
         : `${failed.join('、')}生成失败，可手动重试`;
-      return showOnceForSignature(msg);
+      showOnceForSignature(msg);
     }
-  }, [autoGenerateToast, processingStatus, scheduleToastClear]);
+  }, [clearToastTimeout, processingStatus, scheduleToastClear]);
 
   const handleTriggerAgents = useCallback(async (sid: string | undefined, roles?: string[], force = false) => {
     if (!sid) return;

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 from app.core.database import get_db
@@ -8,7 +9,8 @@ from app.models import Note, Session as DBSession, User
 from app.services.session_service import get_user_session as _get_session_by_user
 from app.services.state_service import get_state, set_stale
 from app.services.vector_service import _compute_session_content_hash
-from app.services.note_utils import _extract_transcript_from_content
+from app.services.note_utils import _extract_transcript_from_content, get_canonical_transcript_text
+from app.services.pdf_export_service import build_transcript_pdf
 
 router = APIRouter(prefix="/api/notes", tags=["notes"])
 
@@ -153,6 +155,35 @@ def get_note_by_session(
         db.commit()
         db.refresh(note)
     return serialize_note(note, session_id)
+
+
+@router.get("/session/{session_id}/export/pdf")
+def export_session_transcript_pdf(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    session = _get_user_session(session_id, current_user, db)
+    note = db.query(Note).filter(Note.session_id == session_id).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    transcript_text = get_canonical_transcript_text(note)
+    if not transcript_text.strip():
+        raise HTTPException(status_code=400, detail="没有可导出的转写内容")
+
+    pdf_bytes, filename = build_transcript_pdf(
+        title=session.title,
+        notebook_title=session.notebook.title if session.notebook else "",
+        duration=session.duration,
+        transcript_text=transcript_text,
+    )
+    quoted_filename = filename.replace('"', "")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{quoted_filename}"'},
+    )
 
 
 def _mark_stale_if_changed(session_id: str, db: Session) -> None:

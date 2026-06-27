@@ -101,7 +101,7 @@ export function NoteDetailTopNav({
   };
 
   return (
-    <nav className="flex-shrink-0 bg-white/70 dark:bg-slate-900/70 backdrop-blur-md border-b border-slate-200/60 dark:border-slate-800/60">
+    <nav className="relative z-50 flex-shrink-0 bg-white/70 dark:bg-slate-900/70 backdrop-blur-md border-b border-slate-200/60 dark:border-slate-800/60">
       <div className="px-3 py-2 flex items-center justify-between">
         <div className="flex items-center gap-3 min-w-0">
           <button
@@ -128,7 +128,7 @@ export function NoteDetailTopNav({
               <ChevronDown className="w-3 h-3" />
             </button>
             {exportTools.state.showExportMenu && (
-              <div className="absolute right-0 top-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-lg py-1 z-50 min-w-[140px]">
+              <div className="absolute right-0 top-full mt-1 z-[60] min-w-[140px] rounded-lg border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800">
                 <button
                   onClick={() => {
                     const blocks = layoutFromNoteParts(transcriptText, contentBlocks, notes);

@@ -66,6 +66,7 @@ export {
   getAudioUrl,
   deleteAudio,
   updateTranscript,
+  downloadTranscriptPDF,
   finalizeTranscript,
 } from './api/note';
 

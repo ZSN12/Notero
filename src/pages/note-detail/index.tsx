@@ -93,14 +93,15 @@ export default function NoteDetail() {
   const processing = useProcessingStatus(sessionId);
   const recording = useRecording(sessionId, { onFinalize: processing.refresh });
   const transcript = useTranscript(sessionId, recording.state.isRecording, ppt.state.slides);
+  const auxiliarySessionId = transcript.state.isLoaded ? sessionId : undefined;
 
   const share = useShare();
-  const vectorIndex = useVectorIndex(sessionId, processing.processingStatus);
+  const vectorIndex = useVectorIndex(auxiliarySessionId, processing.processingStatus);
   const rag = useRAG();
-  const mindMap = useMindMap(sessionId, processing.processingStatus);
-  const quiz = useQuiz(sessionId, processing.processingStatus);
+  const mindMap = useMindMap(auxiliarySessionId, processing.processingStatus);
+  const quiz = useQuiz(auxiliarySessionId, processing.processingStatus);
   const audioUpload = useAudioUpload(sessionId, { onFinalize: processing.refresh });
-  const autoGen = useAutoGenerate(sessionId, processing.processingStatus, processing.refresh);
+  const autoGen = useAutoGenerate(auxiliarySessionId, processing.processingStatus, processing.refresh);
   const restructure = useRestructure();
 
   const [isLoading, setIsLoading] = useState(true);

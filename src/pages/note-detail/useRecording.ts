@@ -230,7 +230,7 @@ export function useRecording(
       if (sessionId) {
         const finishResult = await finishRecording(sessionId);
         finishStatus = finishResult.status;
-        finalNote = finishResult.note;
+        finalNote = finishResult.note ?? undefined;
         if (finishResult.status === 'error') {
           setIsError(true);
           setErrorMessage('录音保存失败，请稍后重试');

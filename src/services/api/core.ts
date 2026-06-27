@@ -40,9 +40,9 @@ interface ApiRequestOptions extends RequestInit {
   timeoutMs?: number;
 }
 
-export async function request<T = any>(url: string, options?: ApiRequestOptions): Promise<T> {
+export async function request<T = unknown>(url: string, options?: ApiRequestOptions): Promise<T> {
   const fullUrl = `${API_BASE}${url}`;
-  const { timeoutMs = 10000, ...fetchOptions } = options || {};
+  const { timeoutMs = 20000, ...fetchOptions } = options || {};
 
   try {
     const controller = new AbortController();

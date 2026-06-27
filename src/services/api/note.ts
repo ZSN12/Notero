@@ -5,11 +5,11 @@ export type { SessionAnnotations, StrokeAnnotation } from './types';
 
 export async function fetchNote(sessionId: string): Promise<BackendNote | null> {
   try {
-    const data = await request<BackendNote>(`/api/notes/session/${sessionId}`);
+    const data = await request<BackendNote>(`/api/notes/session/${sessionId}`, { timeoutMs: 60000 });
     return data;
-  } catch (err: any) {
+  } catch (err: unknown) {
     if (import.meta.env.DEV) {
-      console.error(`[fetchNote] failed for session ${sessionId}:`, err?.message || err);
+      console.error(`[fetchNote] failed for session ${sessionId}:`, err instanceof Error ? err.message : err);
     }
     throw err;
   }
@@ -31,20 +31,20 @@ export async function updateNote(
       body: JSON.stringify(payload),
     });
     return data;
-  } catch (err: any) {
+  } catch (err: unknown) {
     if (import.meta.env.DEV) {
-      console.error(`[updateNote] failed for session ${sessionId}:`, err?.message || err);
+      console.error(`[updateNote] failed for session ${sessionId}:`, err instanceof Error ? err.message : err);
     }
     throw err;
   }
 }
 
-export async function finishRecording(sessionId: string): Promise<{ status: string; audio_path: string | null; note?: any }> {
+export async function finishRecording(sessionId: string): Promise<{ status: string; audio_path: string | null; note?: BackendNote | null }> {
   try {
     // Audio concatenation can take a few seconds for long recordings. Real-time
     // recording stop no longer triggers AI finalization automatically; the user
     // must click "AI 整理" to run the unified restructure.
-    const data = await request<{ status: string; audio_path: string | null; note?: any }>(
+    const data = await request<{ status: string; audio_path: string | null; note?: BackendNote | null }>(
       `/api/process/audio-finish?session_id=${sessionId}`,
       { method: 'POST', timeoutMs: 60000 }
     );
@@ -76,6 +76,25 @@ export async function updateTranscript(sessionId: string, transcript: Transcript
   } catch {
     // ignore
   }
+}
+
+export async function downloadTranscriptPDF(sessionId: string): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/api/notes/session/${sessionId}/export/pdf`, {
+    method: 'GET',
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => '');
+    let message = errorText || `导出失败 (${res.status})`;
+    try {
+      const parsed = JSON.parse(errorText);
+      if (typeof parsed.detail === 'string') message = parsed.detail;
+    } catch {
+      // Keep plain text response as the error message.
+    }
+    throw new Error(message);
+  }
+  return res.blob();
 }
 
 export interface FinalizeTranscriptResult {

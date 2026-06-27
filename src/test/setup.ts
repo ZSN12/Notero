@@ -50,12 +50,14 @@ HTMLCanvasElement.prototype.getContext = vi.fn(function (this: HTMLCanvasElement
     stroke: vi.fn(),
     setTransform: vi.fn(),
     scale: vi.fn(),
-  };
-}) as any;
+  } as unknown as CanvasRenderingContext2D;
+}) as typeof HTMLCanvasElement.prototype.getContext;
 
 // Mock ResizeObserver for component tests that use it
-global.ResizeObserver = vi.fn(function (this: any) {
-  this.observe = vi.fn();
-  this.unobserve = vi.fn();
-  this.disconnect = vi.fn();
-}) as any;
+class MockResizeObserver implements ResizeObserver {
+  observe = vi.fn();
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+}
+
+global.ResizeObserver = MockResizeObserver;

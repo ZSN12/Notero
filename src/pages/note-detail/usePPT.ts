@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { uploadPPT, Slide } from '@/services/api';
+import { getErrorMessage } from '@/lib/error';
 
 export function usePPT(sessionId: string | undefined) {
   const [slides, setSlides] = useState<Slide[]>([]);
@@ -22,9 +23,9 @@ export function usePPT(sessionId: string | undefined) {
       } else {
         setUploadMessage('PPT 上传成功，但没有解析到页面');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('PPT upload failed:', error);
-      setUploadError(error?.message || 'PPT 上传失败，请确认文件格式后重试');
+      setUploadError(getErrorMessage(error) || 'PPT 上传失败，请确认文件格式后重试');
     }
     finally { setIsUploadingPPT(false); }
   };

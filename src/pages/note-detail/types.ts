@@ -10,7 +10,13 @@ export interface TranscriptEntry {
   text: string;
   raw_text?: string;
   display_text?: string;
-  timestamps: any[];
+  timestamps: Array<{
+    text?: string;
+    start_ms?: number;
+    end_ms?: number;
+    start?: number;
+    end?: number;
+  }>;
   is_corrected?: boolean;
   is_restructured?: boolean;
 }
@@ -44,7 +50,7 @@ export interface NoteRecord {
   content: string;
   transcript?: TranscriptEntry[];
   ppt_images?: PPTData[];
-  vocabulary?: any[];
+  vocabulary?: Array<Record<string, unknown>>;
 }
 
 export interface SessionRecord {
