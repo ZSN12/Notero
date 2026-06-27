@@ -1,0 +1,138 @@
+pageType: content
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementId: ts-title
+    elementType: text
+    bounds: [60, 40, 700, 40]
+    content:
+      style: "$heading"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>前后端技术栈</p>
+
+  - elementId: ts-line
+    elementType: shape
+    bounds: [60, 88, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: ts-frontend-label
+    elementType: text
+    bounds: [60, 110, 120, 30]
+    content:
+      fontSize: 14
+      color: "$accent_green"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>前端</p>
+
+  - elementId: ts-frontend-card
+    elementType: shape
+    bounds: [60, 148, 560, 160]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: ts-frontend-content
+    elementType: text
+    bounds: [80, 158, 520, 140]
+    content:
+      fontSize: 16
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p><span style="color:$accent_green;">●</span> <strong>React 18</strong> + TypeScript + Vite</p>
+        <p><span style="color:$accent_green;">●</span> <strong>Tailwind CSS</strong> 原子化样式 + 暗色主题</p>
+        <p><span style="color:$accent_green;">●</span> <strong>Zustand</strong> 轻量状态管理</p>
+        <p><span style="color:$accent_green;">●</span> <strong>ReactFlow</strong> 知识图谱可视化</p>
+        <p><span style="color:$accent_green;">●</span> <strong>Lucide React</strong> 图标体系</p>
+
+  - elementId: ts-backend-label
+    elementType: text
+    bounds: [660, 110, 120, 30]
+    content:
+      fontSize: 14
+      color: "$accent_blue"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>后端</p>
+
+  - elementId: ts-backend-card
+    elementType: shape
+    bounds: [660, 148, 560, 160]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: ts-backend-content
+    elementType: text
+    bounds: [680, 158, 520, 140]
+    content:
+      fontSize: 16
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p><span style="color:$accent_blue;">●</span> <strong>FastAPI</strong> 异步高性能 API</p>
+        <p><span style="color:$accent_blue;">●</span> <strong>SQLAlchemy</strong> ORM + Alembic 迁移</p>
+        <p><span style="color:$accent_blue;">●</span> <strong>SQLite</strong> 默认数据库（可扩展）</p>
+        <p><span style="color:$accent_blue;">●</span> <strong>JWT</strong> 认证 + 权限控制</p>
+        <p><span style="color:$accent_blue;">●</span> <strong>多 Agent</strong> 异步任务架构</p>
+
+  - elementId: ts-ai-label
+    elementType: text
+    bounds: [60, 330, 200, 30]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>AI / 音频 / 向量</p>
+
+  - elementId: ts-ai-card
+    elementType: shape
+    bounds: [60, 368, 1160, 160]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: ts-ai-content
+    elementType: text
+    bounds: [80, 378, 1120, 140]
+    content:
+      fontSize: 16
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p><span style="color:$accent;">●</span> <strong>FunASR</strong> 本地语音识别（paraformer-zh + VAD + 标点）</p>
+        <p><span style="color:$accent;">●</span> <strong>DeepSeek API</strong> 大语言模型（知识图谱 / RAG / 测验生成）</p>
+        <p><span style="color:$accent;">●</span> <strong>DashScope</strong> 文本 Embedding（text-embedding-v2）</p>
+        <p><span style="color:$accent;">●</span> <strong>本地向量搜索</strong>：numpy 余弦相似度，无需外部向量数据库</p>
+        <p><span style="color:$accent;">●</span> <strong>三级降级策略</strong>：ASR / Embedding / LLM 均设计 fallback</p>
+
+  - elementId: ts-pagenum
+    elementType: text
+    bounds: [1180, 680, 40, 20]
+    content:
+      style: "$caption"
+      align: [right, middle]
+      wrap: false
+      text: |
+        <p>07</p>

@@ -1,0 +1,51 @@
+pageType: chapter
+background:
+  type: gradient
+  gradientType: linear
+  angle: 135
+  stops:
+    - {position: 0, color: "#0F172A"}
+    - {position: 0.5, color: "#1E293B"}
+    - {position: 1, color: "#0F172A"}
+elements:
+  - elementId: ch3-num
+    elementType: text
+    bounds: [60, 240, 200, 80]
+    content:
+      fontSize: 64
+      color: "$accent"
+      fontFamily: "Liter"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>03</p>
+
+  - elementId: ch3-title
+    elementType: text
+    bounds: [60, 330, 600, 55]
+    content:
+      fontSize: 36
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>核心功能实现</p>
+
+  - elementId: ch3-subtitle
+    elementType: text
+    bounds: [60, 400, 700, 35]
+    content:
+      fontSize: 18
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>从代码层面拆解四大 AI 功能模块</p>
+
+  - elementId: ch3-line
+    elementType: shape
+    bounds: [60, 450, 100, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 3, color: "$accent"}

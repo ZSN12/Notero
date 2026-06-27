@@ -1,0 +1,70 @@
+title: Nootbook — AI 辅助课程笔记平台
+size: [1280, 720]
+theme:
+  colors:
+    primary: "#0F172A"
+    secondary: "#334155"
+    accent: "#F59E0B"
+    accent_green: "#10B981"
+    accent_blue: "#3B82F6"
+    background: "#0F172A"
+    text: "#F8FAFC"
+    text_secondary: "#94A3B8"
+    card_bg: "#1E293B"
+    border: "#334155"
+  textStyles:
+    title:
+      fontSize: 48
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      letterSpacing: 2
+    subtitle:
+      fontSize: 22
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.5
+    heading:
+      fontSize: 28
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+    body:
+      fontSize: 18
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.6
+    caption:
+      fontSize: 14
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+    accent_text:
+      fontSize: 20
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+  tableStyles:
+    default:
+      fontSize: 16
+      fontFamily: "Liter, MiSans"
+      headerFill: "$card_bg"
+      headerColor: "$text"
+      headerBold: true
+      bodyFill: ["$primary", "$card_bg"]
+      bodyColor: "$text"
+      border:
+        style: solid
+        width: 1
+        color: "$border"
+pages:
+  - pages/cover.page
+  - pages/toc.page
+  - pages/ch1_overview.page
+  - pages/background.page
+  - pages/features_overview.page
+  - pages/ch2_arch.page
+  - pages/tech_stack.page
+  - pages/architecture.page
+  - pages/ch3_features.page
+  - pages/asr.page
+  - pages/ppt_mindmap.page
+  - pages/rag_quiz.page
+  - pages/highlights.page
+  - pages/final.page

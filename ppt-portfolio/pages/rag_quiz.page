@@ -1,0 +1,177 @@
+pageType: content
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementId: rag-title
+    elementType: text
+    bounds: [60, 40, 700, 40]
+    content:
+      style: "$heading"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>RAG 智能问答与 AI 测验</p>
+
+  - elementId: rag-line
+    elementType: shape
+    bounds: [60, 88, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: rag-left-card
+    elementType: shape
+    bounds: [60, 110, 640, 540]
+    shapeName: roundRect
+    adjustments: [4000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: rag-left-title
+    elementType: text
+    bounds: [80, 120, 300, 28]
+    content:
+      fontSize: 16
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>RAG 问答流程</p>
+
+  - elementId: rag-left-content
+    elementType: text
+    bounds: [80, 155, 600, 220]
+    content:
+      fontSize: 15
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p><strong>Step 1 — 向量检索</strong></p>
+        <p>用户提问 → 本地向量索引 Top-K 检索</p>
+        <p>覆盖范围：转录文本 / PPT 内容 / 笔记块</p>
+        <p style="margin-top:10px"><strong>Step 2 — 上下文构建</strong></p>
+        <p>提取相关片段，标注来源位置</p>
+        <p>PPT 页码 / 转录时间戳 / 笔记块 ID</p>
+        <p style="margin-top:10px"><strong>Step 3 — 流式生成</strong></p>
+        <p>DeepSeek 基于上下文生成答案</p>
+        <p>SSE 实时推送，逐字呈现回答</p>
+
+  - elementId: rag-left-divider
+    elementType: shape
+    bounds: [80, 390, 600, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: rag-left-title2
+    elementType: text
+    bounds: [80, 405, 300, 28]
+    content:
+      fontSize: 16
+      color: "$accent_blue"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>AI 测验生成</p>
+
+  - elementId: rag-left-content2
+    elementType: text
+    bounds: [80, 440, 600, 195]
+    content:
+      fontSize: 15
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p><strong>题库构建</strong></p>
+        <p>DeepSeek 分析课程内容生成选择题题库</p>
+        <p>异步任务状态追踪，支持重建题库</p>
+        <p style="margin-top:8px"><strong>测验流程</strong></p>
+        <p>从题库随机抽题生成测验 → 用户答题</p>
+        <p>提交后查看正确答案与解析</p>
+        <p>历史测验记录与成绩追踪</p>
+
+  - elementId: rag-right-screenshot-label
+    elementType: text
+    bounds: [730, 110, 300, 25]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>产品截图占位</p>
+
+  - elementId: rag-right-screenshot-box
+    elementType: shape
+    bounds: [730, 142, 490, 250]
+    shapeName: roundRect
+    adjustments: [6000]
+    fill: {type: solid, color: "#0F172A"}
+    border: {style: dash, width: 2, color: "$border"}
+
+  - elementId: rag-right-screenshot-hint
+    elementType: text
+    bounds: [800, 245, 350, 45]
+    content:
+      fontSize: 14
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>[ RAG 问答界面 + 测验界面截图 ]</p>
+
+  - elementId: rag-right-code-label
+    elementType: text
+    bounds: [730, 410, 300, 25]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>向量检索核心逻辑</p>
+
+  - elementId: rag-right-code-box
+    elementType: shape
+    bounds: [730, 442, 490, 208]
+    shapeName: roundRect
+    adjustments: [4000]
+    fill: {type: solid, color: "#0B1120"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: rag-right-code-text
+    elementType: text
+    bounds: [745, 452, 460, 188]
+    content:
+      fontSize: 12
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.5
+      align: [left, top]
+      text: |
+        <p><span style="color:#F59E0B;"># 本地向量搜索（无需外部数据库）</span></p>
+        <p>def search_vectors(query, top_k=5):</p>
+        <p>    <span style="color:#10B981;"># 1. 生成查询向量</span></p>
+        <p>    q_vec = neural_embedding(query)</p>
+        <p>    <span style="color:#3B82F6;"># 2. numpy 批量余弦相似度</span></p>
+        <p>    scores = cosine_similarity(q_vec, index)</p>
+        <p>    <span style="color:#94A3B8;"># 3. 返回 Top-K 结果</span></p>
+        <p>    return top_k_results(scores)</p>
+
+  - elementId: rag-pagenum
+    elementType: text
+    bounds: [1180, 680, 40, 20]
+    content:
+      style: "$caption"
+      align: [right, middle]
+      wrap: false
+      text: |
+        <p>12</p>

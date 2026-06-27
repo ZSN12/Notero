@@ -1,0 +1,51 @@
+pageType: final
+background:
+  type: gradient
+  gradientType: linear
+  angle: 135
+  stops:
+    - {position: 0, color: "#0F172A"}
+    - {position: 0.5, color: "#1E293B"}
+    - {position: 1, color: "#0F172A"}
+elements:
+  - elementId: final-title
+    elementType: text
+    bounds: [240, 240, 800, 70]
+    content:
+      fontSize: 48
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p><strong>感谢观看</strong></p>
+
+  - elementId: final-line
+    elementType: shape
+    bounds: [540, 330, 200, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 2, color: "$accent"}
+
+  - elementId: final-slogan
+    elementType: text
+    bounds: [240, 350, 800, 40]
+    content:
+      fontSize: 20
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>Nootbook — 用 AI 重新定义课堂笔记体验</p>
+
+  - elementId: final-tags
+    elementType: text
+    bounds: [340, 420, 600, 30]
+    content:
+      fontSize: 14
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>全栈独立开发作品  |  React 18  |  FastAPI  |  DeepSeek  |  FunASR</p>

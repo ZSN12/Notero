@@ -1,0 +1,147 @@
+pageType: content
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementId: asr-title
+    elementType: text
+    bounds: [60, 40, 700, 40]
+    content:
+      style: "$heading"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>实时语音转录与流式 ASR</p>
+
+  - elementId: asr-line
+    elementType: shape
+    bounds: [60, 88, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: asr-left-card
+    elementType: shape
+    bounds: [60, 110, 640, 540]
+    shapeName: roundRect
+    adjustments: [4000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: asr-left-title
+    elementType: text
+    bounds: [80, 120, 300, 28]
+    content:
+      fontSize: 16
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>三级降级策略</p>
+
+  - elementId: asr-left-content
+    elementType: text
+    bounds: [80, 155, 600, 480]
+    content:
+      fontSize: 15
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p><strong>Level 1 — FunASR 本地模型</strong></p>
+        <p>paraformer-zh + fsmn-vad + ct-punc</p>
+        <p>离线运行，零网络依赖，隐私安全</p>
+        <p style="margin-top:12px"><strong>Level 2 — DashScope 云端 ASR</strong></p>
+        <p>paraformer-realtime-v2，高准确率</p>
+        <p>网络可用时自动切换</p>
+        <p style="margin-top:12px"><strong>Level 3 — Whisper API</strong></p>
+        <p>OpenAI-compatible 接口兜底</p>
+        <p>确保任何情况下服务可用</p>
+        <p style="margin-top:16px"><strong>流式实时处理</strong></p>
+        <p>600ms 分块缓冲 + 模型缓存去重</p>
+        <p>避免文本重复输出， silence 800ms 自动分段</p>
+        <p>每个片段附带精确时间戳（start_ms / end_ms）</p>
+
+  - elementId: asr-right-screenshot-label
+    elementType: text
+    bounds: [730, 110, 300, 25]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>产品截图占位</p>
+
+  - elementId: asr-right-screenshot-box
+    elementType: shape
+    bounds: [730, 142, 490, 250]
+    shapeName: roundRect
+    adjustments: [6000]
+    fill: {type: solid, color: "#0F172A"}
+    border: {style: dash, width: 2, color: "$border"}
+
+  - elementId: asr-right-screenshot-hint
+    elementType: text
+    bounds: [800, 245, 350, 45]
+    content:
+      fontSize: 14
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>[ 语音转录界面截图 ]</p>
+
+  - elementId: asr-right-code-label
+    elementType: text
+    bounds: [730, 410, 300, 25]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>核心代码片段</p>
+
+  - elementId: asr-right-code-box
+    elementType: shape
+    bounds: [730, 442, 490, 208]
+    shapeName: roundRect
+    adjustments: [4000]
+    fill: {type: solid, color: "#0B1120"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: asr-right-code-text
+    elementType: text
+    bounds: [745, 452, 460, 188]
+    content:
+      fontSize: 12
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.5
+      align: [left, top]
+      text: |
+        <p><span style="color:#F59E0B;"># 三级 ASR 降级策略</span></p>
+        <p>def transcribe(audio_path):</p>
+        <p>    <span style="color:#10B981;"># 1. 优先本地 FunASR</span></p>
+        <p>    segments = funasr_transcribe(audio_path)</p>
+        <p>    if segments: return segments</p>
+        <p>    <span style="color:#3B82F6;"># 2. 降级 DashScope 云端</span></p>
+        <p>    segments = dashscope_asr(audio_path)</p>
+        <p>    if segments: return segments</p>
+        <p>    <span style="color:#94A3B8;"># 3. 最终 Whisper API 兜底</span></p>
+        <p>    return whisper_api(audio_path)</p>
+
+  - elementId: asr-pagenum
+    elementType: text
+    bounds: [1180, 680, 40, 20]
+    content:
+      style: "$caption"
+      align: [right, middle]
+      wrap: false
+      text: |
+        <p>10</p>

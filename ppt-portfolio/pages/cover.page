@@ -1,0 +1,95 @@
+pageType: cover
+background:
+  type: gradient
+  gradientType: linear
+  angle: 135
+  stops:
+    - {position: 0, color: "#0F172A"}
+    - {position: 0.5, color: "#1E293B"}
+    - {position: 1, color: "#0F172A"}
+elements:
+  - elementId: cover-title
+    elementType: text
+    bounds: [140, 240, 1000, 70]
+    content:
+      style: "$title"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p><strong>NOOTBOOK</strong></p>
+
+  - elementId: cover-subtitle
+    elementType: text
+    bounds: [240, 330, 800, 40]
+    content:
+      style: "$subtitle"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>AI 辅助课程笔记平台</p>
+
+  - elementId: cover-desc
+    elementType: text
+    bounds: [190, 390, 900, 35]
+    content:
+      fontSize: 16
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>全栈独立开发作品  |  实时语音转录 · PPT 课件对齐 · AI 知识图谱 · RAG 智能问答</p>
+
+  - elementId: cover-line
+    elementType: shape
+    bounds: [540, 450, 200, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$accent"}
+
+  - elementId: cover-tag1
+    elementType: text
+    bounds: [340, 470, 120, 30]
+    content:
+      fontSize: 13
+      color: "$accent"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>React 18</p>
+
+  - elementId: cover-tag2
+    elementType: text
+    bounds: [480, 470, 120, 30]
+    content:
+      fontSize: 13
+      color: "$accent_green"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>FastAPI</p>
+
+  - elementId: cover-tag3
+    elementType: text
+    bounds: [620, 470, 120, 30]
+    content:
+      fontSize: 13
+      color: "$accent_blue"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>DeepSeek</p>
+
+  - elementId: cover-tag4
+    elementType: text
+    bounds: [760, 470, 120, 30]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>FunASR</p>

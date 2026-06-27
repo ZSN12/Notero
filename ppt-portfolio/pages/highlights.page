@@ -1,0 +1,218 @@
+pageType: content
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementId: hl-title
+    elementType: text
+    bounds: [60, 40, 700, 40]
+    content:
+      style: "$heading"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>技术亮点与工程实践</p>
+
+  - elementId: hl-line
+    elementType: shape
+    bounds: [60, 88, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: hl-card1-bg
+    elementType: shape
+    bounds: [60, 110, 560, 240]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: hl-card1-accent
+    elementType: shape
+    bounds: [60, 110, 4, 240]
+    shapeName: rect
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: hl-card1-icon
+    elementType: icon
+    bounds: [85, 130, 32, 32]
+    iconName: "fas:database"
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: hl-card1-title
+    elementType: text
+    bounds: [130, 128, 470, 32]
+    content:
+      fontSize: 20
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>本地向量搜索</p>
+
+  - elementId: hl-card1-body
+    elementType: text
+    bounds: [85, 175, 510, 160]
+    content:
+      fontSize: 15
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p>无需外部向量数据库，纯本地实现</p>
+        <p>DashScope text-embedding-v2 生成 1536 维向量</p>
+        <p>numpy 批量余弦相似度计算，毫秒级响应</p>
+        <p>TF-IDF 降级策略，确保服务离线可用</p>
+
+  - elementId: hl-card2-bg
+    elementType: shape
+    bounds: [660, 110, 560, 240]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: hl-card2-accent
+    elementType: shape
+    bounds: [660, 110, 4, 240]
+    shapeName: rect
+    fill: {type: solid, color: "$accent_blue"}
+
+  - elementId: hl-card2-icon
+    elementType: icon
+    bounds: [685, 130, 32, 32]
+    iconName: "fas:gears"
+    fill: {type: solid, color: "$accent_blue"}
+
+  - elementId: hl-card2-title
+    elementType: text
+    bounds: [730, 128, 470, 32]
+    content:
+      fontSize: 20
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>多 Agent 异步架构</p>
+
+  - elementId: hl-card2-body
+    elementType: text
+    bounds: [685, 175, 510, 160]
+    content:
+      fontSize: 15
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p>转录 / 知识图谱 / 测验 / 向量索引并行处理</p>
+        <p>状态机驱动进度追踪，前端实时轮询</p>
+        <p>每会话独立任务队列，互不阻塞</p>
+        <p>支持任务中断与重试机制</p>
+
+  - elementId: hl-card3-bg
+    elementType: shape
+    bounds: [60, 375, 560, 240]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: hl-card3-accent
+    elementType: shape
+    bounds: [60, 375, 4, 240]
+    shapeName: rect
+    fill: {type: solid, color: "$accent_green"}
+
+  - elementId: hl-card3-icon
+    elementType: icon
+    bounds: [85, 395, 32, 32]
+    iconName: "fas:shield-halved"
+    fill: {type: solid, color: "$accent_green"}
+
+  - elementId: hl-card3-title
+    elementType: text
+    bounds: [130, 393, 470, 32]
+    content:
+      fontSize: 20
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>三级容错降级</p>
+
+  - elementId: hl-card3-body
+    elementType: text
+    bounds: [85, 440, 510, 160]
+    content:
+      fontSize: 15
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p>ASR：FunASR → DashScope → Whisper API</p>
+        <p>Embedding：DashScope → TF-IDF 本地降级</p>
+        <p>LLM：DeepSeek 主通道 + 错误兜底提示</p>
+        <p>确保任何外部服务故障时核心功能可用</p>
+
+  - elementId: hl-card4-bg
+    elementType: shape
+    bounds: [660, 375, 560, 240]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: hl-card4-accent
+    elementType: shape
+    bounds: [660, 375, 4, 240]
+    shapeName: rect
+    fill: {type: solid, color: "$text_secondary"}
+
+  - elementId: hl-card4-icon
+    elementType: icon
+    bounds: [685, 395, 32, 32]
+    iconName: "fas:user-shield"
+    fill: {type: solid, color: "$text_secondary"}
+
+  - elementId: hl-card4-title
+    elementType: text
+    bounds: [730, 393, 470, 32]
+    content:
+      fontSize: 20
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>完整用户系统</p>
+
+  - elementId: hl-card4-body
+    elementType: text
+    bounds: [685, 440, 510, 160]
+    content:
+      fontSize: 15
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p>JWT 认证 + 密码哈希存储</p>
+        <p>用户级数据隔离，权限精确控制</p>
+        <p>分享链接生成，支持公开只读访问</p>
+        <p>数据导入导出（.notero 格式）</p>
+
+  - elementId: hl-pagenum
+    elementType: text
+    bounds: [1180, 680, 40, 20]
+    content:
+      style: "$caption"
+      align: [right, middle]
+      wrap: false
+      text: |
+        <p>13</p>

@@ -1,0 +1,231 @@
+pageType: content
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementId: arch-title
+    elementType: text
+    bounds: [60, 40, 700, 40]
+    content:
+      style: "$heading"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>系统架构与数据流</p>
+
+  - elementId: arch-line
+    elementType: shape
+    bounds: [60, 88, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: arch-layer-user
+    elementType: shape
+    bounds: [60, 110, 200, 50]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: arch-layer-user-text
+    elementType: text
+    bounds: [60, 110, 200, 50]
+    content:
+      fontSize: 15
+      color: "$primary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>用户层 (React)</p>
+
+  - elementId: arch-arrow1
+    elementType: shape
+    bounds: [270, 130, 40, 0]
+    shapeName: straightConnector1
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 2, color: "$accent"}
+
+  - elementId: arch-layer-api
+    elementType: shape
+    bounds: [320, 110, 200, 50]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$accent_blue"}
+
+  - elementId: arch-layer-api-text
+    elementType: text
+    bounds: [320, 110, 200, 50]
+    content:
+      fontSize: 15
+      color: "$primary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>API 网关 (FastAPI)</p>
+
+  - elementId: arch-arrow2
+    elementType: shape
+    bounds: [530, 130, 40, 0]
+    shapeName: straightConnector1
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 2, color: "$accent_blue"}
+
+  - elementId: arch-layer-service
+    elementType: shape
+    bounds: [580, 110, 640, 50]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: arch-layer-service-text
+    elementType: text
+    bounds: [580, 110, 640, 50]
+    content:
+      fontSize: 14
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>ASR 服务  |  PPT 服务  |  向量服务  |  RAG 服务  |  知识图谱  |  测验服务</p>
+
+  - elementId: arch-db-label
+    elementType: text
+    bounds: [60, 185, 120, 25]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>数据存储层</p>
+
+  - elementId: arch-db-sqlite
+    elementType: shape
+    bounds: [60, 218, 280, 55]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: arch-db-sqlite-text
+    elementType: text
+    bounds: [60, 218, 280, 55]
+    content:
+      fontSize: 14
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>SQLite 关系数据</p>
+
+  - elementId: arch-db-vector
+    elementType: shape
+    bounds: [360, 218, 280, 55]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: arch-db-vector-text
+    elementType: text
+    bounds: [360, 218, 280, 55]
+    content:
+      fontSize: 14
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>本地向量索引</p>
+
+  - elementId: arch-db-file
+    elementType: shape
+    bounds: [660, 218, 280, 55]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: arch-db-file-text
+    elementType: text
+    bounds: [660, 218, 280, 55]
+    content:
+      fontSize: 14
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>文件系统 (音频 / PPT 图片)</p>
+
+  - elementId: arch-db-external
+    elementType: shape
+    bounds: [960, 218, 260, 55]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: arch-db-external-text
+    elementType: text
+    bounds: [960, 218, 260, 55]
+    content:
+      fontSize: 14
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>外部 API (DeepSeek)</p>
+
+  - elementId: arch-flow-label
+    elementType: text
+    bounds: [60, 300, 200, 25]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>核心数据流</p>
+
+  - elementId: arch-flow-card
+    elementType: shape
+    bounds: [60, 332, 1160, 320]
+    shapeName: roundRect
+    adjustments: [4000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: arch-flow-content
+    elementType: text
+    bounds: [80, 345, 1120, 295]
+    content:
+      fontSize: 15
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.8
+      align: [left, top]
+      text: |
+        <p><span style="color:$accent;">① 语音流</span>  麦克风 → WebSocket 音频流 → FunASR 实时转录 → 时间戳文本块</p>
+        <p><span style="color:$accent_blue;">② PPT 流</span>  上传 .pptx → python-pptx 提取文本 → Pillow 渲染 PNG → 时间轴对齐</p>
+        <p><span style="color:$accent_green;">③ 笔记流</span>  转录文本 + PPT 内容 → 富文本编辑 → 自动保存 → 向量索引构建</p>
+        <p><span style="color:$accent;">④ AI 流</span>   笔记内容 → DeepSeek 生成知识图谱 / 测验题库 → 异步任务状态追踪</p>
+        <p><span style="color:$accent_blue;">⑤ 问答流</span>  用户提问 → 向量检索 Top-K 片段 → 构造 Prompt → SSE 流式回答</p>
+        <p><span style="color:$text_secondary;">⑥ 分享流</span>  生成分享链接 → 公开访问 → 只读模式浏览笔记 / PPT / 知识图谱</p>
+
+  - elementId: arch-pagenum
+    elementType: text
+    bounds: [1180, 680, 40, 20]
+    content:
+      style: "$caption"
+      align: [right, middle]
+      wrap: false
+      text: |
+        <p>08</p>

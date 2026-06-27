@@ -1,0 +1,177 @@
+pageType: content
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementId: ppt-title
+    elementType: text
+    bounds: [60, 40, 700, 40]
+    content:
+      style: "$heading"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>PPT 课件对齐与知识图谱</p>
+
+  - elementId: ppt-line
+    elementType: shape
+    bounds: [60, 88, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: ppt-left-card
+    elementType: shape
+    bounds: [60, 110, 640, 540]
+    shapeName: roundRect
+    adjustments: [4000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: ppt-left-title
+    elementType: text
+    bounds: [80, 120, 300, 28]
+    content:
+      fontSize: 16
+      color: "$accent_blue"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>PPT 解析与对齐</p>
+
+  - elementId: ppt-left-content
+    elementType: text
+    bounds: [80, 155, 600, 220]
+    content:
+      fontSize: 15
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p><strong>上传解析</strong></p>
+        <p>python-pptx 提取幻灯片文本与结构</p>
+        <p>Pillow 渲染每页为 PNG 图片存储到磁盘</p>
+        <p style="margin-top:10px"><strong>时间轴对齐</strong></p>
+        <p>幻灯片内容与转录文本按时间戳关联</p>
+        <p>点击转录片段自动跳转到对应 PPT 页</p>
+        <p>支持键盘 ↑↓ 翻页浏览</p>
+
+  - elementId: ppt-left-divider
+    elementType: shape
+    bounds: [80, 390, 600, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: ppt-left-title2
+    elementType: text
+    bounds: [80, 405, 300, 28]
+    content:
+      fontSize: 16
+      color: "$accent_green"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>AI 知识图谱</p>
+
+  - elementId: ppt-left-content2
+    elementType: text
+    bounds: [80, 440, 600, 195]
+    content:
+      fontSize: 15
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.7
+      align: [left, top]
+      text: |
+        <p><strong>生成流程</strong></p>
+        <p>DeepSeek 分析笔记内容 → 提取主题/概念/要点</p>
+        <p>生成结构化节点关系数据（JSON）</p>
+        <p style="margin-top:8px"><strong>可视化</strong></p>
+        <p>ReactFlow 渲染交互式知识图谱画布</p>
+        <p>9 种节点类型：主题、概念、要点、难点、示例、流程、函数、问题、结论</p>
+        <p>支持展开/折叠、拖拽布局、导出大纲</p>
+
+  - elementId: ppt-right-screenshot-label
+    elementType: text
+    bounds: [730, 110, 300, 25]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>产品截图占位</p>
+
+  - elementId: ppt-right-screenshot-box
+    elementType: shape
+    bounds: [730, 142, 490, 250]
+    shapeName: roundRect
+    adjustments: [6000]
+    fill: {type: solid, color: "#0F172A"}
+    border: {style: dash, width: 2, color: "$border"}
+
+  - elementId: ppt-right-screenshot-hint
+    elementType: text
+    bounds: [800, 245, 350, 45]
+    content:
+      fontSize: 14
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>[ PPT 播放器 + 知识图谱截图 ]</p>
+
+  - elementId: ppt-right-code-label
+    elementType: text
+    bounds: [730, 410, 300, 25]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>节点类型定义</p>
+
+  - elementId: ppt-right-code-box
+    elementType: shape
+    bounds: [730, 442, 490, 208]
+    shapeName: roundRect
+    adjustments: [4000]
+    fill: {type: solid, color: "#0B1120"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: ppt-right-code-text
+    elementType: text
+    bounds: [745, 452, 460, 188]
+    content:
+      fontSize: 12
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.5
+      align: [left, top]
+      text: |
+        <p><span style="color:#F59E0B;">// 知识图谱节点类型与配色</span></p>
+        <p>TYPE_ACCENT = {</p>
+        <p>  topic:      <span style="color:#A855F7;">'border-purple'</span>,</p>
+        <p>  concept:    <span style="color:#3B82F6;">'border-blue'</span>,</p>
+        <p>  key_point:  <span style="color:#10B981;">'border-emerald'</span>,</p>
+        <p>  difficulty: <span style="color:#F43F5E;">'border-rose'</span>,</p>
+        <p>  example:    <span style="color:#F59E0B;">'border-amber'</span>,</p>
+        <p>  process:    <span style="color:#06B6D4;">'border-cyan'</span>,</p>
+        <p>  <span style="color:#94A3B8;">... // 共 9 种类型</span></p>
+        <p>}</p>
+
+  - elementId: ppt-pagenum
+    elementType: text
+    bounds: [1180, 680, 40, 20]
+    content:
+      style: "$caption"
+      align: [right, middle]
+      wrap: false
+      text: |
+        <p>11</p>

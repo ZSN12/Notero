@@ -1,0 +1,290 @@
+pageType: content
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementId: feat-title
+    elementType: text
+    bounds: [60, 40, 700, 40]
+    content:
+      style: "$heading"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>核心功能总览</p>
+
+  - elementId: feat-line
+    elementType: shape
+    bounds: [60, 88, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: feat-card1-bg
+    elementType: shape
+    bounds: [60, 110, 370, 100]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: feat-card1-icon
+    elementType: icon
+    bounds: [80, 130, 28, 28]
+    iconName: "fas:microphone"
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: feat-card1-title
+    elementType: text
+    bounds: [118, 125, 290, 28]
+    content:
+      fontSize: 17
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>实时语音转录</p>
+
+  - elementId: feat-card1-desc
+    elementType: text
+    bounds: [118, 158, 290, 40]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.4
+      align: [left, top]
+      text: |
+        <p>FunASR 本地模型 + 云端降级，流式实时转录</p>
+
+  - elementId: feat-card2-bg
+    elementType: shape
+    bounds: [455, 110, 370, 100]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: feat-card2-icon
+    elementType: icon
+    bounds: [475, 130, 28, 28]
+    iconName: "fas:file-powerpoint"
+    fill: {type: solid, color: "$accent_blue"}
+
+  - elementId: feat-card2-title
+    elementType: text
+    bounds: [513, 125, 290, 28]
+    content:
+      fontSize: 17
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>PPT 课件对齐</p>
+
+  - elementId: feat-card2-desc
+    elementType: text
+    bounds: [513, 158, 290, 40]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.4
+      align: [left, top]
+      text: |
+        <p>上传课件自动提取，与转录文本时间轴对齐</p>
+
+  - elementId: feat-card3-bg
+    elementType: shape
+    bounds: [850, 110, 370, 100]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: feat-card3-icon
+    elementType: icon
+    bounds: [870, 130, 28, 28]
+    iconName: "fas:brain"
+    fill: {type: solid, color: "$accent_green"}
+
+  - elementId: feat-card3-title
+    elementType: text
+    bounds: [908, 125, 290, 28]
+    content:
+      fontSize: 17
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>AI 知识图谱</p>
+
+  - elementId: feat-card3-desc
+    elementType: text
+    bounds: [908, 158, 290, 40]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.4
+      align: [left, top]
+      text: |
+        <p>DeepSeek 分析笔记，生成结构化知识导图</p>
+
+  - elementId: feat-card4-bg
+    elementType: shape
+    bounds: [60, 230, 370, 100]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: feat-card4-icon
+    elementType: icon
+    bounds: [80, 250, 28, 28]
+    iconName: "fas:magnifying-glass"
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: feat-card4-title
+    elementType: text
+    bounds: [118, 245, 290, 28]
+    content:
+      fontSize: 17
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>RAG 智能问答</p>
+
+  - elementId: feat-card4-desc
+    elementType: text
+    bounds: [118, 278, 290, 40]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.4
+      align: [left, top]
+      text: |
+        <p>本地向量检索 + DeepSeek 流式生成答案</p>
+
+  - elementId: feat-card5-bg
+    elementType: shape
+    bounds: [455, 230, 370, 100]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: feat-card5-icon
+    elementType: icon
+    bounds: [475, 250, 28, 28]
+    iconName: "fas:clipboard-question"
+    fill: {type: solid, color: "$accent_blue"}
+
+  - elementId: feat-card5-title
+    elementType: text
+    bounds: [513, 245, 290, 28]
+    content:
+      fontSize: 17
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>AI 测验生成</p>
+
+  - elementId: feat-card5-desc
+    elementType: text
+    bounds: [513, 278, 290, 40]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.4
+      align: [left, top]
+      text: |
+        <p>基于课程内容自动生成选择题，支持答题解析</p>
+
+  - elementId: feat-card6-bg
+    elementType: shape
+    bounds: [850, 230, 370, 100]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: feat-card6-icon
+    elementType: icon
+    bounds: [870, 250, 28, 28]
+    iconName: "fas:pen-to-square"
+    fill: {type: solid, color: "$accent_green"}
+
+  - elementId: feat-card6-title
+    elementType: text
+    bounds: [908, 245, 290, 28]
+    content:
+      fontSize: 17
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>笔记编辑导出</p>
+
+  - elementId: feat-card6-desc
+    elementType: text
+    bounds: [908, 278, 290, 40]
+    content:
+      fontSize: 13
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.4
+      align: [left, top]
+      text: |
+        <p>富文本编辑、Markdown 导出、分享链接</p>
+
+  - elementId: feat-screenshot-label
+    elementType: text
+    bounds: [60, 355, 300, 25]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>产品界面截图占位</p>
+
+  - elementId: feat-screenshot-box
+    elementType: shape
+    bounds: [60, 385, 1160, 280]
+    shapeName: roundRect
+    adjustments: [6000]
+    fill: {type: solid, color: "#0F172A"}
+    border: {style: dash, width: 2, color: "$border"}
+
+  - elementId: feat-screenshot-hint
+    elementType: text
+    bounds: [440, 500, 400, 50]
+    content:
+      fontSize: 16
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>[ 请在此处放置 Dashboard 首页或笔记详情页截图 ]</p>
+
+  - elementId: feat-pagenum
+    elementType: text
+    bounds: [1180, 680, 40, 20]
+    content:
+      style: "$caption"
+      align: [right, middle]
+      wrap: false
+      text: |
+        <p>05</p>

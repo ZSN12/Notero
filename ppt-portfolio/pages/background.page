@@ -1,0 +1,335 @@
+pageType: content
+background:
+  type: solid
+  color: "$primary"
+elements:
+  - elementId: bg-title
+    elementType: text
+    bounds: [60, 40, 700, 40]
+    content:
+      style: "$heading"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>项目背景与核心痛点</p>
+
+  - elementId: bg-line
+    elementType: shape
+    bounds: [60, 88, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: bg-card1
+    elementType: shape
+    bounds: [60, 110, 560, 130]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: bg-icon1
+    elementType: icon
+    bounds: [80, 125, 28, 28]
+    iconName: "fas:circle-exclamation"
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: bg-card1-title
+    elementType: text
+    bounds: [118, 122, 480, 30]
+    content:
+      fontSize: 18
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p><strong>笔记效率低</strong></p>
+
+  - elementId: bg-card1-body
+    elementType: text
+    bounds: [118, 155, 480, 70]
+    content:
+      fontSize: 15
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.5
+      align: [left, top]
+      text: |
+        <p>课堂听讲时手动记笔记效率低，容易遗漏重点，且无法兼顾听讲与记录</p>
+
+  - elementId: bg-card2
+    elementType: shape
+    bounds: [660, 110, 560, 130]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: bg-icon2
+    elementType: icon
+    bounds: [680, 125, 28, 28]
+    iconName: "fas:file-powerpoint"
+    fill: {type: solid, color: "$accent_blue"}
+
+  - elementId: bg-card2-title
+    elementType: text
+    bounds: [718, 122, 480, 30]
+    content:
+      fontSize: 18
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p><strong>PPT 内容难定位</strong></p>
+
+  - elementId: bg-card2-body
+    elementType: text
+    bounds: [718, 155, 480, 70]
+    content:
+      fontSize: 15
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.5
+      align: [left, top]
+      text: |
+        <p>课后复习时难以快速定位 PPT 对应内容，课件与笔记处于割裂状态</p>
+
+  - elementId: bg-card3
+    elementType: shape
+    bounds: [60, 260, 560, 130]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: bg-icon3
+    elementType: icon
+    bounds: [80, 275, 28, 28]
+    iconName: "fas:sitemap"
+    fill: {type: solid, color: "$accent_green"}
+
+  - elementId: bg-card3-title
+    elementType: text
+    bounds: [118, 272, 480, 30]
+    content:
+      fontSize: 18
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p><strong>知识缺乏结构化</strong></p>
+
+  - elementId: bg-card3-body
+    elementType: text
+    bounds: [118, 305, 480, 70]
+    content:
+      fontSize: 15
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.5
+      align: [left, top]
+      text: |
+        <p>零散笔记缺乏结构化知识梳理，复习时难以建立知识体系</p>
+
+  - elementId: bg-card4
+    elementType: shape
+    bounds: [660, 260, 560, 130]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$card_bg"}
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: bg-icon4
+    elementType: icon
+    bounds: [680, 275, 28, 28]
+    iconName: "fas:robot"
+    fill: {type: solid, color: "$text_secondary"}
+
+  - elementId: bg-card4-title
+    elementType: text
+    bounds: [718, 272, 480, 30]
+    content:
+      fontSize: 18
+      color: "$text"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p><strong>AI 能力未融合</strong></p>
+
+  - elementId: bg-card4-body
+    elementType: text
+    bounds: [718, 305, 480, 70]
+    content:
+      fontSize: 15
+      color: "$text_secondary"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.5
+      align: [left, top]
+      text: |
+        <p>传统笔记工具无法与 AI 能力深度结合，缺乏智能问答与测验功能</p>
+
+  - elementId: bg-solution-bar
+    elementType: shape
+    bounds: [60, 420, 1160, 0]
+    shapeName: straightConnector1
+    border: {style: solid, width: 1, color: "$border"}
+
+  - elementId: bg-solution-label
+    elementType: text
+    bounds: [60, 440, 120, 30]
+    content:
+      fontSize: 14
+      color: "$accent"
+      fontFamily: "Liter, alimamashuheiti"
+      align: [left, middle]
+      wrap: false
+      text: |
+        <p>解决方案</p>
+
+  - elementId: bg-solution-text
+    elementType: text
+    bounds: [60, 480, 1160, 80]
+    content:
+      fontSize: 18
+      color: "$text"
+      fontFamily: "Liter, MiSans"
+      lineHeight: 1.6
+      align: [left, top]
+      text: |
+        <p><strong>Nootbook</strong> 定位：覆盖 <span style="color:$accent;">听课 → 转录 → 对齐 → 复习 → 测验</span> 的完整学习闭环，将 AI 能力深度融入每个环节</p>
+
+  - elementId: bg-flow-step1
+    elementType: shape
+    bounds: [60, 580, 180, 45]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: bg-flow-text1
+    elementType: text
+    bounds: [60, 580, 180, 45]
+    content:
+      fontSize: 14
+      color: "$primary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>实时听课</p>
+
+  - elementId: bg-flow-arrow1
+    elementType: shape
+    bounds: [250, 600, 40, 0]
+    shapeName: straightConnector1
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 2, color: "$accent"}
+
+  - elementId: bg-flow-step2
+    elementType: shape
+    bounds: [300, 580, 180, 45]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: bg-flow-text2
+    elementType: text
+    bounds: [300, 580, 180, 45]
+    content:
+      fontSize: 14
+      color: "$primary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>语音转录</p>
+
+  - elementId: bg-flow-arrow2
+    elementType: shape
+    bounds: [490, 600, 40, 0]
+    shapeName: straightConnector1
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 2, color: "$accent"}
+
+  - elementId: bg-flow-step3
+    elementType: shape
+    bounds: [540, 580, 180, 45]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: bg-flow-text3
+    elementType: text
+    bounds: [540, 580, 180, 45]
+    content:
+      fontSize: 14
+      color: "$primary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>PPT 对齐</p>
+
+  - elementId: bg-flow-arrow3
+    elementType: shape
+    bounds: [730, 600, 40, 0]
+    shapeName: straightConnector1
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 2, color: "$accent"}
+
+  - elementId: bg-flow-step4
+    elementType: shape
+    bounds: [780, 580, 180, 45]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: bg-flow-text4
+    elementType: text
+    bounds: [780, 580, 180, 45]
+    content:
+      fontSize: 14
+      color: "$primary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>AI 复习</p>
+
+  - elementId: bg-flow-arrow4
+    elementType: shape
+    bounds: [970, 600, 40, 0]
+    shapeName: straightConnector1
+    arrow: [null, "arrow"]
+    border: {style: solid, width: 2, color: "$accent"}
+
+  - elementId: bg-flow-step5
+    elementType: shape
+    bounds: [1020, 580, 180, 45]
+    shapeName: roundRect
+    adjustments: [8000]
+    fill: {type: solid, color: "$accent"}
+
+  - elementId: bg-flow-text5
+    elementType: text
+    bounds: [1020, 580, 180, 45]
+    content:
+      fontSize: 14
+      color: "$primary"
+      fontFamily: "Liter, MiSans"
+      align: [center, middle]
+      wrap: false
+      text: |
+        <p>智能测验</p>
+
+  - elementId: bg-pagenum
+    elementType: text
+    bounds: [1180, 680, 40, 20]
+    content:
+      style: "$caption"
+      align: [right, middle]
+      wrap: false
+      text: |
+        <p>04</p>
