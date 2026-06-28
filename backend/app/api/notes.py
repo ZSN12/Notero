@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
+from urllib.parse import quote
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.api.schemas import NoteResponse, NoteUpdate
@@ -183,11 +184,17 @@ def export_session_transcript_pdf(
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF 导出失败：{e}") from e
-    quoted_filename = filename.replace('"', "")
+    ascii_filename = "transcript.pdf"
+    encoded_filename = quote(filename, safe="")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{quoted_filename}"'},
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_filename}"; '
+                f"filename*=UTF-8''{encoded_filename}"
+            )
+        },
     )
 
 
