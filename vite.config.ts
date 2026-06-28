@@ -7,6 +7,7 @@ import { traeBadgePlugin } from 'vite-plugin-trae-solo-badge';
 export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const proxyTarget = env.VITE_API_PROXY_TARGET || env.VITE_API_BASE_URL || env.VITE_API_BASE;
+  const enableDevLocator = command === 'serve' && env.VITE_REACT_DEV_LOCATOR === '1';
 
   return {
     server: proxyTarget ? {
@@ -43,7 +44,7 @@ export default defineConfig(({ command, mode }) => {
     },
     plugins: [
       react({
-        babel: command === 'serve' ? {
+        babel: enableDevLocator ? {
           plugins: ['react-dev-locator'],
         } : undefined,
       }),

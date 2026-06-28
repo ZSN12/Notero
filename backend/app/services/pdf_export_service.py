@@ -30,12 +30,18 @@ def build_transcript_pdf(
     transcript_text: str,
 ) -> tuple[bytes, str]:
     """Build a Chinese-friendly transcript PDF and return (bytes, filename)."""
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-    from reportlab.pdfgen import canvas
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.pdfgen import canvas
+    except ImportError as exc:
+        raise RuntimeError(
+            "后端缺少 PDF 导出依赖 reportlab，请在 Windows 后端运行："
+            "py -3.10 -m pip install reportlab"
+        ) from exc
 
     if not transcript_text.strip():
         raise ValueError("没有可导出的转写内容")
