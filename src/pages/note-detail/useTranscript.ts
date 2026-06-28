@@ -89,6 +89,8 @@ export function useTranscript(
   const prevTranscriptRef = useRef('');
   const userEditedRef = useRef(false);
   const hasLocalChangesRef = useRef(false);
+  const transcriptTextRef = useRef('');
+  const contentBlocksRef = useRef<ContentBlock[]>([]);
   const streamChunksRef = useRef<Map<string, string>>(new Map());
   const getCurrentNotesRef = useRef<() => StudentNote[]>(() => []);
   const scheduleSaveTimerRef = useRef<number | null>(null);
@@ -107,6 +109,14 @@ export function useTranscript(
     setSaveError(null);
     setLastSaveTime(Date.now());
   }, []);
+
+  useEffect(() => {
+    transcriptTextRef.current = transcriptText;
+  }, [transcriptText]);
+
+  useEffect(() => {
+    contentBlocksRef.current = contentBlocks;
+  }, [contentBlocks]);
 
   const normalizeEditableHtml = useCallback((s: string) => normalizeHtmlText(s), []);
 
@@ -148,15 +158,47 @@ export function useTranscript(
   }, [normalizeEditableHtml]);
 
   const getCurrentTranscript = useCallback(() => {
-    const blockText = transcriptFromBlocks(contentBlocks);
-    return cleanTranscriptText(blockText || transcriptText);
-  }, [cleanTranscriptText, contentBlocks, transcriptFromBlocks, transcriptText]);
+    const blockText = transcriptFromBlocks(contentBlocksRef.current);
+    return cleanTranscriptText(blockText || transcriptTextRef.current);
+  }, [cleanTranscriptText, transcriptFromBlocks]);
+
+  const syncContentBlocksFromTranscript = useCallback((value: string) => {
+    const paragraphs = cleanTranscriptText(value)
+      .split(/\n{2,}/)
+      .map((part) => normalizeEditableHtml(part))
+      .filter(Boolean);
+    const textBlocks: ContentBlock[] = paragraphs.map((content) => ({ type: 'text', content }));
+    const currentBlocks = contentBlocksRef.current;
+    const imageBlocks = currentBlocks.filter((block) => block.type === 'image');
+
+    if (imageBlocks.length === 0) {
+      contentBlocksRef.current = textBlocks;
+      setContentBlocks(textBlocks);
+      return;
+    }
+
+    const oldTextCount = currentBlocks.filter((block) => block.type === 'text').length;
+    const mergedBlocks = [...textBlocks];
+    for (const imageBlock of imageBlocks) {
+      const originalIndex = currentBlocks.findIndex((block) => block === imageBlock);
+      const precedingText = currentBlocks
+        .slice(0, originalIndex >= 0 ? originalIndex : 0)
+        .filter((block) => block.type === 'text').length;
+      const ratio = oldTextCount > 0 ? precedingText / oldTextCount : 1;
+      const target = Math.min(mergedBlocks.length, Math.round(ratio * mergedBlocks.length));
+      mergedBlocks.splice(target, 0, imageBlock);
+    }
+    contentBlocksRef.current = mergedBlocks;
+    setContentBlocks(mergedBlocks);
+  }, [cleanTranscriptText, normalizeEditableHtml]);
 
   const updateTranscriptText = useCallback((value: string, markUserEdit = true) => {
     if (markUserEdit) markLocalChanged(true);
     else setSaveStatus('idle');
+    transcriptTextRef.current = value;
+    syncContentBlocksFromTranscript(value);
     setTranscriptText(value);
-  }, [markLocalChanged]);
+  }, [markLocalChanged, syncContentBlocksFromTranscript]);
 
   const clearStreamingTranscriptChunks = useCallback(() => {
     streamChunksRef.current.clear();
@@ -174,12 +216,15 @@ export function useTranscript(
       if (dedupedParts.some(prev => isRepeatedText(part, prev))) continue;
       dedupedParts.push(part);
     }
-    setTranscriptText(dedupedParts.join('\n\n'));
+    const nextText = dedupedParts.join('\n\n');
+    transcriptTextRef.current = nextText;
+    setTranscriptText(nextText);
   }, [isRepeatedText, markLocalChanged]);
 
   const updateContentBlocks = useCallback((blocks: ContentBlock[], markUserEdit = true, markLocalChange = markUserEdit) => {
     if (markLocalChange) markLocalChanged(markUserEdit);
     else setSaveStatus('idle');
+    contentBlocksRef.current = blocks;
     setContentBlocks(blocks);
   }, [markLocalChanged]);
 
@@ -187,11 +232,15 @@ export function useTranscript(
     setSentencesWithTime([]);
     setActiveSentenceIndex(null);
     if (!keepPptBlocks) {
+      contentBlocksRef.current = [];
       setContentBlocks([]);
     }
   }, []);
 
-  const clearContentBlocks = useCallback(() => setContentBlocks([]), []);
+  const clearContentBlocks = useCallback(() => {
+    contentBlocksRef.current = [];
+    setContentBlocks([]);
+  }, []);
 
   // ── WebSocket streaming actions ──
   const receivePartial = useCallback((text: string) => {
@@ -576,7 +625,7 @@ export function useTranscript(
     // Always keep the transcript marker so we can distinguish "user saved an empty
     // transcript" from "content was never set" when the note is reloaded.
     const fullContent = `## 语音转文字\n\n${cleanTranscript}\n\n---\n\n${notesContent}`.trim();
-    const layoutBlocks = layoutFromNoteParts(cleanTranscript, contentBlocks, currentNotes);
+    const layoutBlocks = layoutFromNoteParts(cleanTranscript, contentBlocksRef.current, currentNotes);
     if (fullContent || currentNotes.length > 0) {
       setSaveStatus('saving');
       setSaveError(null);
@@ -600,7 +649,7 @@ export function useTranscript(
     hasLocalChangesRef.current = false;
     setHasLocalChanges(false);
     return true;
-  }, [cleanTranscriptText, contentBlocks, getCurrentTranscript, normalizeEditableHtml, sessionId]);
+  }, [cleanTranscriptText, getCurrentTranscript, normalizeEditableHtml, sessionId]);
 
   const setGetCurrentNotes = useCallback((fn: () => StudentNote[]) => {
     getCurrentNotesRef.current = fn;
@@ -631,10 +680,14 @@ export function useTranscript(
   }, []);
 
   const updateContentBlockDraft = useCallback((index: number, content: string) => {
+    const base = contentBlocksRef.current;
+    const updated = [...base];
+    if (updated[index]) updated[index] = { ...updated[index], content };
+    contentBlocksRef.current = updated;
     setContentBlocks((prev) => {
-      const updated = [...prev];
-      if (updated[index]) updated[index] = { ...updated[index], content };
-      return updated;
+      const next = [...prev];
+      if (next[index]) next[index] = { ...next[index], content };
+      return next;
     });
     markLocalChanged(true);
   }, [markLocalChanged]);
@@ -645,9 +698,15 @@ export function useTranscript(
 
   useEffect(() => {
     return () => {
-      if (scheduleSaveTimerRef.current) window.clearTimeout(scheduleSaveTimerRef.current);
+      if (scheduleSaveTimerRef.current) {
+        window.clearTimeout(scheduleSaveTimerRef.current);
+        scheduleSaveTimerRef.current = null;
+      }
+      if (hasLocalChangesRef.current) {
+        void saveContent(getCurrentNotesRef.current(), false);
+      }
     };
-  }, []);
+  }, [saveContent]);
 
   useEffect(() => {
     if (!isRecording || !sessionId) return;
@@ -755,7 +814,11 @@ export function useTranscript(
       if (hasLocalChangesRef.current && sessionId) {
         const token = localStorage.getItem('notero_token');
         const cleanTranscript = cleanTranscriptText(getCurrentTranscript());
-        const payload = JSON.stringify({ content: `## 语音转文字\n\n${cleanTranscript}` });
+        const currentNotes = getCurrentNotesRef.current();
+        const notesContent = currentNotes.map(n => normalizeEditableHtml(n.content)).filter(Boolean).join('\n\n');
+        const content = `## 语音转文字\n\n${cleanTranscript}\n\n---\n\n${notesContent}`.trim();
+        const layoutBlocks = layoutFromNoteParts(cleanTranscript, contentBlocksRef.current, currentNotes);
+        const payload = JSON.stringify({ content, layout_blocks: layoutBlocks });
         try {
           const xhr = new XMLHttpRequest();
           xhr.open('PUT', `/api/notes/session/${sessionId}`, false);
@@ -769,7 +832,7 @@ export function useTranscript(
     };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
-  }, [sessionId, cleanTranscriptText, getCurrentTranscript]);
+  }, [sessionId, cleanTranscriptText, getCurrentTranscript, normalizeEditableHtml]);
 
   useEffect(() => {
     if (!isRecording || !sessionId || slides.length === 0) return;

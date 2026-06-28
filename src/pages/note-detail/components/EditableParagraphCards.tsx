@@ -171,7 +171,7 @@ export const EditableParagraphCards = forwardRef<EditableParagraphCardsHandle, E
       });
     }, [paragraphs, containerRef]);
 
-    const handleInput = () => {
+    const handleInput = useCallback(() => {
       onMarkUserEdited();
       if (isComposingRef.current) return;
       const index = activeIndexRef.current;
@@ -181,10 +181,28 @@ export const EditableParagraphCards = forwardRef<EditableParagraphCardsHandle, E
           draftMapRef.current.set(index, sanitizeHTML(el.innerHTML) as unknown as string);
         }
       }
+      const draft = readDraftFromDom();
+      onUpdateDraft(draft);
       onClearSentences();
       scheduleCommit();
-      history.record(readDraftFromDom());
-    };
+      history.record(draft);
+    }, [history, onClearSentences, onMarkUserEdited, onUpdateDraft, readDraftFromDom, scheduleCommit]);
+
+    useEffect(() => {
+      const container = containerRef.current;
+      if (!container || typeof MutationObserver === 'undefined') return;
+
+      const observer = new MutationObserver(() => {
+        if (activeIndexRef.current === null || isComposingRef.current) return;
+        handleInput();
+      });
+      observer.observe(container, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      return () => observer.disconnect();
+    }, [containerRef, handleInput]);
 
     const handleCompositionStart = () => {
       isComposingRef.current = true;
