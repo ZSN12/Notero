@@ -31,7 +31,17 @@ export async function uploadPPT(file: File, sessionId: string): Promise<{ status
     headers: authHeaders(),
     body: formData,
   });
-  if (!res.ok) throw new Error(`PPT upload failed: ${res.status}`);
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => '');
+    let message = errorText || `PPT/PDF 上传失败 (${res.status})`;
+    try {
+      const parsed = JSON.parse(errorText);
+      if (typeof parsed.detail === 'string') message = parsed.detail;
+    } catch {
+      // Keep plain text response as the error message.
+    }
+    throw new Error(message);
+  }
   return res.json();
 }
 

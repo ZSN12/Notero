@@ -666,10 +666,21 @@ def extract_text_from_slide(slide) -> str:
 
 def extract_keywords_from_ppt(ppt_path: str, course_title: str) -> List[str]:
     """Extract potential domain keywords from PPT content."""
-    prs = Presentation(ppt_path)
-    all_text = ""
-    for slide in prs.slides:
-        all_text += "\n" + extract_text_from_slide(slide)
+    if Path(ppt_path).suffix.lower() == ".pdf":
+        try:
+            import fitz
+        except ImportError as exc:
+            raise RuntimeError("缺少 PyMuPDF，无法从 PDF 提取关键词。请运行 pip install PyMuPDF") from exc
+
+        all_text = ""
+        with fitz.open(ppt_path) as doc:
+            for page in doc:
+                all_text += "\n" + page.get_text("text")
+    else:
+        prs = Presentation(ppt_path)
+        all_text = ""
+        for slide in prs.slides:
+            all_text += "\n" + extract_text_from_slide(slide)
 
     chinese_terms = re.findall(r'[一-鿿]{2,6}', all_text)
     english_terms = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', all_text)
@@ -686,6 +697,49 @@ def extract_keywords_from_ppt(ppt_path: str, course_title: str) -> List[str]:
     return keywords[:15]
 
 
+def _parse_pdf_to_slides(pdf_path: str, output_dir: Optional[str] = None) -> List[dict]:
+    """Parse a PDF handout/deck into slide-like page records."""
+    try:
+        import fitz
+    except ImportError as exc:
+        raise RuntimeError("缺少 PyMuPDF，无法解析 PDF。请运行 pip install PyMuPDF") from exc
+
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        for old in os.listdir(output_dir):
+            if old.startswith("slide_") and old.endswith(".png"):
+                try:
+                    os.remove(os.path.join(output_dir, old))
+                except Exception:
+                    logger.warning("suppressed_exception", exc_info=True)
+
+    slides: List[dict] = []
+    with fitz.open(pdf_path) as doc:
+        for idx, page in enumerate(doc, start=1):
+            text = page.get_text("text").strip()
+            title = ""
+            for line in text.splitlines():
+                line = line.strip()
+                if line:
+                    title = line[:80]
+                    break
+
+            image_path = ""
+            if output_dir:
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                image_path = f"slide_{idx:02d}.png"
+                pix.save(os.path.join(output_dir, image_path))
+
+            slides.append({
+                "page": idx,
+                "title": title,
+                "text": text,
+                "image_path": image_path,
+            })
+
+    return slides
+
+
 def parse_ppt_to_slides(ppt_path: str, output_dir: Optional[str] = None) -> List[dict]:
     """Parse PPT and return list of slides with text and image metadata.
 
@@ -699,6 +753,9 @@ def parse_ppt_to_slides(ppt_path: str, output_dir: Optional[str] = None) -> List
         text: str
         image_path: str  (e.g. "slide_01.png")
     """
+    if Path(ppt_path).suffix.lower() == ".pdf":
+        return _parse_pdf_to_slides(ppt_path, output_dir=output_dir)
+
     prs = Presentation(ppt_path)
     slide_count = len(prs.slides)
 

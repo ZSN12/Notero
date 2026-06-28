@@ -172,12 +172,17 @@ def export_session_transcript_pdf(
     if not transcript_text.strip():
         raise HTTPException(status_code=400, detail="没有可导出的转写内容")
 
-    pdf_bytes, filename = build_transcript_pdf(
-        title=session.title,
-        notebook_title=session.notebook.title if session.notebook else "",
-        duration=session.duration,
-        transcript_text=transcript_text,
-    )
+    try:
+        pdf_bytes, filename = build_transcript_pdf(
+            title=session.title,
+            notebook_title=session.notebook.title if session.notebook else "",
+            duration=session.duration,
+            transcript_text=transcript_text,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF 导出失败：{e}") from e
     quoted_filename = filename.replace('"', "")
     return Response(
         content=pdf_bytes,

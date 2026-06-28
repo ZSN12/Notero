@@ -229,16 +229,27 @@ class BaseAgent(ABC):
     def parse_json(self, raw: str, repair: bool = True) -> dict:
         """Parse LLM JSON output, stripping markdown fences and optionally repairing."""
         text = self._strip_code_fences(raw)
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as e:
-            if repair:
-                repaired = self._repair_json(text)
-                try:
-                    return json.loads(repaired)
-                except json.JSONDecodeError:
-                    pass
-            raise ValueError(f"Agent '{self.role}' 返回的 JSON 格式无效: {e}")
+        candidates = [text]
+        if repair:
+            extracted = self._extract_json_object(text)
+            if extracted and extracted != text:
+                candidates.append(extracted)
+
+            for candidate in list(candidates):
+                repaired = self._repair_json(candidate)
+                if repaired not in candidates:
+                    candidates.append(repaired)
+
+        last_error: json.JSONDecodeError | None = None
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError as e:
+                last_error = e
+
+        if last_error is None:
+            raise ValueError(f"Agent '{self.role}' 返回的 JSON 格式无效")
+        raise ValueError(f"Agent '{self.role}' 返回的 JSON 格式无效: {last_error}")
 
     def save_to_vocabulary(
         self,
@@ -278,6 +289,36 @@ class BaseAgent(ABC):
         return raw.strip()
 
     @staticmethod
+    def _extract_json_object(text: str) -> str:
+        """Return the first balanced top-level JSON object from model text."""
+        start = text.find("{")
+        if start < 0:
+            return text.strip()
+
+        depth = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(text[start:], start=start):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1].strip()
+        return text[start:].strip()
+
+    @staticmethod
     def _repair_json(text: str) -> str:
         """Best-effort JSON repair: close strings and balance brackets.
 
@@ -287,6 +328,13 @@ class BaseAgent(ABC):
         repaired = text.strip()
         while repaired.endswith("\\"):
             repaired = repaired[:-1]
+
+        # Common model mistakes: trailing commas and missing commas before the
+        # next object key/item. These regexes intentionally only target places
+        # that look like JSON structural boundaries.
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        repaired = re.sub(r'([}\]"])\s+(?="[^"\n\r]+?"\s*:)', r"\1, ", repaired)
+        repaired = re.sub(r"([}\]])\s+(?=[{\[])", r"\1, ", repaired)
 
         # Close an unterminated string.
         in_string = False

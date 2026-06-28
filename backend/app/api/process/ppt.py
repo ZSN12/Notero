@@ -502,7 +502,7 @@ async def upload_ppt(
     except Exception as e:
         db.rollback()
         logger.exception("PPT upload failed")
-        raise HTTPException(status_code=500, detail="PPT processing failed")
+        raise HTTPException(status_code=500, detail=f"PPT/PDF 处理失败：{e}")
 
 
 @router.post("/ppt-align")
