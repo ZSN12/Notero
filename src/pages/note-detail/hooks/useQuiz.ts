@@ -128,6 +128,16 @@ export function useQuiz(
   useEffect(() => {
     if (!sessionId) {
       setActualBankStatus(null);
+      setMastery(null);
+      return;
+    }
+    loadBankStatus();
+    loadMastery();
+  }, [sessionId, loadBankStatus, loadMastery]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setActualBankStatus(null);
       return;
     }
     const stageStatus = processingStatus?.stages.quiz_bank?.status;
@@ -234,6 +244,6 @@ export function useQuiz(
 
   return {
     state: { showQuiz, showQuizQA, quizList, activeQuiz, isGeneratingQuiz, quizAnswers, quizSubmitted, quizError, bankStatus, isRebuildingBank, generatingElapsed, mastery },
-    actions: { setShowQuiz, setShowQuizQA, setActiveQuiz, setQuizAnswers, setQuizSubmitted, setQuizError, handleRebuildBank, handleGenerateQuiz, handleOpenQuiz, handleSubmitQuiz, handleDeleteQuiz, loadMastery },
+    actions: { setShowQuiz, setShowQuizQA, setActiveQuiz, setQuizAnswers, setQuizSubmitted, setQuizError, handleRebuildBank, handleGenerateQuiz, handleOpenQuiz, handleSubmitQuiz, handleDeleteQuiz, loadMastery, loadBankStatus },
   };
 }

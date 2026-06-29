@@ -318,8 +318,8 @@ def test_bank_status_ready_after_sync_setup():
         assert resp.json()["question_count"] == 3
 
 
-def test_bank_status_stale_after_content_change():
-    """Changing note content makes bank stale."""
+def test_bank_status_stays_ready_after_manual_content_edit():
+    """Manual note edits are accepted as the current version instead of expiring the bank."""
     with TestClient(app) as client:
         headers = auth_headers(client)
         _, session_id = _create_notebook_session_note(client, headers)
@@ -333,7 +333,7 @@ def test_bank_status_stale_after_content_change():
         )
 
         resp = client.get(f"/api/quiz/session/{session_id}/bank/status", headers=headers)
-        assert resp.json()["status"] == "stale"
+        assert resp.json()["status"] == "ready"
 
 
 def test_generate_quiz_from_bank_no_ai_call():
@@ -637,6 +637,42 @@ def test_list_quizzes_shows_score():
         assert quizzes[0]["submitted"] is True
         assert quizzes[0]["score"] is not None
         assert quizzes[0]["score"]["percentage"] == pytest.approx(66.7, abs=0.1)
+
+
+def test_review_mode_and_mastery_summary():
+    """Mastery summary reflects diagnostic mistakes and review mode is accepted."""
+    with TestClient(app) as client:
+        headers = auth_headers(client)
+        _, session_id = _create_notebook_session_note(client, headers)
+        _setup_bank_sync(client, headers, session_id)
+
+        diagnostic = client.post(
+            f"/api/quiz/session/{session_id}/generate",
+            json={"mode": "diagnostic"},
+            headers=headers,
+        )
+        assert diagnostic.status_code == 200
+        quiz_id = diagnostic.json()["quiz_id"]
+
+        submit = client.post(
+            f"/api/quiz/session/{session_id}/{quiz_id}/submit",
+            json={"answers": {"q1": "A", "q2": "B", "q3": "A"}},
+            headers=headers,
+        )
+        assert submit.status_code == 200
+
+        mastery = client.get(f"/api/quiz/session/{session_id}/mastery", headers=headers)
+        assert mastery.status_code == 200
+        summary = mastery.json()["summary"]
+        assert summary["pending_review_count"] >= 1
+
+        review = client.post(
+            f"/api/quiz/session/{session_id}/generate",
+            json={"mode": "review"},
+            headers=headers,
+        )
+        assert review.status_code == 200
+        assert review.json()["mode"] == "review"
 
 
 def test_quiz_survives_bank_rebuild():

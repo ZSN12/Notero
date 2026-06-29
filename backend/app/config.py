@@ -119,7 +119,6 @@ FUNASR_PUNC_MODEL = os.getenv("FUNASR_PUNC_MODEL", "ct-punc")
 AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS") or 600)
 AGENT_HEARTBEAT_SECONDS = int(os.getenv("AGENT_HEARTBEAT_SECONDS") or 60)
 
-
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name, "").strip().lower()
     if raw in ("1", "true", "yes", "on"):
@@ -127,6 +126,18 @@ def _bool_env(name: str, default: bool) -> bool:
     if raw in ("0", "false", "no", "off"):
         return False
     return default
+
+
+# Web search augmentation
+# WEB_SEARCH_ENABLED=1 plus a provider key enables optional online context for
+# RAG and quiz-bank backfill. Keep keys on the Windows backend; the Mac frontend
+# should only call the local /api proxy.
+WEB_SEARCH_ENABLED = _bool_env("WEB_SEARCH_ENABLED", False)
+WEB_SEARCH_PROVIDER = os.getenv("WEB_SEARCH_PROVIDER", "tavily").strip().lower()
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "")
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS") or 5)
+WEB_SEARCH_TIMEOUT_SECONDS = float(os.getenv("WEB_SEARCH_TIMEOUT_SECONDS") or 8)
 
 
 # PPT insertion matching strategy

@@ -7,6 +7,7 @@ export function useRAG() {
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchScope, setSearchScope] = useState<'session' | 'notebook'>('session');
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [messages, setMessages] = useState<RAGMessage[]>([]);
   const [ragAnswer, setRagAnswer] = useState('');
   const [ragSources, setRagSources] = useState<RAGSource[]>([]);
@@ -135,11 +136,12 @@ export function useRAG() {
             abortRef.current = null;
           },
         },
+        { webSearch: webSearchEnabled },
       );
 
       abortRef.current = abort;
     },
-    [searchQuery, isAskingRAG, searchScope],
+    [searchQuery, isAskingRAG, searchScope, webSearchEnabled],
   );
 
   return {
@@ -147,6 +149,7 @@ export function useRAG() {
       showSearch,
       searchQuery,
       searchScope,
+      webSearchEnabled,
       messages,
       ragAnswer,
       ragSources,
@@ -158,6 +161,7 @@ export function useRAG() {
       setShowSearch,
       setSearchQuery,
       setSearchScope,
+      setWebSearchEnabled,
       loadMessages,
       clearMessages,
       handleRAGAsk,

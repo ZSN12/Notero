@@ -319,6 +319,10 @@ export interface RAGSource {
   metadata?: Record<string, unknown>;
 }
 
+export interface RAGAskOptions {
+  webSearch?: boolean;
+}
+
 export interface RAGMessage {
   id: string;
   session_id: string;

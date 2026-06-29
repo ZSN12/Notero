@@ -8,6 +8,7 @@ from app.agents.base import AgentContext, AgentResult, BaseAgent
 from app.agents.normalizers import normalize_quiz_data
 from app.services.agent_state_service import set_agent_progress, set_agent_ready
 from app.services.vector_service import _compute_session_content_hash
+from app.services.web_search_service import format_web_results, search_web
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +248,41 @@ class QuizAgent(BaseAgent):
                         seen_normalized.add(norm)
                         deduped.append(q)
                 all_questions = deduped
+
+            if 0 < len(all_questions) < self.MIN_TOTAL_QUESTIONS:
+                self._update_progress(ctx, 0.94, "联网搜索补充题目素材")
+                search_query = f"{title} {keywords} 核心概念 例题 易错点"
+                web_results = search_web(search_query, max_results=3)
+                web_context = format_web_results(web_results, max_chars=3500)
+                if web_context:
+                    missing = self.MIN_TOTAL_QUESTIONS - len(all_questions)
+                    existing_texts = [q["question"] for q in all_questions]
+                    augmented_content = (
+                        f"{content_text}\n\n"
+                        "--- 联网补充资料（仅用于补充背景；题目必须围绕本课知识点）---\n"
+                        f"{web_context}"
+                    )
+                    fill = self._call_batch(
+                        prompt_template,
+                        session_id,
+                        title,
+                        keywords,
+                        augmented_content,
+                        count=missing,
+                        focus=(
+                            "请利用联网补充资料扩展本课知识点的考法，但不要生成脱离本课内容的题目。"
+                            "优先补充应用场景、对比区别、易错点和定义辨析题。"
+                            "若题目依据联网资料，请在 source.source_type 使用 web，并在 snippet 中写明网页标题或摘要。"
+                        ),
+                        existing_questions=existing_texts,
+                        retry=False,
+                    )
+                    for q in fill:
+                        norm = self._normalize_question(q.get("question", ""))
+                        if norm and norm not in seen_normalized:
+                            seen_normalized.add(norm)
+                            deduped.append(q)
+                    all_questions = deduped
 
             if len(all_questions) < self.MIN_TOTAL_QUESTIONS:
                 warning_message = f"题量不足（仅生成 {len(all_questions)} 题）"

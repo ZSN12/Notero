@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react';
-import { Loader2, Sparkles, Trash2, X, ChevronDown } from 'lucide-react';
+import { ChevronDown, Globe2, Loader2, Sparkles, Trash2, X } from 'lucide-react';
 import type { RAGMessage, RAGSource } from '@/services/api';
 import RagSourceCards from './RagSourceCards';
 
@@ -11,6 +11,8 @@ interface RagChatPanelProps {
   isAskingRAG: boolean;
   searchScope: 'session' | 'notebook';
   onSearchScopeChange: (scope: 'session' | 'notebook') => void;
+  webSearchEnabled: boolean;
+  onWebSearchEnabledChange: (enabled: boolean) => void;
   ragError: string | null;
   ragStatus: string | null;
   streamingAnswer: string;
@@ -29,6 +31,8 @@ function RagChatPanel({
   isAskingRAG,
   searchScope,
   onSearchScopeChange,
+  webSearchEnabled,
+  onWebSearchEnabledChange,
   ragError,
   ragStatus,
   streamingAnswer,
@@ -221,6 +225,20 @@ function RagChatPanel({
               本课程
             </button>
           </div>
+          <button
+            type="button"
+            onClick={() => onWebSearchEnabledChange(!webSearchEnabled)}
+            disabled={isAskingRAG}
+            title="联网增强"
+            className={`h-9 px-2 rounded-lg border text-[10px] font-medium flex items-center gap-1 transition-colors flex-shrink-0 ${
+              webSearchEnabled
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-600 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300'
+                : 'border-slate-200 dark:border-slate-600 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700'
+            } disabled:opacity-50`}
+          >
+            <Globe2 className="w-3.5 h-3.5" />
+            联网
+          </button>
           <button
             onClick={onSubmit}
             disabled={isAskingRAG || !searchQuery.trim()}

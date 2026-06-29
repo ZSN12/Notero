@@ -230,8 +230,8 @@ def test_status_indexed_after_rebuild():
         assert resp.json()["status"] == "indexed"
 
 
-def test_status_stale_after_content_change():
-    """Modifying note content should make status 'stale'."""
+def test_status_stays_indexed_after_manual_content_edit():
+    """Manual note edits are accepted as the current version instead of expiring the index."""
     with TestClient(app) as client:
         headers = auth_headers(client)
         _, session_id = _create_notebook_session_note(client, headers)
@@ -255,13 +255,13 @@ def test_status_stale_after_content_change():
             headers=headers,
         )
 
-        # Status should now be stale
+        # Manual edits should not immediately make the UI show expired content.
         resp = client.get(f"/api/vector/session/{session_id}/status", headers=headers)
-        assert resp.json()["status"] == "stale"
+        assert resp.json()["status"] == "indexed"
 
 
 def test_status_back_to_indexed_after_rebuild():
-    """Rebuilding after stale should bring status back to 'indexed'."""
+    """Rebuilding after a manual edit keeps status indexed."""
     with TestClient(app) as client:
         headers = auth_headers(client)
         _, session_id = _create_notebook_session_note(client, headers)
@@ -281,9 +281,9 @@ def test_status_back_to_indexed_after_rebuild():
             headers=headers,
         )
 
-        # Should be stale
+        # Manual edits keep the previous index accepted until the user explicitly rebuilds.
         resp = client.get(f"/api/vector/session/{session_id}/status", headers=headers)
-        assert resp.json()["status"] == "stale"
+        assert resp.json()["status"] == "indexed"
 
         # Rebuild
         client.post(f"/api/vector/session/{session_id}/rebuild", headers=headers)
@@ -293,8 +293,8 @@ def test_status_back_to_indexed_after_rebuild():
         assert resp.json()["status"] == "indexed"
 
 
-def test_status_stale_after_layout_blocks_change():
-    """Changing layout_blocks should make status 'stale'."""
+def test_status_stays_indexed_after_layout_blocks_change():
+    """Layout-block edits are accepted as manual cleanup instead of expiring the index."""
     with TestClient(app) as client:
         headers = auth_headers(client)
         _, session_id = _create_notebook_session_note(client, headers)
@@ -317,7 +317,7 @@ def test_status_stale_after_layout_blocks_change():
         )
 
         resp = client.get(f"/api/vector/session/{session_id}/status", headers=headers)
-        assert resp.json()["status"] == "stale"
+        assert resp.json()["status"] == "indexed"
 
 
 def test_empty_note_status():

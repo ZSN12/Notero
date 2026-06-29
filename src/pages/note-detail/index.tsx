@@ -40,6 +40,7 @@ import { QuizDrawer } from './components/QuizDrawer';
 import { RagSearchModal } from './components/RagSearchModal';
 import { ShareModal } from './components/ShareModal';
 import { DragPreviewOverlay } from './components/DragPreviewOverlay';
+import { TodayReviewCard } from './components/TodayReviewCard';
 
 export { NoteEditableParagraphCards as EditableParagraphCards };
 
@@ -142,6 +143,7 @@ export default function NoteDetail() {
     if (rawType === 'ppt') return 'PPT';
     if (rawType === 'transcript') return '转写';
     if (rawType === 'note') return '笔记';
+    if (rawType === 'web') return '网页';
     return '资料';
   }, []);
 
@@ -193,6 +195,11 @@ export default function NoteDetail() {
   const handleRagSourceClick = useCallback(
     (source: RAGSource, closePanel?: () => void) => {
       closePanel?.();
+      if (source.source_type === 'web') {
+        const url = typeof source.metadata?.url === 'string' ? source.metadata.url : source.block_id;
+        if (url) window.open(url, '_blank', 'noopener,noreferrer');
+        return;
+      }
       if (source.session_id && source.session_id !== sessionId) {
         navigate(`/subject/${source.notebook_id}/session/${source.session_id}`, { state: { ragSource: source } });
         return;
@@ -628,6 +635,8 @@ export default function NoteDetail() {
         onDismissPPTError={() => ppt.actions.setUploadError(null)}
         onDismissAudioError={() => audioUpload.actions.setAudioUploadError(null)}
       />
+
+      <TodayReviewCard quiz={quiz} />
 
       {/* ---- Three-column layout (sidebars overlay on tablet) ---- */}
       <div className="flex-1 flex overflow-hidden">

@@ -186,8 +186,8 @@ def test_generate_mind_map_reuses_running_task(mock_openai_cls):
 
 
 @patch("app.core.llm.OpenAI")
-def test_mind_map_stale_after_content_change(mock_openai_cls):
-    """After modifying note content, status should be 'stale'."""
+def test_mind_map_stays_ready_after_manual_content_edit(mock_openai_cls):
+    """Manual note edits are accepted as the current version instead of expiring the mind map."""
     mock_client = MagicMock()
     mock_openai_cls.return_value = mock_client
     import json
@@ -216,9 +216,9 @@ def test_mind_map_stale_after_content_change(mock_openai_cls):
             headers=headers,
         )
 
-        # Should be stale
+        # Manual edits should not immediately make generated materials look expired.
         resp = client.get(f"/api/mindmap/session/{session_id}", headers=headers)
-        assert resp.json()["status"] == "stale"
+        assert resp.json()["status"] == "ready"
 
 
 @patch("app.core.llm.OpenAI")

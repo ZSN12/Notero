@@ -25,6 +25,7 @@ from app.middleware.metrics import observe_llm_call
 from app.agents.rag_context_agent import RAGContextAgent
 from app.agents.rag_memory_agent import RAGMemoryAgent
 from app.core.llm import ChatMessage, get_default_chat_provider
+from app.services.web_search_service import format_web_results, search_web
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class RAGAskRequest(BaseModel):
     session_id: Optional[str] = None
     notebook_id: Optional[str] = None
     top_k: int = Field(5)
+    web_search: bool = False
 
 
 class SourceItem(BaseModel):
@@ -243,7 +245,12 @@ def rag_ask(
         logger.exception("rag_search_failed")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
-    # Step 3: Build context from retrieved chunks
+    # Step 3: Optionally retrieve public web context. Local classroom material
+    # remains the primary source; web results are supplemental and explicitly
+    # tagged so the model can cite them separately.
+    web_results = search_web(standalone_query, max_results=3) if req.web_search else []
+
+    # Step 4: Build context from retrieved chunks
     context_lines = []
     for i, r in enumerate(results, 1):
         source = _source_payload(r)
@@ -259,6 +266,17 @@ def rag_ask(
             f"[{i}] 来源：{source['session_title']}（{source['source_type']}）{location_text}\n"
             f"内容：{source['snippet']}\n"
         )
+    web_offset = len(context_lines)
+    for i, result in enumerate(web_results, 1):
+        text = (result.content or result.snippet or "").strip()
+        if not text:
+            continue
+        context_lines.append(
+            f"[{web_offset + i}] 来源：联网资料（web）\n"
+            f"标题：{result.title}\n"
+            f"URL：{result.url}\n"
+            f"内容：{text[:900]}\n"
+        )
     context = "\n".join(context_lines) if context_lines else "（未找到相关课堂资料）"
 
     # Get course info
@@ -271,19 +289,24 @@ def rag_ask(
 
     conversation_context = _build_conversation_context(context_summary, history)
 
-    # Step 4: Render prompt
+    # Step 5: Render prompt
     prompt_template = load_prompt("rag_qa")
+    web_context = format_web_results(web_results)
     prompt = prompt_template.render(
         course_title=course_title,
         keywords=keywords,
         context=context,
+        web_context=web_context or "（未启用或未找到联网资料）",
         conversation_context=conversation_context,
         query=req.query,
     )
 
-    # Step 5: Stream response
+    # Step 6: Stream response
     def generate():
-        yield f"data: {json.dumps({'type': 'status', 'message': f'找到 {len(results)} 条相关资料'}, ensure_ascii=False)}\n\n"
+        status_message = f"找到 {len(results)} 条课堂资料"
+        if req.web_search:
+            status_message += f"，{len(web_results)} 条联网资料"
+        yield f"data: {json.dumps({'type': 'status', 'message': status_message}, ensure_ascii=False)}\n\n"
 
         # Derive the most recent conversation summary before adding the new turn.
         prior_summary = ""
@@ -319,6 +342,7 @@ def rag_ask(
 
         # Send sources
         sources = [_source_payload(r) for r in results]
+        sources.extend(result.to_source(len(sources) + i + 1) for i, result in enumerate(web_results))
         yield f"data: {json.dumps({'type': 'sources', 'sources': sources}, ensure_ascii=False)}\n\n"
 
         # Persist assistant message and a condensed summary for future turns

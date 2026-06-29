@@ -49,6 +49,8 @@ export function RagSearchModal({
           isAskingRAG={rag.state.isAskingRAG}
           searchScope={rag.state.searchScope}
           onSearchScopeChange={rag.actions.setSearchScope}
+          webSearchEnabled={rag.state.webSearchEnabled}
+          onWebSearchEnabledChange={rag.actions.setWebSearchEnabled}
           ragError={rag.state.ragError}
           ragStatus={rag.state.ragStatus}
           streamingAnswer={rag.state.ragAnswer}

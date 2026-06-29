@@ -1,11 +1,12 @@
 import { API_BASE, authHeaders } from './core';
-import type { RAGCallbacks, RAGMessage, RAGSource } from './types';
+import type { RAGAskOptions, RAGCallbacks, RAGMessage, RAGSource } from './types';
 
 export function askRAG(
   query: string,
   sessionId: string | undefined,
   notebookId: string | undefined,
   callbacks: RAGCallbacks,
+  options: RAGAskOptions = {},
 ): { abort: () => void } {
   const controller = new AbortController();
 
@@ -14,7 +15,13 @@ export function askRAG(
       const res = await fetch(`${API_BASE}/api/rag/ask`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, session_id: sessionId, notebook_id: notebookId, top_k: 5 }),
+        body: JSON.stringify({
+          query,
+          session_id: sessionId,
+          notebook_id: notebookId,
+          top_k: 5,
+          web_search: Boolean(options.webSearch),
+        }),
         signal: controller.signal,
       });
 

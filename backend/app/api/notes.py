@@ -6,9 +6,9 @@ from urllib.parse import quote
 from app.core.database import get_db
 from app.core.auth import get_current_user
 from app.api.schemas import NoteResponse, NoteUpdate
-from app.models import Note, Session as DBSession, User
+from app.models import Note, Session as DBSession, User, VectorChunk
 from app.services.session_service import get_user_session as _get_session_by_user
-from app.services.state_service import get_state, set_stale
+from app.services.state_service import get_state, set_ready
 from app.services.vector_service import _compute_session_content_hash
 from app.services.note_utils import _extract_transcript_from_content, get_canonical_transcript_text
 from app.services.pdf_export_service import build_transcript_pdf
@@ -198,16 +198,43 @@ def export_session_transcript_pdf(
     )
 
 
-def _mark_stale_if_changed(session_id: str, db: Session) -> None:
-    """Mark derived outputs stale when note content changes."""
-    note = db.query(Note).filter(Note.session_id == session_id).first()
-    if not note:
-        return
+def _acknowledge_manual_edit(session_id: str, note: Note, db: Session) -> None:
+    """Treat a user's manual edit as the accepted current version.
+
+    Formatting tweaks and transcript cleanup should not immediately make the UI
+    say generated materials are expired. Users can still explicitly regenerate
+    quiz banks, mind maps, or vector indexes when they want fresh AI output.
+    """
     current_hash = _compute_session_content_hash(note)
-    for stage in ("vector_index", "summary", "mindmap", "quiz_bank"):
+
+    vocabulary = note.vocabulary if isinstance(note.vocabulary, list) else []
+    next_vocabulary = []
+    vocabulary_changed = False
+    for item in vocabulary:
+        if isinstance(item, dict) and item.get("kind") in (
+            "mind_map",
+            "organized_transcript",
+            "quiz_bank",
+        ) and item.get("content_hash") != current_hash:
+            next_item = dict(item)
+            next_item["content_hash"] = current_hash
+            next_vocabulary.append(next_item)
+            vocabulary_changed = True
+        else:
+            next_vocabulary.append(item)
+    if vocabulary_changed:
+        note.vocabulary = next_vocabulary
+
+    for stage in ("transcript_organize", "vector_index", "mindmap", "quiz_bank"):
         state = get_state(db, session_id, stage)
-        if state and state.status == "ready" and state.content_hash != current_hash:
-            set_stale(db, session_id, stage, content_hash=current_hash)
+        if state and state.status in ("ready", "stale") and state.content_hash != current_hash:
+            set_ready(db, session_id, stage, content_hash=current_hash, commit=False)
+
+    for chunk in db.query(VectorChunk).filter(VectorChunk.session_id == session_id).all():
+        meta = dict(chunk.chunk_meta or {})
+        if meta.get("session_content_hash") != current_hash:
+            meta["session_content_hash"] = current_hash
+            chunk.chunk_meta = meta
 
 
 @router.put("/session/{session_id}", response_model=NoteResponse)
@@ -236,7 +263,7 @@ def update_note(
     if 'annotations' in update_payload:
         note.annotations = data.annotations
     _sync_transcript_from_content(note)
+    _acknowledge_manual_edit(session_id, note, db)
     db.commit()
     db.refresh(note)
-    _mark_stale_if_changed(session_id, db)
     return serialize_note(note, session_id)
