@@ -1,11 +1,23 @@
 """Unified agent state synchronization and stale-task healing.
 
-This module provides atomic updates across three representations of agent
-progress:
+The authoritative source of agent execution state is the ``Task`` row
+(execution granularity, progress, error message). This module keeps two
+derived representations in sync at the *right* frequency instead of writing
+all three on every transition:
 
-- ``Task`` rows: per-execution tracking created by the API / orchestrator.
+- ``Task`` rows: the single source of truth for execution state, written on
+  every transition (queued/running/progress/ready/error).
 - ``SessionProcessingState`` rows: per-stage summary used by the frontend.
-- ``AgentWorkflow.role_states``: in-flight workflow DAG state.
+  Only *terminal* transitions (ready/error) are written here — terminal
+  states carry ``content_hash`` validity information that the Task row does
+  not have, and they are low-frequency. In-flight states (queued/running/
+  progress) are derived from the latest Task when the status endpoint
+  aggregates (see ``state_service.get_session_processing_status``), so the
+  intermediate progress updates no longer write a second row per tick.
+- ``AgentWorkflow.role_states``: in-flight workflow DAG state, reduced to
+  what the DAG itself needs: ``status``, ``task_id`` and ``heartbeat_at``
+  (plus ``started_at`` for observability). Progress and error details are
+  read from the linked Task row instead of being duplicated here.
 
 It also heals tasks/workflows/states that are stuck in ``running`` or
 ``pending`` after a backend restart or a crashed worker.
@@ -24,10 +36,7 @@ from app.models import AgentWorkflow, SessionProcessingState, Task
 from app.services.state_service import (
     set_error as set_state_error,
     set_ready as set_state_ready,
-    set_running as set_state_running,
-    set_queued as set_state_queued,
     get_state as get_state_row,
-    VALID_STAGES,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +50,8 @@ def _role_to_stage(role: str) -> str:
         return "quiz_bank"
     if role == "transcript":
         return "transcript_organize"
+    if role == "study_planner":
+        return "study_plan"
     return role
 
 
@@ -96,7 +107,11 @@ def update_state_heartbeat(session_id: str, stage: str) -> None:
 
 
 def update_workflow_heartbeat(session_id: str, user_id: str, role: str) -> None:
-    """Touch the most recent running workflow for the session using a fresh session."""
+    """Touch the most recent running workflow for the session using a fresh session.
+
+    The workflow heartbeat (unlike the Task heartbeat) is only a liveness flag
+    for the DAG sweep; it deliberately carries no progress payload.
+    """
     from app.core.database import SessionLocal
     from sqlalchemy.orm.attributes import flag_modified
 
@@ -149,8 +164,10 @@ def set_agent_queued(
     Marking the task running before it reaches the worker makes the worker skip
     its own freshly-dispatched task. Keep the Task pending here; AgentRunner
     performs the real running transition after it acquires the task.
+
+    Only the Task row is written: the UI derives the queued processing state
+    from the latest Task when ``get_session_processing_status`` aggregates.
     """
-    stage = _role_to_stage(role)
     task = db.query(Task).filter(Task.id == task_id).first()
     if task:
         task.status = "pending"
@@ -159,14 +176,12 @@ def set_agent_queued(
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
 
-    set_state_queued(db, session_id, stage, message=message, commit=False)
     _update_workflow_role_state(
         db,
         session_id,
         role,
         status="pending",
         task_id=task_id,
-        progress=0.0,
         user_id=user_id,
     )
     if commit:
@@ -191,11 +206,13 @@ def _update_workflow_role_state(
     role: str,
     status: str,
     task_id: Optional[str] = None,
-    progress: Optional[float] = None,
-    error_message: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> None:
-    """Update the role state inside the most recent running workflow if one exists."""
+    """Update the role state inside the most recent running workflow if one exists.
+
+    Only DAG-relevant fields are kept here (``status`` and ``task_id``);
+    progress and error details live on the linked Task row.
+    """
     from sqlalchemy.orm.attributes import flag_modified
 
     workflow = _find_running_workflow(db, session_id, user_id=user_id)
@@ -206,10 +223,6 @@ def _update_workflow_role_state(
     role_state["status"] = status
     if task_id is not None:
         role_state["task_id"] = task_id
-    if progress is not None:
-        role_state["progress"] = progress
-    if error_message is not None:
-        role_state["error_message"] = error_message
     new_states = dict(workflow.role_states)
     workflow.role_states = new_states
     flag_modified(workflow, "role_states")
@@ -227,8 +240,12 @@ def set_agent_running(
     user_id: Optional[str] = None,
     commit: bool = True,
 ) -> Task:
-    """Atomically mark a role as running across Task, State and Workflow."""
-    stage = _role_to_stage(role)
+    """Mark a role as running on its Task row (the source of truth).
+
+    The processing-state row is *not* written here: ``running`` is an
+    in-flight state derived from the latest Task by the status endpoint, so
+    we avoid a second row write on every transition/progress tick.
+    """
     task = db.query(Task).filter(Task.id == task_id).first()
     if task:
         task.status = "running"
@@ -237,14 +254,12 @@ def set_agent_running(
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
 
-    set_state_running(db, session_id, stage, progress=progress, message=message, commit=False)
     _update_workflow_role_state(
         db,
         session_id,
         role,
         status="running",
         task_id=task_id,
-        progress=progress,
         user_id=user_id,
     )
 
@@ -263,8 +278,11 @@ def set_agent_progress(
     user_id: Optional[str] = None,
     commit: bool = True,
 ) -> None:
-    """Update Task + State progress/message, and workflow heartbeat."""
-    stage = _role_to_stage(role)
+    """Update the Task progress and the workflow role heartbeat only.
+
+    The processing-state progress is derived from the latest Task at read
+    time, so progress ticks no longer touch a second row.
+    """
     if task_id:
         task = db.query(Task).filter(Task.id == task_id).first()
         if task:
@@ -272,19 +290,11 @@ def set_agent_progress(
             task.updated_at = datetime.now(timezone.utc)
             db.add(task)
 
-    state = get_state_row(db, session_id, stage)
-    if state and state.status in ("running", "pending"):
-        state.progress = progress
-        state.message = message
-        state.updated_at = datetime.now(timezone.utc)
-        db.add(state)
-
     _update_workflow_role_state(
         db,
         session_id,
         role,
         status="running",
-        progress=progress,
         user_id=user_id,
     )
 
@@ -302,8 +312,12 @@ def set_agent_ready(
     user_id: Optional[str] = None,
     commit: bool = True,
 ) -> None:
-    """Atomically mark a role as ready/success across Task, State and Workflow."""
-    stage = _role_to_stage(role)
+    """Mark a role as ready/success on its Task and the terminal state row.
+
+    The processing-state row *is* written here because it is the only place
+    that records the terminal ``content_hash`` validity marker used to detect
+    stale outputs; this is a one-shot terminal write, not per-tick.
+    """
     task = db.query(Task).filter(Task.id == task_id).first()
     if task:
         task.status = "success"
@@ -312,9 +326,9 @@ def set_agent_ready(
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
 
-    set_state_ready(db, session_id, stage, content_hash=content_hash, commit=False)
+    set_state_ready(db, session_id, _role_to_stage(role), content_hash=content_hash, commit=False)
     if message:
-        state = get_state_row(db, session_id, stage)
+        state = get_state_row(db, session_id, _role_to_stage(role))
         if state:
             state.message = message
             db.add(state)
@@ -324,7 +338,6 @@ def set_agent_ready(
         session_id,
         role,
         status="success",
-        progress=1.0,
         user_id=user_id,
     )
 
@@ -341,8 +354,11 @@ def set_agent_error(
     user_id: Optional[str] = None,
     commit: bool = True,
 ) -> None:
-    """Atomically mark a role as error across Task, State and Workflow."""
-    stage = _role_to_stage(role)
+    """Mark a role as error on its Task and the terminal state row.
+
+    The error detail lives on the Task row; the state row gets the terminal
+    error status so the frontend sees a stable failure without re-deriving it.
+    """
     task = db.query(Task).filter(Task.id == task_id).first()
     if task:
         task.status = "error"
@@ -351,6 +367,7 @@ def set_agent_error(
         task.updated_at = datetime.now(timezone.utc)
         db.add(task)
 
+    stage = _role_to_stage(role)
     set_state_error(db, session_id, stage, error_message=error_message, commit=False)
 
     _update_workflow_role_state(
@@ -358,8 +375,6 @@ def set_agent_error(
         session_id,
         role,
         status="error",
-        error_message=error_message,
-        progress=1.0,
         user_id=user_id,
     )
 
@@ -466,15 +481,15 @@ def heal_stuck_agent_states(
             workflow.status = "error"
             workflow.updated_at = now
             workflow.finished_at = now
-            # Mark all still-running roles as interrupted
+            # Mark all still-running roles as interrupted. The role state keeps
+            # only DAG fields; the error detail lives on the linked Task rows
+            # which were healed above (or will be on the next pass).
             from sqlalchemy.orm.attributes import flag_modified
 
             new_states = dict(workflow.role_states)
             for role, role_state in new_states.items():
                 if role_state.get("status") in ("pending", "running"):
                     role_state["status"] = "error"
-                    role_state["error_message"] = INTERRUPTED_MESSAGE
-                    role_state["progress"] = 1.0
             workflow.role_states = new_states
             flag_modified(workflow, "role_states")
             counts["workflows"] += 1

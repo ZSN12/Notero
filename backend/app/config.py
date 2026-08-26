@@ -81,6 +81,14 @@ MAX_PPT_SIZE = 50 * 1024 * 1024  # 50MB
 # AI API Keys
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 QWEN_VL_API_KEY = os.getenv("QWEN_VL_API_KEY", "")
+
+# OCR (image text recognition). Enabled by default; silently no-ops when no
+# vision key is configured, so the product degrades instead of failing.
+OCR_ENABLED = os.getenv("OCR_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+OCR_MAX_WIDTH = int(os.getenv("OCR_MAX_WIDTH", "1280"))
+OCR_JPEG_QUALITY = int(os.getenv("OCR_JPEG_QUALITY", "90"))
+OCR_SKIP_IF_TEXT_LEN = int(os.getenv("OCR_SKIP_IF_TEXT_LEN", "60"))
+OCR_MODEL = os.getenv("OCR_MODEL", "qwen-vl-plus")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")

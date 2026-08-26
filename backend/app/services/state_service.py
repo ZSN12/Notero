@@ -22,9 +22,75 @@ VALID_STAGES = {
     "vector_index",
     "mindmap",
     "quiz_bank",
+    "study_plan",
 }
 
 VALID_STATUSES = {"idle", "queued", "running", "ready", "partial", "error", "stale", "fallback"}
+
+# Agent roles whose in-flight processing state is derived from their latest
+# Task row (Task is the source of truth; SessionProcessingState only receives
+# terminal ready/error writes). key: stage name -> agent role/task_type suffix.
+AGENT_DERIVED_STAGES = {
+    "mindmap": "mindmap",
+    "quiz_bank": "quiz",
+    "transcript_organize": "transcript",
+    "study_plan": "study_planner",
+}
+
+
+def _latest_agent_tasks(db: Session, session_id: str) -> dict[str, Task]:
+    """Return the latest Task per agent role for the session.
+
+    Used to derive in-flight processing states without writing a second row
+    on every transition tick.
+    """
+    rows = (
+        db.query(Task)
+        .filter(
+            Task.session_id == session_id,
+            Task.task_type.like("agent_%"),
+        )
+        .order_by(Task.created_at.desc())
+        .all()
+    )
+    latest: dict[str, Task] = {}
+    for task in rows:
+        role = task.task_type[len("agent_"):]
+        if role not in latest:
+            latest[role] = task
+    return latest
+
+
+def _derive_agent_stage(*, state: Optional[SessionProcessingState], task: Optional[Task]) -> dict:
+    """Derive an agent stage dict from the terminal state row + the latest Task.
+
+    ``SessionProcessingState`` (terminal ready/error + content_hash) is the
+    base; the Task row supplies the in-flight view (queued/running + progress)
+    whenever it is more recent, so intermediate progress ticks never wrote a
+    second row.
+    """
+    base = _stage_to_dict(state)
+    if task is None:
+        return base
+
+    if task.status == "pending":
+        base["status"] = "queued"
+        base["progress"] = 0.0
+        base["error_message"] = None
+        base["finished_at"] = None
+    elif task.status == "running":
+        base["status"] = "running"
+        base["progress"] = float(task.progress or 0.0)
+        base["error_message"] = None
+        base["finished_at"] = None
+    elif task.status == "error":
+        base["status"] = "error"
+        base["progress"] = 1.0
+        base["error_message"] = task.error_message
+        base["finished_at"] = None
+    # success -> keep the terminal ready/stale state row (it carries the
+    # content_hash validity marker).
+    return base
 
 
 _HEALABLE_STATUSES = {"error", "stale", "idle", "fallback", "queued"}
@@ -41,6 +107,8 @@ def _get_stored_output_hash(note: Note, stage: str) -> str | None:
         kind = "quiz_bank"
     elif stage == "transcript_organize":
         kind = "organized_transcript"
+    elif stage == "study_plan":
+        kind = "study_plan"
     else:
         return None
     for item in note.vocabulary:
@@ -59,7 +127,13 @@ def _heal_stage_state_if_fresh(
     note.vocabulary, or vector chunks in the vector_index table — was saved and
     matches the current note content hash.
     """
-    if stage not in ("mindmap", "quiz_bank", "vector_index", "transcript_organize"):
+    if stage not in (
+        "mindmap",
+        "quiz_bank",
+        "vector_index",
+        "transcript_organize",
+        "study_plan",
+    ):
         return None
     state = (
         db.query(SessionProcessingState)
@@ -362,21 +436,36 @@ def get_session_processing_status(db: Session, session_id: str) -> dict:
     # row to ready even if it says error/stale/idle.
     note = db.query(Note).filter(Note.session_id == session_id).first()
     if note:
-        for stage_to_heal in ("vector_index", "mindmap", "quiz_bank", "transcript_organize"):
+        for stage_to_heal in (
+            "vector_index",
+            "mindmap",
+            "quiz_bank",
+            "transcript_organize",
+            "study_plan",
+        ):
             healed = _heal_stage_state_if_fresh(db, session_id, stage_to_heal, note)
             if healed:
                 stage_map[stage_to_heal] = healed
 
     stages = {}
+    # Latest agent tasks per role: the source of truth for in-flight states.
+    latest_tasks = _latest_agent_tasks(db, session_id)
     for stage in VALID_STAGES:
-        stages[stage] = _stage_to_dict(stage_map.get(stage))
+        row = stage_map.get(stage)
+        if stage in AGENT_DERIVED_STAGES:
+            role = AGENT_DERIVED_STAGES[stage]
+            stages[stage] = _derive_agent_stage(state=row, task=latest_tasks.get(role))
+        else:
+            stages[stage] = _stage_to_dict(row)
 
     # overall_status logic: be explicit about the core pipeline vs. auxiliary
     # learning-material stages so the UI never shows "ready" while something
     # critical is still missing or stale.
     core_stages = ["transcript_finalize", "vector_index"]
-    auxiliary_stages = ["mindmap", "quiz_bank"]
-    all_statuses = [s.status for s in stage_map.values()]
+    auxiliary_stages = ["mindmap", "quiz_bank", "study_plan"]
+    # Use the *derived* stage map: agent in-flight states (queued/running) live
+    # on their Task rows and only appear here after derivation.
+    all_statuses = [s["status"] for s in stages.values()]
 
     if not stage_map or all(s == "idle" for s in all_statuses):
         overall_status = "idle"

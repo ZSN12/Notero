@@ -12,6 +12,7 @@ from typing import Optional
 
 from app.agents import AgentContext, get_agent
 from app.agents.normalizers import normalize_mind_map_data
+from app.agents.runner import AgentRunner
 from app.config import DEEPSEEK_API_KEY
 from app.core.database import SessionLocal
 from app.core.locks import get_session_task_lock
@@ -107,8 +108,22 @@ def _task_payload(task: Task | None) -> dict:
     }
 
 
-def generate_mind_map(session_id: str, user: User, db: DBSessionType) -> dict:
-    """Generate a mind map for a session via the MindmapAgent."""
+def generate_mind_map(
+    session_id: str,
+    user: User,
+    db: DBSessionType,
+    use_reflection: bool = False,
+    task_id: Optional[str] = None,
+) -> dict:
+    """Generate a mind map for a session via the MindmapAgent.
+
+    Args:
+        session_id: Target session id.
+        user: Authenticated user.
+        db: Database session.
+        use_reflection: If True, run inside the AgentRunner reflection loop.
+        task_id: Required when use_reflection is True.
+    """
     if not DEEPSEEK_API_KEY:
         raise ValueError("未配置 DEEPSEEK_API_KEY，无法生成知识导图")
 
@@ -128,16 +143,30 @@ def generate_mind_map(session_id: str, user: User, db: DBSessionType) -> dict:
     if not content_text.strip():
         raise ValueError("No indexable content in note")
 
-    agent = get_agent("mindmap")
-    ctx = AgentContext(
-        session_id=session_id,
-        user=user,
-        db=db,
-        note=note,
-        session=session,
-        notebook=notebook,
-    )
-    result = agent.run(ctx)
+    if use_reflection:
+        if not task_id:
+            raise ValueError("task_id is required when use_reflection=True")
+        runner = AgentRunner()
+        result = runner.run(
+            session_id=session_id,
+            user_id=user.id,
+            role="mindmap",
+            task_id=task_id,
+            db=db,
+            reflection=True,
+        )
+    else:
+        agent = get_agent("mindmap")
+        ctx = AgentContext(
+            session_id=session_id,
+            user=user,
+            db=db,
+            note=note,
+            session=session,
+            notebook=notebook,
+        )
+        result = agent.run(ctx)
+
     if not result.success:
         raise ValueError(result.error_message or "知识导图生成失败")
 
@@ -163,7 +192,7 @@ def _run_mind_map_task(task_id: str, session_id: str, user_id: str):
             user_id=user_id,
         )
 
-        generate_mind_map(session_id, user, db)
+        generate_mind_map(session_id, user, db, use_reflection=True, task_id=task.id)
 
         # Re-fetch note before saving to reduce race window with other agents
         note = db.query(Note).filter(Note.session_id == session_id).first()

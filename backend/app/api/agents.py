@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -20,7 +20,15 @@ from app.agents import AgentContext, get_agent, list_agents
 from app.core.auth import get_current_user
 from app.core.database import SessionLocal, get_db
 from app.core.locks import get_session_task_lock
-from app.models import AgentWorkflow, Notebook, Note, Session as DBSession, Task, User
+from app.models import (
+    AgentRunEvent,
+    AgentWorkflow,
+    Notebook,
+    Note,
+    Session as DBSession,
+    Task,
+    User,
+)
 from app.config import AGENT_HEARTBEAT_SECONDS, AGENT_TIMEOUT_SECONDS
 from app.services.vector_service import _compute_session_content_hash
 from app.services.note_utils import get_canonical_note_text
@@ -253,6 +261,20 @@ def _task_to_dict(task: Task) -> dict:
     }
 
 
+def _event_to_dict(event: AgentRunEvent) -> dict:
+    return {
+        "id": event.id,
+        "session_id": event.session_id,
+        "workflow_id": event.workflow_id,
+        "task_id": event.task_id,
+        "role": event.role,
+        "event_type": event.event_type,
+        "message": event.message,
+        "payload": event.payload or {},
+        "created_at": event.created_at.isoformat() if event.created_at else None,
+    }
+
+
 def _get_latest_task(session_id: str, task_type: str, db: Session) -> Task | None:
     return (
         db.query(Task)
@@ -371,6 +393,8 @@ def _role_to_stage(role: str) -> str:
         return "quiz_bank"
     if role == "transcript":
         return "transcript_organize"
+    if role == "study_planner":
+        return "study_plan"
     return role
 
 
@@ -722,6 +746,70 @@ def get_workflow(
         "updated_at": workflow.updated_at.isoformat() if workflow.updated_at else None,
         "finished_at": workflow.finished_at.isoformat() if workflow.finished_at else None,
         "last_heartbeat_at": workflow.last_heartbeat_at.isoformat() if workflow.last_heartbeat_at else None,
+    }
+
+
+@router.get("/workflows/{workflow_id}/events")
+def get_workflow_events(
+    workflow_id: str,
+    limit: int = Query(200, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return persisted trace events for one agent workflow."""
+    workflow = (
+        db.query(AgentWorkflow)
+        .filter(AgentWorkflow.id == workflow_id)
+        .filter(AgentWorkflow.user_id == current_user.id)
+        .first()
+    )
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    events = (
+        db.query(AgentRunEvent)
+        .filter(AgentRunEvent.workflow_id == workflow_id)
+        .filter(AgentRunEvent.user_id == current_user.id)
+        .order_by(AgentRunEvent.created_at.asc(), AgentRunEvent.id.asc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "workflow_id": workflow_id,
+        "session_id": workflow.session_id,
+        "events": [_event_to_dict(e) for e in events],
+    }
+
+
+@router.get("/session/{session_id}/events")
+def get_session_agent_events(
+    session_id: str,
+    limit: int = Query(200, ge=1, le=500),
+    role: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return recent persisted agent trace events for a session."""
+    session = _get_user_session(session_id, current_user, db)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    query = (
+        db.query(AgentRunEvent)
+        .filter(AgentRunEvent.session_id == session_id)
+        .filter(AgentRunEvent.user_id == current_user.id)
+    )
+    if role:
+        query = query.filter(AgentRunEvent.role == role)
+
+    events = (
+        query.order_by(AgentRunEvent.created_at.desc(), AgentRunEvent.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "session_id": session_id,
+        "events": [_event_to_dict(e) for e in reversed(events)],
     }
 
 

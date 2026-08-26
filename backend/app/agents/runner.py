@@ -25,8 +25,10 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.agents import AgentContext, AgentResult, get_agent
 from app.agents.base import BaseAgent
+from app.agents.messaging import AgentEvent, EventType, get_event_bus
+from app.agents.recovery import RecoveryPlanner, RecoveryAction
+from app.agents.review import BaseReviewAgent, MindmapReviewAgent
 from app.config import AGENTS_SYNC
-from app.core.exceptions import LLMTimeoutError, LLMUnavailableError
 from app.middleware.metrics import observe_agent_error, observe_agent_execution
 from app.models import Notebook, Note, Session as DBSessionModel, Task, User
 from app.services.agent_state_service import (
@@ -39,6 +41,7 @@ from app.services.agent_state_service import (
     update_task_heartbeat,
     update_workflow_heartbeat,
 )
+from app.services.agent_trace_service import record_agent_event
 from app.services.vector_service import _compute_session_content_hash
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,9 @@ class AgentExecutionConfig:
     max_total_timeout: Optional[float] = 300.0
     per_llm_timeout: float = 120.0
     max_concurrency_per_role: Optional[int] = None
+    reflection_max_rounds: int = 3
+    reflection_target_score: float = 0.80
+    recovery_max_attempts: int = 3
 
     @classmethod
     def from_env(cls) -> "AgentExecutionConfig":
@@ -81,6 +87,9 @@ class AgentExecutionConfig:
             max_total_timeout=_env_float("AGENT_MAX_TOTAL_TIMEOUT", cls.max_total_timeout) if os.getenv("AGENT_MAX_TOTAL_TIMEOUT") else cls.max_total_timeout,
             per_llm_timeout=_env_float("AGENT_PER_LLM_TIMEOUT", cls.per_llm_timeout),
             max_concurrency_per_role=_env_int("AGENT_MAX_CONCURRENCY_PER_ROLE", 0) or None,
+            reflection_max_rounds=_env_int("AGENT_REFLECTION_MAX_ROUNDS", cls.reflection_max_rounds),
+            reflection_target_score=_env_float("AGENT_REFLECTION_TARGET_SCORE", cls.reflection_target_score),
+            recovery_max_attempts=_env_int("AGENT_RECOVERY_MAX_ATTEMPTS", cls.recovery_max_attempts),
         )
 
 
@@ -91,6 +100,7 @@ class AgentRunner:
         self.config = config or AgentExecutionConfig.from_env()
         self._semaphores: dict[str, threading.Semaphore] = {}
         self._semaphores_lock = threading.Lock()
+        self.recovery_planner = RecoveryPlanner()
 
     def _get_semaphore(self, role: str) -> Optional[threading.Semaphore]:
         """Return a per-role semaphore if concurrency limiting is enabled."""
@@ -106,24 +116,6 @@ class AgentRunner:
                     self._semaphores[role] = sem
         return sem
 
-    def _classify_error(self, exc: Exception) -> str:
-        """Classify an exception for metrics/logging."""
-        msg = str(exc).lower()
-        raw = str(exc)
-        if isinstance(exc, LLMTimeoutError) or "timeout" in msg or "timed out" in msg or "超时" in raw:
-            return "timeout"
-        if isinstance(exc, LLMUnavailableError) or "unavailable" in msg:
-            return "unavailable"
-        if "截断" in raw or "finish_reason=length" in msg or "length" in msg:
-            return "truncation"
-        if "json" in msg or "格式无效" in raw:
-            return "invalid_output"
-        return "unknown"
-
-    def _is_retryable(self, error_type: str) -> bool:
-        """Return True if the error type warrants a retry."""
-        return error_type in {"timeout", "unavailable"}
-
     def _load_context(
         self,
         db: DBSession,
@@ -135,6 +127,8 @@ class AgentRunner:
 
         Returns None if any prerequisite is missing, after logging the reason.
         """
+        from app.models import AgentWorkflow
+
         task = db.query(Task).filter(Task.id == task_id).first()
         if not task:
             logger.warning("agent_runner_task_not_found task_id=%s", task_id)
@@ -178,7 +172,20 @@ class AgentRunner:
             )
             return None
 
-        return AgentContext(
+        # Find the most recent running workflow for this session so events can
+        # carry a workflow_id and the orchestrator can react to them.
+        workflow = (
+            db.query(AgentWorkflow)
+            .filter(
+                AgentWorkflow.session_id == session_id,
+                AgentWorkflow.status == "running",
+            )
+            .order_by(AgentWorkflow.created_at.desc())
+            .first()
+        )
+        workflow_id = workflow.id if workflow else None
+
+        ctx = AgentContext(
             session_id=session_id,
             user=user,
             db=db,
@@ -187,6 +194,8 @@ class AgentRunner:
             notebook=notebook,
             task=task,
         )
+        ctx.workflow_id = workflow_id
+        return ctx
 
     def _start_keepalive_heartbeat(
         self,
@@ -206,6 +215,8 @@ class AgentRunner:
             stage = "quiz_bank"
         elif role == "transcript":
             stage = "transcript_organize"
+        elif role == "study_planner":
+            stage = "study_plan"
 
         def _heartbeat():
             while not stop_event.wait(5.0):
@@ -268,6 +279,7 @@ class AgentRunner:
         """Invoke the agent once inside an optional concurrency limit."""
         agent = get_agent(role)
         ctx.force = force
+        agent.ctx = ctx
         # Pass the per-LLM timeout down to the agent instance.
         agent.timeout = self.config.per_llm_timeout
         sem = self._get_semaphore(role)
@@ -275,6 +287,190 @@ class AgentRunner:
             return agent.run(ctx)
         with sem:
             return agent.run(ctx)
+
+    def _publish_event(
+        self,
+        event_type: str,
+        ctx: AgentContext,
+        payload: dict,
+    ) -> None:
+        """Publish an agent event to the global event bus."""
+        try:
+            record_agent_event(
+                ctx.db,
+                session_id=ctx.session_id,
+                user_id=ctx.user.id,
+                workflow_id=getattr(ctx, "workflow_id", None),
+                task_id=ctx.task.id if ctx.task else None,
+                role=getattr(ctx, "_current_role", None),
+                event_type=event_type,
+                message=payload.get("message"),
+                payload=payload,
+            )
+            get_event_bus().publish(
+                AgentEvent(
+                    event_type=event_type,
+                    session_id=ctx.session_id,
+                    role=getattr(ctx, "_current_role", None),
+                    workflow_id=getattr(ctx, "workflow_id", None),
+                    task_id=ctx.task.id if ctx.task else None,
+                    user_id=ctx.user.id if ctx.user else None,
+                    payload=payload,
+                )
+            )
+        except Exception:
+            logger.exception("agent_runner_publish_event_failed event_type=%s", event_type)
+
+    def _apply_recovery_action(self, ctx: AgentContext, action) -> None:
+        """Apply context mutations requested by a recovery strategy."""
+        for key, value in action.context_updates.items():
+            if hasattr(ctx, key):
+                setattr(ctx, key, value)
+                logger.info(
+                    "recovery_context_update key=%s value=%s strategy=%s",
+                    key,
+                    value,
+                    action.strategy_name,
+                )
+            else:
+                logger.warning(
+                    "recovery_context_update_ignored key=%s strategy=%s",
+                    key,
+                    action.strategy_name,
+                )
+
+    def _get_reviewer_for_role(self, role: str) -> Optional[BaseReviewAgent]:
+        """Return a review agent for the given role, if reflection is supported."""
+        if role == "mindmap":
+            return MindmapReviewAgent()
+        return None
+
+    def _execute_with_reflection(
+        self,
+        ctx: AgentContext,
+        role: str,
+        force: bool,
+    ) -> AgentResult:
+        """Run an agent inside a review/reflection loop.
+
+        Each generation attempt is reviewed. If the output is not acceptable,
+        the reviewer's improvement prompt is fed back into the next attempt.
+        The best-scoring output is returned and persisted.
+        """
+        reviewer = self._get_reviewer_for_role(role)
+        if reviewer is None:
+            return self._execute_once(ctx, role, force)
+
+        agent = get_agent(role)
+        agent.timeout = self.config.per_llm_timeout
+        source_max_length = ctx.input_length_limit or 12000
+        source_material = ctx.get_content_text_for_agent(max_length=source_max_length)
+
+        history = []
+        best_result: Optional[AgentResult] = None
+        best_score = 0.0
+        best_output: Optional[dict] = None
+
+        for round_no in range(1, self.config.reflection_max_rounds + 1):
+            set_agent_progress(
+                db=ctx.db,
+                session_id=ctx.session_id,
+                stage=role,
+                progress=min(0.95, 0.25 + 0.7 * (round_no / self.config.reflection_max_rounds)),
+                message=f"生成并审查导图中（第 {round_no}/{self.config.reflection_max_rounds} 轮）",
+                task_id=ctx.task.id if ctx.task else None,
+                user_id=ctx.user.id,
+            )
+
+            result = self._execute_once(ctx, role, force)
+            if not result.success or not result.data:
+                logger.warning(
+                    "agent_runner_reflection_generation_failed session_id=%s role=%s round=%s error=%s",
+                    ctx.session_id,
+                    role,
+                    round_no,
+                    result.error_message,
+                )
+                if best_result is not None:
+                    break
+                return result
+
+            output = result.data
+            review = reviewer.review(source_material, output, history)
+
+            logger.info(
+                "agent_runner_reflection_round session_id=%s role=%s round=%s score=%s acceptable=%s stop=%s",
+                ctx.session_id,
+                role,
+                round_no,
+                review.score,
+                review.is_acceptable,
+                review.should_stop,
+            )
+
+            # Detect upstream-rooted quality issues and broadcast them so the
+            # orchestrator can trigger upstream repair.
+            if not review.is_acceptable:
+                coverage_issues = [
+                    i for i in review.issues if i.dimension == "coverage"
+                ]
+                if coverage_issues:
+                    self._publish_event(
+                        EventType.QUALITY_ISSUE,
+                        ctx,
+                        {
+                            "role": role,
+                            "task_id": ctx.task.id if ctx.task else None,
+                            "upstream_role": "transcript",
+                            "issue": coverage_issues[0].description,
+                            "score": review.score,
+                            "round": round_no,
+                        },
+                    )
+
+            if review.score > best_score:
+                best_score = review.score
+                best_output = output
+                best_result = result
+
+            if review.is_acceptable:
+                return AgentResult(success=True, data=output)
+
+            if review.should_stop or round_no >= self.config.reflection_max_rounds:
+                break
+
+            ctx.review_feedback = review.improvement_prompt
+            history.append(review)
+
+        # Persist the best output if it is not the last generated one.
+        if best_output is not None:
+            if best_output is not result.data:
+                try:
+                    content_hash = _compute_session_content_hash(ctx.note)
+                    agent.save_to_vocabulary(
+                        ctx,
+                        best_output,
+                        extra={"content_hash": content_hash},
+                    )
+                    ctx.db.commit()
+                    logger.info(
+                        "agent_runner_reflection_persisted_best session_id=%s role=%s score=%s",
+                        ctx.session_id,
+                        role,
+                        best_score,
+                    )
+                except Exception:
+                    logger.exception(
+                        "agent_runner_reflection_persist_best_failed session_id=%s role=%s",
+                        ctx.session_id,
+                        role,
+                    )
+            return AgentResult(success=True, data=best_output)
+
+        return AgentResult(
+            success=False,
+            error_message="Reflection loop did not produce a valid output",
+        )
 
     def run(
         self,
@@ -284,6 +480,7 @@ class AgentRunner:
         task_id: str,
         db: DBSession,
         force: bool = False,
+        reflection: bool = False,
     ) -> AgentResult:
         """Run a single agent to completion with retries and metrics.
 
@@ -297,9 +494,41 @@ class AgentRunner:
                 error_message="Agent prerequisites missing",
             )
 
+        # Stash the current role on context so event publishing can use it.
+        ctx._current_role = role
+
         idempotent = self._check_idempotency(ctx, role)
         if idempotent is not None:
+            record_agent_event(
+                db,
+                session_id=session_id,
+                user_id=user_id,
+                workflow_id=getattr(ctx, "workflow_id", None),
+                task_id=task_id,
+                role=role,
+                event_type="agent_skipped",
+                message=idempotent.error_message or "复用已有任务或新鲜输出",
+                payload={
+                    "role": role,
+                    "task_id": task_id,
+                    "skipped": True,
+                    "success": idempotent.success,
+                    "reason": idempotent.error_message or "fresh_output",
+                },
+            )
+            db.commit()
             return idempotent
+
+        self._publish_event(
+            EventType.AGENT_STARTED,
+            ctx,
+            {
+                "role": role,
+                "task_id": task_id,
+                "reflection": reflection,
+                "message": "Agent 开始运行",
+            },
+        )
 
         set_agent_running(
             db,
@@ -329,6 +558,8 @@ class AgentRunner:
         last_error = "Unknown error"
         error_type = "unknown"
         attempt = 0
+        recovery_attempts = 0
+        recovery_history = []
 
         try:
             while attempt <= self.config.max_retries:
@@ -351,7 +582,10 @@ class AgentRunner:
                     break
 
                 try:
-                    result = self._execute_once(ctx, role, force)
+                    if reflection:
+                        result = self._execute_with_reflection(ctx, role, force)
+                    else:
+                        result = self._execute_once(ctx, role, force)
                     if result.success:
                         observe_agent_execution(
                             role=role,
@@ -361,12 +595,24 @@ class AgentRunner:
                         )
                         logger.info(
                             "agent_runner_success session_id=%s role=%s task_id=%s "
-                            "attempts=%s elapsed_ms=%s",
+                            "attempts=%s recovery_attempts=%s elapsed_ms=%s",
                             session_id,
                             role,
                             task_id,
                             attempt,
+                            recovery_attempts,
                             int((time.monotonic() - started) * 1000),
+                        )
+                        self._publish_event(
+                            EventType.AGENT_COMPLETED,
+                            ctx,
+                            {
+                                "role": role,
+                                "task_id": task_id,
+                                "attempts": attempt,
+                                "recovery_attempts": recovery_attempts,
+                                "reflection": reflection,
+                            },
                         )
                         set_agent_ready(
                             db,
@@ -380,8 +626,9 @@ class AgentRunner:
                         return result
 
                     # Agent returned failure without raising.
-                    last_error = result.error_message or "Agent returned failure"
-                    error_type = self._classify_error(ValueError(last_error))
+                    error = ValueError(result.error_message or "Agent returned failure")
+                    last_error = str(error)
+                    error_type = self.recovery_planner.classifier.classify(error).type
                     logger.warning(
                         "agent_runner_attempt_failed session_id=%s role=%s task_id=%s "
                         "attempt=%s error=%s error_type=%s",
@@ -392,17 +639,60 @@ class AgentRunner:
                         last_error,
                         error_type,
                     )
-                    if self._is_retryable(error_type) and attempt <= self.config.max_retries:
-                        delay = self.config.retry_delay_seconds * (
-                            self.config.retry_backoff ** (attempt - 1)
-                        )
-                        time.sleep(delay)
-                        continue
+
+                    # Self-healing: ask the recovery planner for a fix strategy.
+                    if recovery_attempts < self.config.recovery_max_attempts:
+                        action = self.recovery_planner.plan(ctx, error, recovery_history)
+                        if action:
+                            recovery_attempts += 1
+                            recovery_history.append(action)
+                            logger.info(
+                                "agent_runner_recovery_action session_id=%s role=%s task_id=%s "
+                                "recovery_attempt=%s strategy=%s retry=%s reason=%s",
+                                session_id,
+                                role,
+                                task_id,
+                                recovery_attempts,
+                                action.strategy_name,
+                                action.retry,
+                                action.reason,
+                            )
+                            self._publish_event(
+                                EventType.RECOVERY_ATTEMPTED,
+                                ctx,
+                                {
+                                    "role": role,
+                                    "task_id": task_id,
+                                    "recovery_attempt": recovery_attempts,
+                                    "strategy": action.strategy_name,
+                                    "retry": action.retry,
+                                    "reason": action.reason,
+                                    "context_updates": action.context_updates,
+                                },
+                            )
+                            if action.delay_seconds:
+                                time.sleep(action.delay_seconds)
+                            if action.retry:
+                                self._apply_recovery_action(ctx, action)
+                                set_agent_progress(
+                                    db,
+                                    session_id,
+                                    role,
+                                    progress=min(0.9, 0.2 + 0.15 * recovery_attempts),
+                                    message=f"自动修复中：{action.reason}",
+                                    task_id=ctx.task.id if ctx.task else None,
+                                    user_id=user_id,
+                                )
+                                continue
+                            last_error = f"{last_error} (recovery stopped: {action.reason})"
+                            break
+
+                    # No recovery strategy or recovery refused to retry.
                     break
 
                 except Exception as exc:
                     db.rollback()
-                    error_type = self._classify_error(exc)
+                    error_type = self.recovery_planner.classifier.classify(exc).type
                     last_error = str(exc)
                     logger.warning(
                         "agent_runner_attempt_failed session_id=%s role=%s task_id=%s "
@@ -414,12 +704,55 @@ class AgentRunner:
                         last_error,
                         error_type,
                     )
-                    if self._is_retryable(error_type) and attempt <= self.config.max_retries:
-                        delay = self.config.retry_delay_seconds * (
-                            self.config.retry_backoff ** (attempt - 1)
-                        )
-                        time.sleep(delay)
-                        continue
+
+                    # Self-healing: ask the recovery planner for a fix strategy.
+                    if recovery_attempts < self.config.recovery_max_attempts:
+                        action = self.recovery_planner.plan(ctx, exc, recovery_history)
+                        if action:
+                            recovery_attempts += 1
+                            recovery_history.append(action)
+                            logger.info(
+                                "agent_runner_recovery_action session_id=%s role=%s task_id=%s "
+                                "recovery_attempt=%s strategy=%s retry=%s reason=%s",
+                                session_id,
+                                role,
+                                task_id,
+                                recovery_attempts,
+                                action.strategy_name,
+                                action.retry,
+                                action.reason,
+                            )
+                            self._publish_event(
+                                EventType.RECOVERY_ATTEMPTED,
+                                ctx,
+                                {
+                                    "role": role,
+                                    "task_id": task_id,
+                                    "recovery_attempt": recovery_attempts,
+                                    "strategy": action.strategy_name,
+                                    "retry": action.retry,
+                                    "reason": action.reason,
+                                    "context_updates": action.context_updates,
+                                },
+                            )
+                            if action.delay_seconds:
+                                time.sleep(action.delay_seconds)
+                            if action.retry:
+                                self._apply_recovery_action(ctx, action)
+                                set_agent_progress(
+                                    db,
+                                    session_id,
+                                    role,
+                                    progress=min(0.9, 0.2 + 0.15 * recovery_attempts),
+                                    message=f"自动修复中：{action.reason}",
+                                    task_id=ctx.task.id if ctx.task else None,
+                                    user_id=user_id,
+                                )
+                                continue
+                            last_error = f"{last_error} (recovery stopped: {action.reason})"
+                            break
+
+                    # No recovery strategy or recovery refused to retry.
                     break
 
             observe_agent_error(role=role, error_type=error_type)
@@ -431,13 +764,32 @@ class AgentRunner:
             )
             logger.error(
                 "agent_runner_failed session_id=%s role=%s task_id=%s "
-                "attempts=%s error_type=%s error=%s",
+                "attempts=%s recovery_attempts=%s error_type=%s error=%s",
                 session_id,
                 role,
                 task_id,
                 attempt,
+                recovery_attempts,
                 error_type,
                 last_error,
+            )
+            failure_event_type = (
+                EventType.RECOVERY_FAILED
+                if recovery_attempts > 0
+                else EventType.AGENT_FAILED
+            )
+            self._publish_event(
+                failure_event_type,
+                ctx,
+                {
+                    "role": role,
+                    "task_id": task_id,
+                    "attempts": attempt,
+                    "recovery_attempts": recovery_attempts,
+                    "error_type": error_type,
+                    "error": last_error,
+                    "recovery_history": [a.__dict__ for a in recovery_history],
+                },
             )
             set_agent_error(db, session_id, role, task_id, last_error, user_id=user_id)
             return AgentResult(success=False, error_message=last_error)

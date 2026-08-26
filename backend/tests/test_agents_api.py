@@ -51,6 +51,36 @@ MOCK_QUIZ = {
         }
     ],
 }
+MOCK_STUDY_PLAN = {
+    "goal": "完善本节课复习资料",
+    "summary": "资料基本可用，但题库覆盖仍可增强。",
+    "confidence": 0.8,
+    "findings": [
+        {
+            "type": "coverage_gap",
+            "severity": "medium",
+            "message": "题库尚未覆盖核心概念",
+            "evidence": "测试内容",
+        }
+    ],
+    "recommended_actions": [
+        {
+            "action": "run_agent",
+            "params": {"role": "quiz"},
+            "reason": "补齐题库覆盖",
+            "risk": "low",
+            "requires_confirmation": False,
+            "verification": "检查题库知识点覆盖",
+        }
+    ],
+    "review_plan": [
+        {
+            "day_offset": 1,
+            "focus": "核心概念",
+            "items": ["复习导图", "完成基础题"],
+        }
+    ],
+}
 
 
 def _mock_response_for_agent(role: str, finish_reason: str = "stop"):
@@ -59,9 +89,14 @@ def _mock_response_for_agent(role: str, finish_reason: str = "stop"):
         content = MOCK_MINDMAP
     elif role == "quiz":
         content = MOCK_QUIZ
+    elif role == "study_planner":
+        content = MOCK_STUDY_PLAN
     else:
         content = {}
-    return mock_chat_completion(content, finish_reason=finish_reason).chat.completions.create.return_value
+    return (
+        mock_chat_completion(content, finish_reason=finish_reason)
+        .chat.completions.create.return_value
+    )
 
 
 def _wait_for_agent_status(
@@ -104,6 +139,73 @@ def test_single_agent_returns_200_and_ready(mock_openai_cls, client, auth_header
     data = resp.json()
     assert data["status"] == "ready"
     assert data["data"] is not None
+
+
+@pytest.mark.integration
+@patch("app.core.llm.OpenAI")
+def test_study_planner_agent_returns_plan(mock_openai_cls, client, auth_headers, db):
+    """Study planner should run as a normal agent and persist a study_plan entry."""
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_response_for_agent("study_planner")
+
+    _, session_id = create_notebook_session_note(client, auth_headers, content="测试内容")
+
+    resp = client.post(
+        f"/api/agents/session/{session_id}/run/study_planner",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "ready"
+    assert data["data"]["goal"] == "完善本节课复习资料"
+    assert data["data"]["recommended_actions"][0]["action"] == "run_agent"
+
+    from app.models import Note, SessionProcessingState
+
+    note = db.query(Note).filter(Note.session_id == session_id).first()
+    assert note is not None
+    kinds = [item.get("kind") for item in note.vocabulary if isinstance(item, dict)]
+    assert "study_plan" in kinds
+
+    state = (
+        db.query(SessionProcessingState)
+        .filter(
+            SessionProcessingState.session_id == session_id,
+            SessionProcessingState.stage == "study_plan",
+        )
+        .first()
+    )
+    assert state is not None
+    assert state.status == "ready"
+
+
+@pytest.mark.integration
+@patch("app.core.llm.OpenAI")
+def test_agent_run_events_are_queryable(mock_openai_cls, client, auth_headers):
+    """Agent runs should leave a persisted event trace."""
+    mock_client = MagicMock()
+    mock_openai_cls.return_value = mock_client
+    mock_client.chat.completions.create.return_value = _mock_response_for_agent("study_planner")
+
+    _, session_id = create_notebook_session_note(client, auth_headers, content="测试内容")
+
+    resp = client.post(
+        f"/api/agents/session/{session_id}/run/study_planner",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    events_resp = client.get(
+        f"/api/agents/session/{session_id}/events",
+        headers=auth_headers,
+    )
+    assert events_resp.status_code == 200, events_resp.text
+    events = events_resp.json()["events"]
+    event_types = {event["event_type"] for event in events}
+    assert "agent_started" in event_types
+    assert "agent_completed" in event_types
+    assert all("prompt" not in event["payload"] for event in events)
 
 
 @pytest.mark.integration

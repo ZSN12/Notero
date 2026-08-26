@@ -185,6 +185,98 @@ class DeepSeekProvider(LLMProvider):
 # DashScope embedding provider (OpenAI-compatible)
 # ---------------------------------------------------------------------------
 
+class DashScopeChatProvider(LLMProvider):
+    """DashScope chat completion via OpenAI-compatible API."""
+
+    DEFAULT_MODEL = "qwen-max"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        default_model: Optional[str] = None,
+    ):
+        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
+        self.base_url = base_url or os.getenv(
+            "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
+        self.default_model = default_model or os.getenv("DASHSCOPE_CHAT_MODEL", self.DEFAULT_MODEL)
+        self._client = None
+        if self.api_key:
+            try:
+                self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+                logger.info("dashscope_chat_provider_initialized model=%s", self.default_model)
+            except Exception as exc:
+                logger.warning("dashscope_chat_provider_init_failed error=%s", exc)
+
+    @property
+    def available(self) -> bool:
+        return self._client is not None
+
+    def _to_openai_messages(self, messages: List[ChatMessage]) -> List[Dict[str, str]]:
+        return [{"role": m.role, "content": m.content} for m in messages]
+
+    def chat(
+        self,
+        messages: List[ChatMessage],
+        model: Optional[str] = None,
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, str]] = None,
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> ChatResponse:
+        if not self.available:
+            raise RuntimeError("DashScope chat provider is not available (missing API key)")
+
+        params: Dict[str, Any] = {
+            "model": model or self.default_model,
+            "messages": self._to_openai_messages(messages),
+            "temperature": temperature,
+            "stream": stream,
+            **kwargs,
+        }
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        if response_format is not None:
+            params["response_format"] = response_format
+
+        resp = self._client.chat.completions.create(**params)
+        choices = [
+            ChatChoice(
+                message=ChatMessage(role=c.message.role, content=c.message.content),
+                finish_reason=getattr(c, "finish_reason", None),
+            )
+            for c in resp.choices
+        ]
+        return ChatResponse(choices=choices)
+
+    def chat_stream(
+        self,
+        messages: List[ChatMessage],
+        model: Optional[str] = None,
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        if not self.available:
+            raise RuntimeError("DashScope chat provider is not available (missing API key)")
+
+        params = {
+            "model": model or self.default_model,
+            "messages": self._to_openai_messages(messages),
+            "temperature": temperature,
+            "stream": True,
+            **kwargs,
+        }
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+
+        for chunk in self._client.chat.completions.create(**params):
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+
 class DashScopeEmbeddingProvider(EmbeddingProvider):
     """DashScope text-embedding via OpenAI-compatible API."""
 
@@ -260,7 +352,8 @@ def get_chat_provider(name: Optional[str] = None) -> LLMProvider:
     Priority:
       1. Named provider if registered.
       2. DeepSeek if DEEPSEEK_API_KEY is set.
-      3. Raise RuntimeError if none available.
+      3. DashScope if DASHSCOPE_API_KEY is set.
+      4. Raise RuntimeError if none available.
     """
     if name and name in _PROVIDER_REGISTRY:
         provider = _PROVIDER_REGISTRY[name]
@@ -268,13 +361,30 @@ def get_chat_provider(name: Optional[str] = None) -> LLMProvider:
             return provider
         raise RuntimeError(f"Provider '{name}' is not a chat provider")
 
-    # Auto-detect: DeepSeek
+    if name == "deepseek":
+        deepseek = DeepSeekProvider()
+        if deepseek.available:
+            return deepseek
+        raise RuntimeError("DeepSeek provider requested but DEEPSEEK_API_KEY is not set")
+
+    if name == "dashscope":
+        dashscope = DashScopeChatProvider()
+        if dashscope.available:
+            return dashscope
+        raise RuntimeError("DashScope provider requested but DASHSCOPE_API_KEY is not set")
+
+    # Auto-detect: DeepSeek first, then DashScope.
     deepseek = DeepSeekProvider()
     if deepseek.available:
         return deepseek
 
+    dashscope = DashScopeChatProvider()
+    if dashscope.available:
+        return dashscope
+
     raise RuntimeError(
-        "No chat provider available. Set DEEPSEEK_API_KEY or register a custom provider."
+        "No chat provider available. Set DEEPSEEK_API_KEY or DASHSCOPE_API_KEY, "
+        "or register a custom provider."
     )
 
 

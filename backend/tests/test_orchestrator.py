@@ -30,6 +30,13 @@ def test_expand_roles_no_duplicates():
     assert expanded.count("transcript") == 1
 
 
+def test_study_planner_depends_on_transcript():
+    """Study planner should wait for the canonical organized transcript."""
+    expanded = _expand_roles(["study_planner"], AGENT_DEPENDENCIES)
+    assert set(expanded) == {"study_planner", "transcript"}
+    assert expanded[0] == "study_planner"
+
+
 @pytest.mark.integration
 def test_dependency_failure_blocks_downstream(db, note_factory):
     """When an upstream role fails, pending downstream roles are blocked and the workflow ends in error."""
@@ -65,8 +72,10 @@ def test_dependency_failure_blocks_downstream(db, note_factory):
     assert workflow.role_states["transcript"]["status"] == "error"
     assert workflow.role_states["mindmap"]["status"] == "error"
     assert workflow.role_states["quiz"]["status"] == "error"
-    assert "transcript 失败" in workflow.role_states["mindmap"]["error_message"]
-    assert "transcript 失败" in workflow.role_states["quiz"]["error_message"]
+    # The blocked reason lives in SessionProcessingState (and the audit trail),
+    # not duplicated into the DAG role state.
+    assert "error_message" not in workflow.role_states["mindmap"]
+    assert "error_message" not in workflow.role_states["quiz"]
 
     # SessionProcessingState should also reflect the blocked downstream roles.
     from app.services.state_service import get_state

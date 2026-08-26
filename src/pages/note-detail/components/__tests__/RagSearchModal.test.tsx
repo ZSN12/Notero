@@ -206,6 +206,48 @@ describe('RagSearchModal', () => {
     expect(onRagSourceClick).toHaveBeenCalledWith(sources[0], expect.any(Function));
   });
 
+  it('renders free note source title, page and linked PPT pages', () => {
+    const sources: RAGSource[] = [
+      {
+        chunk_id: 'free-1',
+        notebook_id: 'n1',
+        notebook_title: 'Notebook',
+        session_id: 's1',
+        session_title: 'Session',
+        source_type: 'free_note',
+        snippet: 'Free note snippet',
+        score: 0.88,
+        metadata: {
+          title: '公式推导',
+          pageIndex: 3,
+          slideIndexes: [1, 4],
+          aiBlockTypes: ['summary', 'quiz'],
+        },
+      },
+    ];
+    const messages: RAGMessage[] = [
+      { id: 'a1', session_id: 's1', notebook_id: 'n1', role: 'assistant', content: 'Answer with free note', sources, created_at: '2026-01-01T00:00:00Z' },
+    ];
+    const rag = createRag({ messages });
+
+    render(
+      <RagSearchModal
+        rag={rag as unknown as ReturnType<typeof import('@/pages/note-detail/hooks/useRAG').useRAG>}
+        vectorIndex={vectorIndex as unknown as ReturnType<typeof import('@/pages/note-detail/hooks/useVectorIndex').useVectorIndex>}
+        sessionId="s1"
+        displayNotebook={{ id: 'n1' }}
+        onRagSourceClick={onRagSourceClick}
+        getRagSourceTypeLabel={getRagSourceTypeLabel}
+      />,
+    );
+
+    expect(screen.getByText('公式推导')).toBeInTheDocument();
+    expect(screen.getByText('自由笔记 · 第 3 页')).toBeInTheDocument();
+    expect(screen.getByText('关联课件：2, 5')).toBeInTheDocument();
+    expect(screen.getByText('含 AI 总结 · 含复习题')).toBeInTheDocument();
+    expect(screen.getByText('Free note snippet')).toBeInTheDocument();
+  });
+
   it('shows the first three historical sources by default and can expand the rest', () => {
     const sources = [1, 2, 3, 4, 5].map(makeSource);
     const messages: RAGMessage[] = [

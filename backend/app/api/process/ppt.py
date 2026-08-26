@@ -436,6 +436,29 @@ async def upload_ppt(
         if not slides:
             raise HTTPException(status_code=500, detail="Failed to parse PPT, no slides found")
 
+        # OCR: transcribe the words inside slide images (screenshots, diagrams,
+        # scanned content) so they join the text pipeline and become searchable
+        # through the vector index / RAG. Silent no-op when no vision key.
+        try:
+            from app.services.ocr_service import enrich_slides_with_ocr
+
+            ocr_terms = [session.title, *(session.keywords or [])]
+            ocr_updated = enrich_slides_with_ocr(
+                slides,
+                str(slide_dir),
+                course_terms=ocr_terms,
+            )
+            if ocr_updated:
+                logger.info(
+                    "ppt_ocr_enriched session_id=%s updated_slides=%s",
+                    session_id,
+                    ocr_updated,
+                )
+        except Exception:
+            logger.warning(
+                "ppt_ocr_failed session_id=%s", session_id, exc_info=True
+            )
+
         try:
             keywords = extract_keywords_from_ppt(ppt_path_str, session.title)
             if keywords:

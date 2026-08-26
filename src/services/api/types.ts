@@ -64,8 +64,83 @@ export interface StrokeAnnotation {
   points: { x: number; y: number }[];
 }
 
+export type FreeNoteBackground = 'grid' | 'lined' | 'blank';
+export type FreeNoteReviewStatus = 'normal' | 'important' | 'todo' | 'reviewed';
+export type FreeNoteAiBlockType = 'summary' | 'quiz' | 'explanation';
+
+export interface FreeNoteInsert {
+  id: string;
+  type: 'slide_snapshot' | 'image';
+  slideIndex?: number;
+  dataUrl: string;
+  createdAt: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  fileName?: string;
+}
+
+export interface FreeNoteTextBlock {
+  id: string;
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height?: number;
+  color: string;
+  fontSize: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FreeNoteAiBlock {
+  id: string;
+  type: FreeNoteAiBlockType;
+  title: string;
+  content: string;
+  sourceContext: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FreeNotePageMetadata {
+  page: number;
+  background: FreeNoteBackground;
+  has_strokes: boolean;
+  has_slide_snapshot: boolean;
+  slide_indexes: number[];
+  hasTextBlocks?: boolean;
+  textBlockCount?: number;
+  hasImages?: boolean;
+  imageCount?: number;
+  reviewStatus?: FreeNoteReviewStatus;
+  hasAiBlocks?: boolean;
+  aiBlockCount?: number;
+  aiBlockTypes?: FreeNoteAiBlockType[];
+  updated_at?: string;
+}
+
+export interface FreeNotePage {
+  background?: FreeNoteBackground;
+  title?: string;
+  dataUrl?: string;
+  inserts?: FreeNoteInsert[];
+  textBlocks?: FreeNoteTextBlock[];
+  aiBlocks?: FreeNoteAiBlock[];
+  reviewStatus?: FreeNoteReviewStatus;
+  metadata?: FreeNotePageMetadata;
+  strokes?: StrokeAnnotation[];
+  updated_at?: string;
+}
+
 export interface SessionAnnotations {
   slides: Record<string, StrokeAnnotation[]>;
+  free_notes?: {
+    pages: Record<string, StrokeAnnotation[] | FreeNotePage>;
+    default_background?: FreeNoteBackground;
+    updated_at?: string;
+  };
 }
 
 export interface BackendNote {

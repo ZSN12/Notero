@@ -13,7 +13,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
-from app.models import AgentWorkflow
+from app.models import AgentWorkflow, Task
 from app.services.agent_state_service import INTERRUPTED_MESSAGE
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,9 @@ def sweep_stale_workflows(self) -> dict:
     within ``AGENT_TIMEOUT_SECONDS`` (default 600s). This prevents workflows
     from remaining in ``running`` forever when a worker dies or an LLM call
     hangs.
+
+    The Task row (source of truth) is marked error as well so the UI reads a
+    consistent failure from either representation.
     """
     timeout_seconds = _env_float("AGENT_TIMEOUT_SECONDS", 600.0)
     now = datetime.now(timezone.utc)
@@ -55,7 +58,7 @@ def sweep_stale_workflows(self) -> dict:
 
         fixed = 0
         for workflow in stale_workflows:
-            changed = _mark_stale_roles(workflow, cutoff)
+            changed = _mark_stale_roles(workflow, cutoff, db=db)
             if changed:
                 db.commit()
                 fixed += 1
@@ -77,8 +80,13 @@ def sweep_stale_workflows(self) -> dict:
 def _mark_stale_roles(
     workflow: AgentWorkflow,
     cutoff: datetime,
+    db: DBSession,
 ) -> bool:
-    """Mark stale running roles in ``workflow`` as error. Return True if changed."""
+    """Mark stale running roles in ``workflow`` as error. Return True if changed.
+
+    The role state keeps only DAG fields (status/task_id); the linked Task is
+    the source of truth for the error detail, so it is marked error too.
+    """
     changed = False
     for role, state in list(workflow.role_states.items()):
         if state.get("status") != "running":
@@ -102,9 +110,19 @@ def _mark_stale_roles(
                 heartbeat_at,
             )
             workflow.role_states[role]["status"] = "error"
-            workflow.role_states[role]["error_message"] = INTERRUPTED_MESSAGE
             workflow.role_states = dict(workflow.role_states)
             flag_modified(workflow, "role_states")
+
+            # Mark the linked Task (source of truth) as error too.
+            task_id = state.get("task_id")
+            if task_id:
+                task = db.query(Task).filter(Task.id == task_id).first()
+                if task and task.status in ("pending", "running"):
+                    task.status = "error"
+                    task.progress = 1.0
+                    task.error_message = INTERRUPTED_MESSAGE
+                    task.updated_at = now = datetime.now(timezone.utc)
+                    db.add(task)
             changed = True
 
     if changed:

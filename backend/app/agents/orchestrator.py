@@ -27,6 +27,7 @@ from app.agents.dispatch import dispatch_agent_task
 from app.core.database import SessionLocal
 from app.models import AgentWorkflow, Task, User
 from app.services.agent_state_service import set_agent_queued
+from app.services.agent_trace_service import record_agent_event
 from app.services.state_service import set_error as set_state_error
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ AGENT_DEPENDENCIES: dict[str, list[str]] = {
     "mindmap": ["transcript"],
     "quiz": ["transcript"],
     "review": ["transcript"],
+    "study_planner": ["transcript"],
 }
 
 
@@ -113,6 +115,16 @@ class AgentWorkflowOrchestrator:
             db.add(workflow)
             db.commit()
             db.refresh(workflow)
+            record_agent_event(
+                db,
+                session_id=session_id,
+                user_id=user_id,
+                workflow_id=workflow.id,
+                event_type="workflow_created",
+                message="Agent 工作流已创建",
+                payload={"roles": all_roles, "dependencies": workflow.dependencies},
+            )
+            db.commit()
             logger.info(
                 "workflow_created workflow_id=%s session_id=%s roles=%s",
                 workflow.id,
@@ -148,6 +160,15 @@ class AgentWorkflowOrchestrator:
                     return workflow
 
                 workflow.status = "running"
+                record_agent_event(
+                    db,
+                    session_id=workflow.session_id,
+                    user_id=workflow.user_id,
+                    workflow_id=workflow.id,
+                    event_type="workflow_started",
+                    message="Agent 工作流开始运行",
+                    payload={"ready_roles": self._ready_roles(workflow)},
+                )
                 db.commit()
 
                 ready_roles = self._ready_roles(workflow)
@@ -194,8 +215,20 @@ class AgentWorkflowOrchestrator:
                     return workflow
 
                 workflow.role_states[role]["status"] = "success" if success else "error"
-                if error_message:
-                    workflow.role_states[role]["error_message"] = error_message
+                record_agent_event(
+                    db,
+                    session_id=workflow.session_id,
+                    user_id=workflow.user_id,
+                    workflow_id=workflow.id,
+                    role=role,
+                    event_type="workflow_role_completed",
+                    message="Agent 角色执行完成" if success else "Agent 角色执行失败",
+                    payload={
+                        "role": role,
+                        "success": success,
+                        "error_message": error_message,
+                    },
+                )
                 new_states = dict(workflow.role_states)
                 workflow.role_states = new_states
                 flag_modified(workflow, "role_states")
@@ -221,7 +254,20 @@ class AgentWorkflowOrchestrator:
                             f"前置任务 {role} 失败，未启动{_label_for_role(downstream_role)}生成"
                         )
                         workflow.role_states[downstream_role]["status"] = "error"
-                        workflow.role_states[downstream_role]["error_message"] = blocked_msg
+                        record_agent_event(
+                            db,
+                            session_id=workflow.session_id,
+                            user_id=workflow.user_id,
+                            workflow_id=workflow.id,
+                            role=downstream_role,
+                            event_type="workflow_role_blocked",
+                            message=blocked_msg,
+                            payload={
+                                "role": downstream_role,
+                                "blocked_by": role,
+                                "reason": blocked_msg,
+                            },
+                        )
                         set_state_error(
                             db,
                             workflow.session_id,
@@ -295,6 +341,17 @@ class AgentWorkflowOrchestrator:
                 active.id,
             )
             workflow.role_states[role]["task_id"] = active.id
+            record_agent_event(
+                db,
+                session_id=workflow.session_id,
+                user_id=workflow.user_id,
+                workflow_id=workflow.id,
+                task_id=active.id,
+                role=role,
+                event_type="workflow_role_reused_task",
+                message="复用正在运行的 Agent 任务",
+                payload={"role": role, "task_id": active.id},
+            )
             workflow.role_states = dict(workflow.role_states)
             flag_modified(workflow, "role_states")
             db.commit()
@@ -320,6 +377,17 @@ class AgentWorkflowOrchestrator:
             task.id,
             message="等待后台任务执行",
             user_id=workflow.user_id,
+        )
+        record_agent_event(
+            db,
+            session_id=workflow.session_id,
+            user_id=workflow.user_id,
+            workflow_id=workflow.id,
+            task_id=task.id,
+            role=role,
+            event_type="workflow_role_queued",
+            message="Agent 角色已进入队列",
+            payload={"role": role, "task_id": task.id},
         )
 
         # Preserve workflow-specific timestamps used by the orchestrator.
@@ -360,6 +428,15 @@ class AgentWorkflowOrchestrator:
         any_error = any(s.get("status") == "error" for s in states)
         workflow.status = "error" if any_error else "success"
         workflow.finished_at = datetime.now(timezone.utc)
+        record_agent_event(
+            db,
+            session_id=workflow.session_id,
+            user_id=workflow.user_id,
+            workflow_id=workflow.id,
+            event_type="workflow_finished",
+            message="Agent 工作流已结束",
+            payload={"status": workflow.status},
+        )
         logger.info(
             "workflow_finished workflow_id=%s status=%s",
             self.workflow_id,
@@ -447,6 +524,8 @@ def _stage_for_role(role: str) -> str:
         return "quiz_bank"
     if role == "transcript":
         return "transcript_organize"
+    if role == "study_planner":
+        return "study_plan"
     return role
 
 
@@ -456,6 +535,7 @@ def _label_for_role(role: str) -> str:
         "quiz": "题库",
         "transcript": "转写整理",
         "review": "复习建议",
+        "study_planner": "学习计划",
     }.get(role, role)
 
 

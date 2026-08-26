@@ -38,16 +38,29 @@ class MindmapAgent(BaseAgent):
     def run(self, ctx: AgentContext) -> AgentResult:
         started = time.monotonic()
         try:
-            content_text = ctx.get_content_text_for_agent(max_length=12000)
+            max_length = ctx.input_length_limit or 12000
+            content_text = ctx.get_content_text_for_agent(max_length=max_length)
             if not content_text.strip():
                 return AgentResult(success=False, error_message="没有可用的索引内容")
 
             prompt_template = self.load_prompt_template()
-            prompt = prompt_template.render(
-                title=ctx.session.title or "未命名课次",
-                keywords=ctx.get_keywords_text(),
-                content=content_text,
-            )
+            render_vars = {
+                "title": ctx.session.title or "未命名课次",
+                "keywords": ctx.get_keywords_text(),
+                "content": content_text,
+                "strict_requirements": "",
+            }
+            if ctx.review_feedback:
+                render_vars["review_feedback"] = ctx.review_feedback
+            if ctx.strict_output:
+                render_vars["strict_requirements"] = (
+                    "\n\n## 严格输出要求\n"
+                    "- 必须输出合法且完整的 JSON\n"
+                    "- 不要输出 Markdown 代码块\n"
+                    "- 不要输出任何 JSON 以外的文字\n"
+                    "- 确保最后一个 `]` 和 `}` 都完整输出\n"
+                )
+            prompt = prompt_template.render(**render_vars)
 
             self._update_progress(ctx, 0.10, "准备课程内容")
             self._update_progress(ctx, 0.25, "调用 AI 模型生成导图")

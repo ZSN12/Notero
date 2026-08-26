@@ -19,7 +19,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.exceptions import LLMTimeoutError
-from app.core.llm import ChatMessage, get_default_chat_provider
+from app.core.llm import ChatMessage, get_chat_provider, get_default_chat_provider
 from app.models import Notebook, Note, Session as DBSessionModel, Task, User
 from app.services.prompt_loader import load_prompt
 from app.services.vocabulary_service import build_entry, save_vocabulary_entry
@@ -68,6 +68,12 @@ class AgentContext:
     notebook: Notebook
     force: bool = False
     task: Optional[Task] = None  # Optional task for progress updates
+    review_feedback: Optional[str] = None  # Feedback from a review agent iteration
+
+    # Recovery / self-healing mutable state (set by RecoveryPlanner).
+    provider_name: Optional[str] = None
+    input_length_limit: Optional[int] = None
+    strict_output: bool = False
 
     def get_content_text(self, max_length: Optional[int] = None) -> str:
         """Extract all indexable content from the note into a single text.
@@ -145,6 +151,7 @@ class BaseAgent(ABC):
             raise ValueError(
                 f"Agent subclass {self.__class__.__name__} must define role, task_type, output_kind, and prompt_name"
             )
+        self.ctx: Optional[AgentContext] = None
 
     # ── Public API ──
 
@@ -171,8 +178,11 @@ class BaseAgent(ABC):
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
     ) -> str:
-        """Call the default chat provider with the agent's prompt and return raw text."""
-        provider = get_default_chat_provider()
+        """Call the chat provider with the agent's prompt and return raw text."""
+        if self.ctx and self.ctx.provider_name:
+            provider = get_chat_provider(self.ctx.provider_name)
+        else:
+            provider = get_default_chat_provider()
         if not provider.available:
             raise ValueError(f"未配置可用的 AI Provider，无法运行 Agent '{self.role}'")
 

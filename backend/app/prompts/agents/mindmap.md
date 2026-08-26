@@ -126,6 +126,8 @@
 --- 课堂内容 ---
 $content
 
+$review_feedback
+$strict_requirements
 ---
 要求：
 - 根据课程内容自然划分知识模块，节点数量不硬性规定

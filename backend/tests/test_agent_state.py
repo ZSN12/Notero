@@ -95,10 +95,16 @@ def test_heal_stuck_running_workflow(db, sample_session, admin_user):
     db.refresh(workflow)
     assert workflow.status == "error"
     assert workflow.role_states["mindmap"]["status"] == "error"
-    assert workflow.role_states["mindmap"]["error_message"] == INTERRUPTED_MESSAGE
+    # Heal keeps the DAG role state minimal: no duplicated error detail.
+    assert "error_message" not in workflow.role_states["mindmap"]
 
 
-def test_set_agent_running_syncs_task_state_workflow(db, sample_session, admin_user):
+def test_set_agent_running_updates_task_and_dag(db, sample_session, admin_user):
+    """Running transition writes the Task (source of truth) and the DAG role state.
+
+    The SessionProcessingState row is NOT written for in-flight states: it is
+    derived from the Task when the status endpoint aggregates.
+    """
     workflow = AgentWorkflow(
         session_id=sample_session.id,
         user_id=admin_user.id,
@@ -118,17 +124,18 @@ def test_set_agent_running_syncs_task_state_workflow(db, sample_session, admin_u
     assert task.status == "running"
     assert task.progress == 0.1
 
+    # No SessionProcessingState row is written for in-flight transitions.
     state = db.query(SessionProcessingState).filter(
         SessionProcessingState.session_id == sample_session.id,
         SessionProcessingState.stage == "mindmap",
     ).first()
-    assert state is not None
-    assert state.status == "running"
-    assert state.message == "准备中"
+    assert state is None
 
     db.refresh(workflow)
     assert workflow.role_states["mindmap"]["status"] == "running"
-    assert workflow.role_states["mindmap"]["progress"] == 0.1
+    assert workflow.role_states["mindmap"]["task_id"] == task.id
+    # progress is no longer duplicated into the DAG role state.
+    assert "progress" not in workflow.role_states["mindmap"]
 
 
 def test_set_agent_queued_keeps_task_pending_for_worker(db, sample_session, admin_user):
@@ -155,16 +162,21 @@ def test_set_agent_queued_keeps_task_pending_for_worker(db, sample_session, admi
 
     db.refresh(task)
     assert task.status == "pending"
+    # In-flight queued state is derived from the pending Task at read time;
+    # no SessionProcessingState row is written here.
     state = db.query(SessionProcessingState).filter(
         SessionProcessingState.session_id == sample_session.id,
         SessionProcessingState.stage == "mindmap",
     ).first()
-    assert state is not None
-    assert state.status == "queued"
-    assert state.message == "等待后台任务执行"
+    assert state is None
 
 
-def test_set_agent_ready_syncs_task_state_workflow(db, sample_session, admin_user):
+def test_set_agent_ready_syncs_task_terminal_state(db, sample_session, admin_user):
+    """Ready writes the Task and the terminal SessionProcessingState row.
+
+    The terminal state row is written because it carries the content_hash
+    validity marker the Task row does not have.
+    """
     workflow = AgentWorkflow(
         session_id=sample_session.id,
         user_id=admin_user.id,
@@ -193,9 +205,10 @@ def test_set_agent_ready_syncs_task_state_workflow(db, sample_session, admin_use
 
     db.refresh(workflow)
     assert workflow.role_states["mindmap"]["status"] == "success"
+    assert "progress" not in workflow.role_states["mindmap"]
 
 
-def test_set_agent_error_syncs_task_state_workflow(db, sample_session, admin_user):
+def test_set_agent_error_syncs_task_terminal_state(db, sample_session, admin_user):
     workflow = AgentWorkflow(
         session_id=sample_session.id,
         user_id=admin_user.id,
@@ -224,9 +237,11 @@ def test_set_agent_error_syncs_task_state_workflow(db, sample_session, admin_use
 
     db.refresh(workflow)
     assert workflow.role_states["mindmap"]["status"] == "error"
+    assert "error_message" not in workflow.role_states["mindmap"]
 
 
-def test_set_agent_progress_updates_task_and_state(db, sample_session):
+def test_set_agent_progress_updates_task_only(db, sample_session):
+    """Progress ticks write the Task only; the state row is not touched."""
     task = Task(session_id=sample_session.id, task_type="agent_mindmap", status="running")
     db.add(task)
     state = SessionProcessingState(session_id=sample_session.id, stage="mindmap", status="running")
@@ -238,8 +253,9 @@ def test_set_agent_progress_updates_task_and_state(db, sample_session):
     db.refresh(task)
     assert task.progress == 0.42
     db.refresh(state)
-    assert state.progress == 0.42
-    assert state.message == "调用模型"
+    # In-flight progress no longer mutates the processing-state row.
+    assert state.progress == 0.0
+    assert state.message is None
 
 
 def test_heartbeat_uses_independent_session():

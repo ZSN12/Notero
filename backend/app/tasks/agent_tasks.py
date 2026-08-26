@@ -5,6 +5,7 @@ this module only adapts Celery retries to the runner.
 """
 
 import logging
+import os
 
 from celery.exceptions import Retry
 
@@ -13,6 +14,14 @@ from app.core.database import SessionLocal
 from app.agents.runner import AgentRunner
 
 logger = logging.getLogger(__name__)
+
+
+def _reflection_enabled(role: str) -> bool:
+    """Return True when reflective review should be enabled for the role."""
+    env = os.getenv("AGENT_REFLECTION_ROLES", "mindmap").strip()
+    if env == "*":
+        return True
+    return role in {r.strip() for r in env.split(",") if r.strip()}
 
 
 def _is_retryable_error(message: str | None) -> bool:
@@ -37,7 +46,10 @@ def run_agent(self, session_id: str, user_id: str, role: str, task_id: str) -> d
     db = SessionLocal()
     try:
         runner = AgentRunner()
-        result = runner.run(session_id, user_id, role, task_id, db)
+        result = runner.run(
+            session_id, user_id, role, task_id, db,
+            reflection=_reflection_enabled(role),
+        )
 
         # If the task was already running elsewhere, do not notify or retry.
         if result.skipped:

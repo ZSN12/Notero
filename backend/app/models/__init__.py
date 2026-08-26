@@ -233,6 +233,29 @@ class AgentWorkflow(Base):
     last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class AgentRunEvent(Base):
+    __tablename__ = "agent_run_events"
+    __table_args__ = (
+        Index("ix_agent_run_events_session_created", "session_id", "created_at"),
+        Index("ix_agent_run_events_workflow_created", "workflow_id", "created_at"),
+        Index("ix_agent_run_events_task_created", "task_id", "created_at"),
+    )
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    workflow_id = Column(
+        String(36),
+        ForeignKey("agent_workflows.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    task_id = Column(String(36), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String(50), nullable=True)
+    event_type = Column(String(80), nullable=False)
+    message = Column(Text, nullable=True)
+    payload = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class RAGMessage(Base):
     __tablename__ = "rag_messages"
     __table_args__ = (
@@ -250,4 +273,19 @@ class RAGMessage(Base):
     notebook = relationship("Notebook", back_populates="rag_messages")
 
 
-__all__ = ["Base", "User", "Notebook", "Session", "Note", "File", "Task", "Vocabulary", "CourseTerm", "VectorChunk", "SessionProcessingState", "AgentWorkflow", "RAGMessage"]
+__all__ = [
+    "Base",
+    "User",
+    "Notebook",
+    "Session",
+    "Note",
+    "File",
+    "Task",
+    "Vocabulary",
+    "CourseTerm",
+    "VectorChunk",
+    "SessionProcessingState",
+    "AgentWorkflow",
+    "AgentRunEvent",
+    "RAGMessage",
+]

@@ -215,6 +215,7 @@ def _acknowledge_manual_edit(session_id: str, note: Note, db: Session) -> None:
             "mind_map",
             "organized_transcript",
             "quiz_bank",
+            "study_plan",
         ) and item.get("content_hash") != current_hash:
             next_item = dict(item)
             next_item["content_hash"] = current_hash
@@ -225,7 +226,13 @@ def _acknowledge_manual_edit(session_id: str, note: Note, db: Session) -> None:
     if vocabulary_changed:
         note.vocabulary = next_vocabulary
 
-    for stage in ("transcript_organize", "vector_index", "mindmap", "quiz_bank"):
+    for stage in (
+        "transcript_organize",
+        "vector_index",
+        "mindmap",
+        "quiz_bank",
+        "study_plan",
+    ):
         state = get_state(db, session_id, stage)
         if state and state.status in ("ready", "stale") and state.content_hash != current_hash:
             set_ready(db, session_id, stage, content_hash=current_hash, commit=False)

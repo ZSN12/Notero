@@ -41,6 +41,7 @@ import { RagSearchModal } from './components/RagSearchModal';
 import { ShareModal } from './components/ShareModal';
 import { DragPreviewOverlay } from './components/DragPreviewOverlay';
 import { TodayReviewCard } from './components/TodayReviewCard';
+import { getFreeNoteSourcePage } from '@/pages/pad/lib/ragSourceNavigation';
 
 export { NoteEditableParagraphCards as EditableParagraphCards };
 
@@ -143,6 +144,7 @@ export default function NoteDetail() {
     if (rawType === 'ppt') return 'PPT';
     if (rawType === 'transcript') return '转写';
     if (rawType === 'note') return '笔记';
+    if (rawType === 'free_note') return '自由笔记';
     if (rawType === 'web') return '网页';
     return '资料';
   }, []);
@@ -205,8 +207,13 @@ export default function NoteDetail() {
         return;
       }
 
-      const pageNumber = source.page == null ? null : Number(source.page);
       const typeLabel = getRagSourceTypeLabel(source);
+      const freeNotePage = getFreeNoteSourcePage(source);
+      if (freeNotePage) {
+        navigate(`/subject/${id}/session/${sessionId}/pad?tab=notes&page=${freeNotePage}`, { state: { ragSource: source } });
+        return;
+      }
+      const pageNumber = source.page == null ? null : Number(source.page);
       if (typeLabel === 'PPT' && Number.isFinite(pageNumber) && pageNumber! > 0) {
         ppt.actions.setActiveSlideIndex(pageNumber! - 1);
         return;
@@ -217,7 +224,7 @@ export default function NoteDetail() {
         if (!located) toast.info('已找到来源，但当前页面没有可精确定位的文本块');
       }, 200);
     },
-    [getRagSourceTypeLabel, highlightTranscriptAnchor, highlightTranscriptSnippet, navigate, ppt.actions, sessionId],
+    [getRagSourceTypeLabel, highlightTranscriptAnchor, highlightTranscriptSnippet, id, navigate, ppt.actions, sessionId],
   );
 
   useEffect(() => {
